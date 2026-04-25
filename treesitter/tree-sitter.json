@@ -1,0 +1,40 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "saldo",
+      "camelcase": "Saldo",
+      "title": "Saldo",
+      "scope": "source.saldo",
+      "file-types": [
+        "saldo"
+      ],
+      "injection-regex": "^saldo$",
+      "class-name": "TreeSitterSaldo"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Treesitter grammar for the saldo language",
+    "authors": [
+      {
+        "name": "Sebastian Rollen",
+        "email": "seb@rollen.io",
+        "url": "https://rollen.io/"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/SebRollen/saldo"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": true,
+    "node": true,
+    "python": true,
+    "rust": true,
+    "swift": true,
+    "zig": false
+  }
+}

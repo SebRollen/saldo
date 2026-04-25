@@ -1,0 +1,24 @@
+{
+  "name": "tree-sitter-saldo",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for the Saldo financial modelling language",
+  "keywords": ["parser", "tree-sitter", "saldo"],
+  "files": [
+    "grammar.js",
+    "queries/**",
+    "src/**"
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.0"
+  },
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.saldo",
+      "file-types": ["saldo"]
+    }
+  ]
+}
