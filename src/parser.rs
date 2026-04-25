@@ -227,7 +227,7 @@ where
         just(Token::Ident("quarterly")).to(ScheduleKind::Quarterly),
         just(Token::Ident("yearly")).to(ScheduleKind::Yearly),
         just(Token::Ident("on"))
-            .ignore_then(date.delimited_by(just(Token::LParen), just(Token::RParen)))
+            .ignore_then(date)
             .map(ScheduleKind::On),
     ));
 

@@ -56,4 +56,4 @@ monthly loan_payment {
 
 assert Assets:Cash >= 0
 assert Assets:Retirement:Jim <= 24_500
-assert on(2026-12-31) Assets:Retirement:Beth == 24_500
+assert on 2026-12-31 Assets:Retirement:Beth == 24_500

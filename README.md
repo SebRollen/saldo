@@ -71,7 +71,7 @@ monthly jim_paycheck {
 
 A flow fires on a schedule and posts amounts to accounts. Every flow is a double-entry transaction: if one posting has no amount, it auto-balances to the negation of the sum of the other postings.
 
-**Schedules:** `daily`, `monthly`, `quarterly`, `yearly`, `on(YYYY-MM-DD)`
+**Schedules:** `daily`, `monthly`, `quarterly`, `yearly`, `on YYYY-MM-DD`
 
 - `monthly` fires on the last day of each month
 - `quarterly` fires on the last day of March, June, September, and December
@@ -87,7 +87,7 @@ A flow fires on a schedule and posts amounts to accounts. Every flow is a double
 
 ```
 assert Assets:Cash >= 0
-assert on(2026-12-31) Assets:Retirement:Beth == 24_500
+assert on 2026-12-31 Assets:Retirement:Beth == 24_500
 ```
 
 Assertions are checked after flows run each day. Simulation aborts with an error if any assertion fails.
