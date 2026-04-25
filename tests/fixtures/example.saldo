@@ -27,30 +27,30 @@ param retirement_rate = 0.16
 param bonus_amount    = 50_000
 
 monthly jim_paycheck {
-  Assets:Retirement:Jim min(max_401k - retirement_contribution.ytd, jim_salary * retirement_rate / 12) as retirement_contribution
-  Assets:Cash jim_salary / 12 - retirement_contribution
+  Assets:Retirement:Jim = min(max_401k - retirement_contribution.ytd, jim_salary * retirement_rate / 12) as retirement_contribution
+  Assets:Cash           = jim_salary / 12 - retirement_contribution
   Income:Gross:Salary:Jim
 }
 
 monthly beth_paycheck {
-  Assets:Retirement:Beth min(max_401k - retirement_contribution.ytd, beth_salary * retirement_rate / 12) as retirement_contribution
-  Assets:Cash beth_salary / 12 - retirement_contribution
+  Assets:Retirement:Beth = min(max_401k - retirement_contribution.ytd, beth_salary * retirement_rate / 12) as retirement_contribution
+  Assets:Cash            = beth_salary / 12 - retirement_contribution
   Income:Gross:Salary:Beth
 }
 
 yearly bonus {
-  Assets:Cash bonus_amount
+  Assets:Cash = bonus_amount
   Income:Gross:Bonus
 }
 
 daily interest_accrual {
-  Liabilities:AccruedInterest Liabilities:Loan * interest_rate / 365
+  Liabilities:AccruedInterest = Liabilities:Loan * interest_rate / 365
   Expenses:Interest
 }
 
 monthly loan_payment {
-  Liabilities:AccruedInterest all
-  Liabilities:Loan 2_000
+  Liabilities:AccruedInterest = all
+  Liabilities:Loan            = 2_000
   Assets:Cash
 }
 

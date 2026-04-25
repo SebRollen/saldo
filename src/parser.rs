@@ -242,7 +242,7 @@ where
     // Postings within a flow body are comma-separated.
     let posting = colon_path
         .clone()
-        .then(posting_amount.or_not())
+        .then(just(Token::Eq).ignore_then(posting_amount).or_not())
         .then(just(Token::Ident("as")).ignore_then(ident).or_not())
         .map(
             |((account, amount), leg_name): ((Path, Option<PostingAmount>), Option<&str>)| {
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn parses_flow_with_postings() {
-        let prog = parse("monthly paycheck { Assets:Cash salary_rate / 12\nIncome:Gross }");
+        let prog = parse("monthly paycheck { Assets:Cash = salary_rate / 12\nIncome:Gross }");
         match &prog.decls[0].0 {
             Decl::Flow {
                 name,
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn parses_posting_all() {
-        let prog = parse("monthly loan_payment { Liabilities:AccruedInterest all\nAssets:Cash }");
+        let prog = parse("monthly loan_payment { Liabilities:AccruedInterest = all\nAssets:Cash }");
         match &prog.decls[0].0 {
             Decl::Flow { postings, .. } => {
                 assert!(matches!(&postings[0].amount, Some(PostingAmount::All)));
@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn parses_min_call() {
-        let prog = parse("monthly f { A:B min(A:Cash, 2_000)\nC:D }");
+        let prog = parse("monthly f { A:B = min(A:Cash, 2_000)\nC:D }");
         match &prog.decls[0].0 {
             Decl::Flow { postings, .. } => {
                 let Some(PostingAmount::Expr((e, _))) = &postings[0].amount else {

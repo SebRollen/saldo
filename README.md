@@ -5,20 +5,20 @@ A small domain-specific language for personal financial simulation. You describe
 ## Example
 
 ```
-account Assets:Cash                  = 5_000
-account Liabilities:Loan             = -30_000
+account Assets:Cash       =   5_000
+account Liabilities:Loan  = -30_000
 account Expenses:Interest
 
 param interest_rate = 0.05
 
 daily interest_accrual {
-  Liabilities:AccruedInterest  Liabilities:Loan * interest_rate / 365
+  Liabilities:AccruedInterest = Liabilities:Loan * interest_rate / 365
   Expenses:Interest
 }
 
 monthly loan_payment {
-  Liabilities:AccruedInterest  all
-  Liabilities:Loan             2_000
+  Liabilities:AccruedInterest = all
+  Liabilities:Loan            = 2_000
   Assets:Cash
 }
 
@@ -63,8 +63,8 @@ Parameters are named scalars used inside flow expressions. A parameter can be a 
 
 ```
 monthly jim_paycheck {
-  Assets:Retirement:Jim  min(max_401k - retirement_contribution.ytd, jim_salary * retirement_rate / 12)  as retirement_contribution
-  Assets:Cash            jim_salary / 12 - retirement_contribution
+  Assets:Retirement:Jim = min(max_401k - retirement_contribution.ytd, jim_salary * retirement_rate / 12)  as retirement_contribution
+  Assets:Cash           = jim_salary / 12 - retirement_contribution
   Income:Gross:Salary:Jim
 }
 ```
