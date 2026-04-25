@@ -11,12 +11,12 @@ account Expenses:Interest
 
 param interest_rate = 0.05
 
-daily interest_accrual {
+daily "Interest accrual" {
   Liabilities:AccruedInterest = Liabilities:Loan * interest_rate / 365
   Expenses:Interest
 }
 
-monthly loan_payment {
+monthly "Loan payment" {
   Liabilities:AccruedInterest = all
   Liabilities:Loan            = 2_000
   Assets:Cash
@@ -62,14 +62,16 @@ Parameters are named scalars used inside flow expressions. A parameter can be a 
 ### Flows
 
 ```
-monthly jim_paycheck {
+monthly "Jim's paycheck" {
   Assets:Retirement:Jim = min(max_401k - retirement_contribution.ytd, jim_salary * retirement_rate / 12)  as retirement_contribution
   Assets:Cash           = jim_salary / 12 - retirement_contribution
   Income:Gross:Salary:Jim
-}
+} as jim_paycheck
 ```
 
 A flow fires on a schedule and posts amounts to accounts. Every flow is a double-entry transaction: if one posting has no amount, it auto-balances to the negation of the sum of the other postings.
+
+The string label (e.g. `"Jim's paycheck"`) is mandatory and appears in ledger output. The `as <ident>` alias is optional; add it when you need to reference the flow's named legs from other flows (e.g. `jim_paycheck.retirement_contribution.ytd`).
 
 **Schedules:** `daily`, `monthly`, `quarterly`, `yearly`, `on YYYY-MM-DD`
 
@@ -79,7 +81,7 @@ A flow fires on a schedule and posts amounts to accounts. Every flow is a double
 
 **Named legs** (`as <name>`) make a posting's value referenceable inside the same flow and via period aggregates.
 
-**Period aggregates:** `<leg>.ytd`, `<leg>.qtd`, `<leg>.mtd` accumulate a named leg's value year-to-date, quarter-to-date, or month-to-date. Cross-flow access uses `<flow>.<leg>.ytd`.
+**Period aggregates:** `<leg>.ytd`, `<leg>.qtd`, `<leg>.mtd` accumulate a named leg's value year-to-date, quarter-to-date, or month-to-date. Cross-flow access uses `<flow-alias>.<leg>.ytd`.
 
 **Special amount `all`:** zeroes out the account (posts the negation of its current balance).
 
@@ -101,7 +103,7 @@ Assertions are checked after flows run each day. Simulation aborts with an error
 | `Assets:Cash` | Account or parameter reference |
 | `retirement_contribution` | Named leg reference (within its flow) |
 | `leg.ytd` / `leg.qtd` / `leg.mtd` | Period aggregate |
-| `flow.leg.ytd` | Cross-flow period aggregate |
+| `alias.leg.ytd` | Cross-flow period aggregate |
 | `a + b`, `a - b`, `a * b`, `a / b` | Arithmetic |
 | `a == b`, `a < b`, `a <= b`, `a > b`, `a >= b` | Comparison |
 | `if c then a else b` | Conditional |

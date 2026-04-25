@@ -149,7 +149,7 @@ impl Model {
             if !flow.schedule.matches(t) {
                 continue;
             }
-            env.current_flow = flow.name.clone();
+            env.current_flow = flow.key().to_string();
             let mut explicit: Vec<(Path, Decimal)> = Vec::new();
             let mut auto_leg: Option<(Path, Option<String>)> = None;
 
@@ -157,11 +157,11 @@ impl Model {
                 match &posting.amount {
                     Some(PostingAmount::Expr(e)) => {
                         let amt = eval_num(e, env).map_err(|d| {
-                            d.with_note(flow.span, format!("in flow `{}`", flow.name))
+                            d.with_note(flow.span, format!("in flow `{}`", flow.label))
                         })?;
                         let amt = amt.round_dp(2);
                         if let Some(leg) = &posting.leg_name {
-                            env.leg_values.insert((flow.name.clone(), leg.clone()), amt);
+                            env.leg_values.insert((flow.key().to_string(), leg.clone()), amt);
                         }
                         explicit.push((posting.account.clone(), amt));
                     }
@@ -170,7 +170,7 @@ impl Model {
                         let current = *env.stocks.get(&posting.account).unwrap_or(&Decimal::ZERO);
                         let amt = -current.round_dp(2);
                         if let Some(leg) = &posting.leg_name {
-                            env.leg_values.insert((flow.name.clone(), leg.clone()), amt);
+                            env.leg_values.insert((flow.key().to_string(), leg.clone()), amt);
                         }
                         explicit.push((posting.account.clone(), amt));
                     }
@@ -194,7 +194,7 @@ impl Model {
             if let Some((account, leg_name)) = auto_leg {
                 let auto = -explicit_sum;
                 if let Some(leg) = leg_name {
-                    env.leg_values.insert((flow.name.clone(), leg), auto);
+                    env.leg_values.insert((flow.key().to_string(), leg), auto);
                 }
                 *env.stocks_mut()
                     .entry(account.clone())
@@ -204,7 +204,7 @@ impl Model {
 
             txs.push(Transaction {
                 date: t,
-                flow: flow.name.clone(),
+                flow: flow.label.clone(),
                 postings,
             });
         }

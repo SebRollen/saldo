@@ -139,7 +139,8 @@ pub enum Decl {
         body: ParamBody,
     },
     Flow {
-        name: String,
+        label: String,
+        alias: Option<String>,
         schedule: ScheduleKind,
         postings: Vec<Posting>,
     },

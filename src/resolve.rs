@@ -13,10 +13,19 @@ pub struct Account {
 
 #[derive(Debug)]
 pub struct FlowDef {
-    pub name: String,
+    pub label: String,
+    pub alias: Option<String>,
     pub schedule: ScheduleKind,
     pub postings: Vec<Posting>,
     pub span: Span,
+}
+
+impl FlowDef {
+    /// The internal identifier used for leg namespacing and cross-flow references.
+    /// Equals the alias if present, otherwise the label.
+    pub fn key(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.label)
+    }
 }
 
 #[derive(Debug)]
@@ -32,7 +41,7 @@ pub struct Model {
 pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
     let mut stocks: IndexMap<Path, Account> = IndexMap::new();
     let mut params_map: HashMap<String, ParamBody> = HashMap::new();
-    let mut flow_names: HashMap<String, Span> = HashMap::new();
+    let mut flow_aliases: HashMap<String, Span> = HashMap::new();
     let mut flows: Vec<FlowDef> = Vec::new();
     let mut asserts: Vec<(ScheduleKind, SpannedExpr)> = Vec::new();
     let mut stock_spans: HashMap<Path, Span> = HashMap::new();
@@ -98,21 +107,24 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 param_spans.insert(name.clone(), *span);
             }
             Decl::Flow {
-                name,
+                label,
+                alias,
                 schedule,
                 postings,
             } => {
-                if let Some(prev) = flow_names.get(name) {
-                    diags.push(
-                        Diagnostic::new(*span, format!("duplicate flow `{name}`"))
-                            .with_note(*prev, "previously declared here"),
-                    );
-                    continue;
+                if let Some(a) = alias {
+                    if let Some(prev) = flow_aliases.get(a) {
+                        diags.push(
+                            Diagnostic::new(*span, format!("duplicate flow alias `{a}`"))
+                                .with_note(*prev, "previously declared here"),
+                        );
+                        continue;
+                    }
                 }
                 if postings.is_empty() {
                     diags.push(Diagnostic::new(
                         *span,
-                        format!("flow `{name}` has no postings"),
+                        format!("flow `{label}` has no postings"),
                     ));
                 }
                 // At most one auto-balance leg.
@@ -120,9 +132,11 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 if auto_count > 1 {
                     diags.push(Diagnostic::new(
                         *span,
-                        format!("flow `{name}` has more than one auto-balance posting"),
+                        format!("flow `{label}` has more than one auto-balance posting"),
                     ));
                 }
+
+                let key = alias.as_deref().unwrap_or(label.as_str());
 
                 // Collect and validate named legs.
                 let mut flow_leg_names: HashSet<String> = HashSet::new();
@@ -131,7 +145,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                     if !flow_leg_names.insert(leg.clone()) {
                         diags.push(Diagnostic::new(
                             *span,
-                            format!("duplicate leg name `{leg}` in flow `{name}`"),
+                            format!("duplicate leg name `{leg}` in flow `{label}`"),
                         ));
                     } else if param_spans.contains_key(leg) {
                         diags.push(Diagnostic::new(
@@ -139,15 +153,18 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                             format!("leg name `{leg}` conflicts with a param of the same name"),
                         ));
                     } else {
-                        all_leg_names.insert((name.clone(), leg.clone()));
+                        all_leg_names.insert((key.to_string(), leg.clone()));
                     }
                 }
 
-                flow_names.insert(name.clone(), *span);
+                if let Some(a) = alias {
+                    flow_aliases.insert(a.clone(), *span);
+                }
                 flows.push(FlowDef {
-                    name: name.clone(),
+                    label: label.clone(),
+                    alias: alias.clone(),
                     schedule: schedule.clone(),
-                    postings: topo_sort_postings(postings.clone(), &flow_leg_names, *span, name, &mut diags),
+                    postings: topo_sort_postings(postings.clone(), &flow_leg_names, *span, label, &mut diags),
                     span: *span,
                 });
             }
@@ -233,7 +250,8 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                     }
                 }
             },
-            Decl::Flow { name, postings, .. } => {
+            Decl::Flow { label, alias, postings, .. } => {
+                let key = alias.as_deref().unwrap_or(label.as_str());
                 let flow_legs: HashSet<String> = postings
                     .iter()
                     .filter_map(|p| p.leg_name.as_ref())
@@ -242,7 +260,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 for posting in postings {
                     check_path_is_stock(&posting.account, *span, &mut diags);
                     if let Some(PostingAmount::Expr(e)) = &posting.amount {
-                        check_expr(e, &mut diags, Some(name), &flow_legs);
+                        check_expr(e, &mut diags, Some(key), &flow_legs);
                     }
                 }
             }

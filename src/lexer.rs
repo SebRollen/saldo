@@ -10,6 +10,7 @@ pub enum Token<'src> {
     Float(Decimal),
     Date(NaiveDate),
     Ident(&'src str),
+    Str(String),
     True,
     False,
     Eq,
@@ -39,6 +40,7 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Float(n) => write!(f, "{n}"),
             Token::Date(d) => write!(f, "{}", d.format("%Y-%m-%d")),
             Token::Ident(s) => write!(f, "{s}"),
+            Token::Str(s) => write!(f, "\"{s}\""),
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),
             Token::Eq => write!(f, "="),
@@ -127,6 +129,23 @@ pub fn lexer<'src>(
 
     let ident = text::ascii::ident().map(Token::Ident);
 
+    let string = just('"')
+        .ignore_then(
+            choice((
+                just('\\').ignore_then(choice((
+                    just('"').to('"'),
+                    just('\\').to('\\'),
+                    just('n').to('\n'),
+                    just('t').to('\t'),
+                ))),
+                any().filter(|c: &char| *c != '"' && *c != '\\'),
+            ))
+            .repeated()
+            .collect::<String>(),
+        )
+        .then_ignore(just('"'))
+        .map(Token::Str);
+
     let punct = choice((
         just("==").to(Token::EqEq),
         just("<=").to(Token::LtEq),
@@ -165,6 +184,7 @@ pub fn lexer<'src>(
         date.map(Some),
         boolean.map(Some),
         num.map(Some),
+        string.map(Some),
         ident.map(Some),
         punct.map(Some),
         skip_ws,

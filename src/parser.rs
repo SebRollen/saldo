@@ -260,17 +260,21 @@ where
         .then(expr.clone())
         .map(|(sched, e)| Decl::Assert(sched.unwrap_or(ScheduleKind::Daily), e));
 
-    // `<sched_kind> <ident> { <posting>* }`
+    let str_lit = select! { Token::Str(s) => s };
+
+    // `<sched_kind> <str_lit> { <posting>* } [as <ident>]`
     let flow_decl = sched_kind
-        .then(ident)
+        .then(str_lit)
         .then(
             posting
                 .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|((schedule, name), postings)| Decl::Flow {
-            name: name.to_string(),
+        .then(just(Token::Ident("as")).ignore_then(ident).or_not())
+        .map(|(((schedule, label), postings), alias)| Decl::Flow {
+            label,
+            alias: alias.map(|s: &str| s.to_string()),
             schedule,
             postings,
         });
@@ -365,14 +369,16 @@ mod tests {
 
     #[test]
     fn parses_flow_with_postings() {
-        let prog = parse("monthly paycheck { Assets:Cash = salary_rate / 12\nIncome:Gross }");
+        let prog = parse("monthly \"paycheck\" { Assets:Cash = salary_rate / 12\nIncome:Gross }");
         match &prog.decls[0].0 {
             Decl::Flow {
-                name,
+                label,
+                alias,
                 schedule,
                 postings,
             } => {
-                assert_eq!(name, "paycheck");
+                assert_eq!(label, "paycheck");
+                assert!(alias.is_none());
                 assert!(matches!(schedule, ScheduleKind::Monthly));
                 assert_eq!(postings.len(), 2);
                 assert_eq!(postings[0].account.join(), "Assets:Cash");
@@ -385,8 +391,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_flow_with_alias() {
+        let prog = parse("monthly \"Jim's paycheck\" { Assets:Cash = 1000\nIncome:Gross } as paycheck");
+        match &prog.decls[0].0 {
+            Decl::Flow { label, alias, .. } => {
+                assert_eq!(label, "Jim's paycheck");
+                assert_eq!(alias.as_deref(), Some("paycheck"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
     fn parses_posting_all() {
-        let prog = parse("monthly loan_payment { Liabilities:AccruedInterest = all\nAssets:Cash }");
+        let prog =
+            parse("monthly \"loan payment\" { Liabilities:AccruedInterest = all\nAssets:Cash }");
         match &prog.decls[0].0 {
             Decl::Flow { postings, .. } => {
                 assert!(matches!(&postings[0].amount, Some(PostingAmount::All)));
@@ -427,7 +446,7 @@ mod tests {
 
     #[test]
     fn parses_min_call() {
-        let prog = parse("monthly f { A:B = min(A:Cash, 2_000)\nC:D }");
+        let prog = parse("monthly \"f\" { A:B = min(A:Cash, 2_000)\nC:D }");
         match &prog.decls[0].0 {
             Decl::Flow { postings, .. } => {
                 let Some(PostingAmount::Expr((e, _))) = &postings[0].amount else {
