@@ -1,7 +1,6 @@
 mod ast;
 mod errors;
 mod eval;
-mod layout;
 mod lexer;
 mod parser;
 mod resolve;
@@ -47,7 +46,7 @@ pub fn run(path: &str, opts: &RunOpts) -> Result<(), ()> {
         errors::report(path, &source, &lex_diags);
         return Err(());
     }
-    let tokens = layout::layout(tokens.unwrap());
+    let tokens = tokens.unwrap();
 
     let eoi = (source.len()..source.len()).into();
     let input = tokens.as_slice().map(eoi, |(t, s)| (t, s));

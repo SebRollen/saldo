@@ -237,17 +237,13 @@ where
         expr.clone().map(PostingAmount::Expr),
     ));
 
-    // A posting line: `<colon_path> [<HardSpace> <posting_amount>] [<HardSpace> as <ident>]`
-    // No HardSpace before amount → auto-balance leg (amount = None).
+    // A posting line: `<colon_path> [<posting_amount>] [as <ident>]`
+    // No amount → auto-balance leg (amount = None).
+    // Postings within a flow body are comma-separated.
     let posting = colon_path
         .clone()
-        .then(just(Token::HardSpace).ignore_then(posting_amount).or_not())
-        .then(
-            just(Token::HardSpace)
-                .ignore_then(just(Token::Ident("as")))
-                .ignore_then(ident)
-                .or_not(),
-        )
+        .then(posting_amount.or_not())
+        .then(just(Token::Ident("as")).ignore_then(ident).or_not())
         .map(
             |((account, amount), leg_name): ((Path, Option<PostingAmount>), Option<&str>)| {
                 Posting {
@@ -264,7 +260,7 @@ where
         .then(expr.clone())
         .map(|(sched, e)| Decl::Assert(sched.unwrap_or(ScheduleKind::Daily), e));
 
-    // `<sched_kind> <ident> { <posting>* }` — braces are injected by the layout pass.
+    // `<sched_kind> <ident> { <posting>* }`
     let flow_decl = sched_kind
         .then(ident)
         .then(
@@ -291,7 +287,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::layout;
     use crate::lexer::lexer;
     use chrono::NaiveDate;
     use chumsky::Parser;
@@ -299,7 +294,7 @@ mod tests {
     fn parse(src: &str) -> Program {
         let (tokens, lex_errs) = lexer().parse(src).into_output_errors();
         assert!(lex_errs.is_empty(), "lex errs: {lex_errs:?}");
-        let tokens = layout(tokens.unwrap());
+        let tokens = tokens.unwrap();
         let eoi = (src.len()..src.len()).into();
         let input = tokens.as_slice().map(eoi, |(t, s)| (t, s));
         let (prog, errs) = parser().parse(input).into_output_errors();
@@ -348,7 +343,7 @@ mod tests {
     #[test]
     fn parses_param_schedule() {
         let prog = parse(
-            "param salary_rate : usd/year {\n  from 2026-01-01 to 2026-04-01 = 215_000\n  from 2026-04-01 = 220_000\n}",
+            "param salary_rate : usd/year { from 2026-01-01 to 2026-04-01 = 215_000\nfrom 2026-04-01 = 220_000 }",
         );
         match &prog.decls[0].0 {
             Decl::Param { name, unit, body } => {
@@ -370,7 +365,7 @@ mod tests {
 
     #[test]
     fn parses_flow_with_postings() {
-        let prog = parse("monthly paycheck\n  Assets:Cash  salary_rate / 12\n  Income:Gross\n");
+        let prog = parse("monthly paycheck { Assets:Cash salary_rate / 12\nIncome:Gross }");
         match &prog.decls[0].0 {
             Decl::Flow {
                 name,
@@ -391,8 +386,7 @@ mod tests {
 
     #[test]
     fn parses_posting_all() {
-        let prog =
-            parse("monthly loan_payment\n  Liabilities:AccruedInterest  all\n  Assets:Cash\n");
+        let prog = parse("monthly loan_payment { Liabilities:AccruedInterest all\nAssets:Cash }");
         match &prog.decls[0].0 {
             Decl::Flow { postings, .. } => {
                 assert!(matches!(&postings[0].amount, Some(PostingAmount::All)));
@@ -433,7 +427,7 @@ mod tests {
 
     #[test]
     fn parses_min_call() {
-        let prog = parse("monthly f\n  A:B  min(A:Cash, 2_000)\n  C:D\n");
+        let prog = parse("monthly f { A:B min(A:Cash, 2_000)\nC:D }");
         match &prog.decls[0].0 {
             Decl::Flow { postings, .. } => {
                 let Some(PostingAmount::Expr((e, _))) = &postings[0].amount else {

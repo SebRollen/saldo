@@ -30,8 +30,6 @@ pub enum Token<'src> {
     RParen,
     LBrace,
     RBrace,
-    Indent(usize),
-    HardSpace,
 }
 
 impl<'src> fmt::Display for Token<'src> {
@@ -61,8 +59,6 @@ impl<'src> fmt::Display for Token<'src> {
             Token::RParen => write!(f, ")"),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
-            Token::Indent(n) => write!(f, "<indent:{n}>"),
-            Token::HardSpace => write!(f, "<hardspace>"),
         }
     }
 }
@@ -154,32 +150,14 @@ pub fn lexer<'src>(
 
     let boolean = choice((just("false").to(Token::False), just("true").to(Token::True)));
 
-    // Newline + leading whitespace → Indent(n). Each space or tab counts as 1.
-    let indent = text::newline()
-        .ignore_then(
-            choice((just(' ').to(1usize), just('\t').to(1usize)))
-                .repeated()
-                .collect::<Vec<usize>>(),
-        )
-        .map(|counts| Token::Indent(counts.len()));
-
-    // Tab or 2+ consecutive spaces within a line → HardSpace.
-    let hard_space = choice((
-        just('\t').to(()),
-        just(' ')
-            .repeated()
-            .at_least(2)
-            .collect::<Vec<char>>()
-            .to(()),
-    ))
-    .to(Token::HardSpace);
-
-    // Single space → silently dropped.
-    let skip_space = just(' ').to(None::<Token<'src>>);
-
-    // Line comment → silently dropped (newline is NOT consumed).
+    // Line comment → silently dropped (newline consumed below with other whitespace).
     let comment = just("//")
         .then(any().and_is(text::newline().not()).repeated())
+        .to(None::<Token<'src>>);
+
+    // All whitespace (spaces, tabs, newlines) → silently dropped.
+    let skip_ws = any()
+        .filter(|c: &char| c.is_ascii_whitespace())
         .to(None::<Token<'src>>);
 
     choice((
@@ -189,9 +167,7 @@ pub fn lexer<'src>(
         num.map(Some),
         ident.map(Some),
         punct.map(Some),
-        indent.map(Some),
-        hard_space.map(Some),
-        skip_space,
+        skip_ws,
     ))
     .map_with(|opt, e| opt.map(|t| (t, e.span())))
     .repeated()
@@ -248,46 +224,18 @@ mod tests {
     }
 
     #[test]
-    fn lexes_numbers_with_hard_space() {
-        // Double spaces produce a HardSpace token.
-        let toks = lex("300_000  0.05");
+    fn whitespace_dropped() {
+        // All whitespace — single spaces, multiple spaces, tabs, newlines — is ignored.
+        let toks = lex("a  b\n\tc");
         assert_eq!(
             toks,
-            vec![
-                Token::Integer(300_000),
-                Token::HardSpace,
-                Token::Float(Decimal::new(5, 2)),
-            ]
+            vec![Token::Ident("a"), Token::Ident("b"), Token::Ident("c")]
         );
-    }
-
-    #[test]
-    fn lexes_indent() {
-        let toks = lex("foo\n  bar");
-        assert_eq!(
-            toks,
-            vec![Token::Ident("foo"), Token::Indent(2), Token::Ident("bar"),]
-        );
-    }
-
-    #[test]
-    fn lexes_hard_space() {
-        let toks = lex("a  b");
-        assert_eq!(
-            toks,
-            vec![Token::Ident("a"), Token::HardSpace, Token::Ident("b"),]
-        );
-    }
-
-    #[test]
-    fn single_space_dropped() {
-        let toks = lex("a b");
-        assert_eq!(toks, vec![Token::Ident("a"), Token::Ident("b"),]);
     }
 
     #[test]
     fn line_comment_drops_to_newline() {
         let toks = lex("// a comment\n42");
-        assert_eq!(toks, vec![Token::Indent(0), Token::Integer(42)]);
+        assert_eq!(toks, vec![Token::Integer(42)]);
     }
 }

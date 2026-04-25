@@ -11,14 +11,16 @@ account Expenses:Interest
 
 param interest_rate = 0.05
 
-daily interest_accrual
+daily interest_accrual {
   Liabilities:AccruedInterest  Liabilities:Loan * interest_rate / 365
   Expenses:Interest
+}
 
-monthly loan_payment
+monthly loan_payment {
   Liabilities:AccruedInterest  all
   Liabilities:Loan             2_000
   Assets:Cash
+}
 
 assert Assets:Cash >= 0
 ```
@@ -60,10 +62,11 @@ Parameters are named scalars used inside flow expressions. A parameter can be a 
 ### Flows
 
 ```
-monthly jim_paycheck
+monthly jim_paycheck {
   Assets:Retirement:Jim  min(max_401k - retirement_contribution.ytd, jim_salary * retirement_rate / 12)  as retirement_contribution
   Assets:Cash            jim_salary / 12 - retirement_contribution
   Income:Gross:Salary:Jim
+}
 ```
 
 A flow fires on a schedule and posts amounts to accounts. Every flow is a double-entry transaction: if one posting has no amount, it auto-balances to the negation of the sum of the other postings.
