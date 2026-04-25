@@ -2,11 +2,9 @@ use crate::ast::{
     AggKind, BinOp, Decl, Expr, Interval, ParamBody, Path, Posting, PostingAmount, Program,
     ScheduleKind, SpannedExpr,
 };
-use crate::lexer::Token;
+use crate::{lexer::Token, Span};
 use chumsky::{input::ValueInput, prelude::*};
 use rust_decimal::Decimal;
-
-pub type Span = SimpleSpan<usize>;
 
 pub fn parser<'src, I>(
 ) -> impl Parser<'src, I, Program, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone

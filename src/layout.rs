@@ -1,4 +1,4 @@
-use crate::lexer::{Span, Token};
+use crate::{lexer::Token, Span};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
@@ -91,9 +91,7 @@ pub fn layout(tokens: Vec<(Token<'_>, Span)>) -> Vec<(Token<'_>, Span)> {
                 out.push((token, span));
             }
             // Top-level schedule keywords for flows.
-            Token::Ident("daily" | "monthly" | "quarterly" | "yearly")
-                if mode == Mode::Normal =>
-            {
+            Token::Ident("daily" | "monthly" | "quarterly" | "yearly") if mode == Mode::Normal => {
                 mode = Mode::SeenSched;
                 out.push((token, span));
             }
@@ -138,10 +136,7 @@ mod tests {
     fn lex_and_layout(src: &str) -> Vec<Token<'_>> {
         let (toks, errs) = lexer().parse(src).into_output_errors();
         assert!(errs.is_empty(), "lex errors: {errs:?}");
-        layout(toks.unwrap())
-            .into_iter()
-            .map(|(t, _)| t)
-            .collect()
+        layout(toks.unwrap()).into_iter().map(|(t, _)| t).collect()
     }
 
     #[test]

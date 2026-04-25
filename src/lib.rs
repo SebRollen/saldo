@@ -11,6 +11,7 @@ use chumsky::input::Input;
 use chumsky::prelude::*;
 use rust_decimal::Decimal;
 
+pub use ast::Span;
 pub use lexer::lexer;
 
 pub enum OutputFormat {

@@ -1,10 +1,8 @@
+use crate::Span;
 use chrono::NaiveDate;
 use chumsky::prelude::*;
-use chumsky::span::SimpleSpan;
 use rust_decimal::Decimal;
 use std::fmt;
-
-pub type Span = SimpleSpan<usize>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token<'src> {
