@@ -6,7 +6,6 @@ use std::fmt;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token<'src> {
-    Integer(i64),
     Float(Decimal),
     Date(NaiveDate),
     Ident(&'src str),
@@ -36,7 +35,6 @@ pub enum Token<'src> {
 impl<'src> fmt::Display for Token<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Token::Integer(n) => write!(f, "{n}"),
             Token::Float(n) => write!(f, "{n}"),
             Token::Date(d) => write!(f, "{}", d.format("%Y-%m-%d")),
             Token::Ident(s) => write!(f, "{s}"),
@@ -123,7 +121,7 @@ pub fn lexer<'src>(
                         .parse()
                         .unwrap_or(Decimal::ZERO),
                 ),
-                None => Token::Integer(clean_int.parse().unwrap_or(0)),
+                None => Token::Float(clean_int.parse().unwrap_or(Decimal::ZERO)),
             }
         });
 
@@ -236,7 +234,7 @@ mod tests {
         assert_eq!(
             toks,
             vec![
-                Token::Integer(300_000),
+                Token::Float(Decimal::new(300_000, 0)),
                 Token::Float(Decimal::new(5, 2)),
                 Token::Float(Decimal::new(120_00050, 2)),
             ]
@@ -256,6 +254,6 @@ mod tests {
     #[test]
     fn line_comment_drops_to_newline() {
         let toks = lex("// a comment\n42");
-        assert_eq!(toks, vec![Token::Integer(42)]);
+        assert_eq!(toks, vec![Token::Float(Decimal::new(42, 0))]);
     }
 }

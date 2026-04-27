@@ -4,7 +4,6 @@ use crate::ast::{
 };
 use crate::{lexer::Token, Span};
 use chumsky::{input::ValueInput, prelude::*};
-use rust_decimal::Decimal;
 
 pub fn parser<'src, I>(
 ) -> impl Parser<'src, I, Program, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
@@ -21,29 +20,18 @@ where
     };
 
     let number = select! {
-        Token::Integer(n) => Decimal::from(n),
         Token::Float(f) => f,
     };
 
     let date = select! { Token::Date(d) => d }.labelled("date");
 
-    // A colon-path segment: either a plain ident or a digit-starting mixed name
-    // (e.g. "401k" is lexed as Integer(401) + Ident("k")).
-    let path_segment = choice((
-        select! { Token::Integer(n) => n.to_string() }
-            .then(ident.map(str::to_string).or_not())
-            .map(|(n, s): (String, Option<String>)| match s {
-                Some(s) => format!("{n}{s}"),
-                None => n,
-            }),
-        ident.map(str::to_string),
-    ));
-
     // Colon-separated path: `Assets:Cash`, `Income:Gross`, `Assets:401k`, etc.
-    let colon_path = path_segment
+    let colon_path = ident
+        .map(|i| i.to_string())
         .then(
             just(Token::Colon)
-                .ignore_then(path_segment)
+                .ignore_then(ident)
+                .map(|i| i.to_string())
                 .repeated()
                 .collect::<Vec<_>>(),
         )
@@ -392,7 +380,8 @@ mod tests {
 
     #[test]
     fn parses_flow_with_alias() {
-        let prog = parse("monthly \"Jim's paycheck\" { Assets:Cash = 1000\nIncome:Gross } as paycheck");
+        let prog =
+            parse("monthly \"Jim's paycheck\" { Assets:Cash = 1000\nIncome:Gross } as paycheck");
         match &prog.decls[0].0 {
             Decl::Flow { label, alias, .. } => {
                 assert_eq!(label, "Jim's paycheck");

@@ -85,9 +85,10 @@ impl ScheduleKind {
         match self {
             ScheduleKind::Daily => true,
             ScheduleKind::Monthly => t.day() == days_in_month(t.year(), t.month()),
-            ScheduleKind::Quarterly => {
-                matches!(t.month(), 3 | 6 | 9 | 12) && t.day() == days_in_month(t.year(), t.month())
-            }
+            ScheduleKind::Quarterly => match (t.month(), t.day()) {
+                (3 | 12, 31) | (6 | 9, 30) => true,
+                _ => false,
+            },
             ScheduleKind::Yearly => t.month() == 12 && t.day() == 31,
             ScheduleKind::On(d) => t == *d,
         }
@@ -150,4 +151,27 @@ pub enum Decl {
 #[derive(Clone, Debug)]
 pub struct Program {
     pub decls: Vec<(Decl, Span)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fmt_path() {
+        assert_eq!("Single", Path(vec!["Single".to_string()]).to_string());
+        assert_eq!(
+            "Single:Double",
+            Path(vec!["Single".to_string(), "Double".to_string()]).to_string()
+        );
+        assert_eq!(
+            "Single:Double:Triple",
+            Path(vec![
+                "Single".to_string(),
+                "Double".to_string(),
+                "Triple".to_string()
+            ])
+            .to_string()
+        );
+    }
 }
