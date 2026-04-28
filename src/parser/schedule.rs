@@ -4,7 +4,7 @@ use crate::{lexer::Token, Span};
 use chrono::NaiveDate;
 use chumsky::{input::ValueInput, prelude::*};
 
-pub fn parse_schedules<'src, I>(
+pub fn parse_schedule<'src, I>(
 ) -> impl Parser<'src, I, Schedule, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,

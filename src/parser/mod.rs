@@ -6,6 +6,7 @@ use crate::ast::{
 };
 use crate::{lexer::Token, Span};
 use chumsky::{input::ValueInput, prelude::*};
+use schedule::parse_schedule;
 
 pub fn parser<'src, I>(
 ) -> impl Parser<'src, I, Program, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
@@ -180,6 +181,16 @@ where
         .then(just(Token::Eq).ignore_then(expr.clone()).or_not())
         .map(|(name, init)| Decl::Account { name, init });
 
+    // `schedule <schedule>`
+    let schedule_decl = just(Token::Ident("schedule"))
+        .ignore_then(ident)
+        .then_ignore(just(Token::Eq))
+        .then(parse_schedule())
+        .map(|(name, schedule)| Decl::Schedule {
+            name: name.to_string(),
+            schedule,
+        });
+
     // `from <date> [to <date>] = <expr>`
     let interval = just(Token::Ident("from"))
         .ignore_then(date)
@@ -269,8 +280,14 @@ where
             postings,
         });
 
-    let decl =
-        choice((account_decl, param_decl, assert_decl, flow_decl)).map_with(|d, e| (d, e.span()));
+    let decl = choice((
+        account_decl,
+        schedule_decl,
+        param_decl,
+        assert_decl,
+        flow_decl,
+    ))
+    .map_with(|d, e| (d, e.span()));
 
     decl.repeated()
         .collect::<Vec<_>>()

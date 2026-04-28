@@ -64,6 +64,9 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                     stocks.insert(name.clone(), Account { init: init.clone() });
                 }
             }
+            Decl::Schedule { name, schedule } => {
+                // TODO: resolve schedules
+            }
             Decl::Param { name, body, .. } => {
                 if let Some(prev) = param_spans.get(name) {
                     diags.push(

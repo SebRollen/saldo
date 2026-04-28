@@ -3,6 +3,7 @@ pub mod schedule;
 use chrono::{Datelike, NaiveDate};
 use chumsky::span::SimpleSpan;
 use rust_decimal::Decimal;
+use schedule::Schedule;
 
 pub type Span = SimpleSpan<usize>;
 pub type SpannedExpr = (Box<Expr>, Span);
@@ -134,6 +135,10 @@ pub enum Decl {
     Account {
         name: Path,
         init: Option<SpannedExpr>,
+    },
+    Schedule {
+        name: String,
+        schedule: Schedule,
     },
     Param {
         name: String,
