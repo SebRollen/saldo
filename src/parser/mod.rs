@@ -1,3 +1,5 @@
+mod schedule;
+
 use crate::ast::{
     AggKind, BinOp, Decl, Expr, Interval, ParamBody, Path, Posting, PostingAmount, Program,
     ScheduleKind, SpannedExpr,

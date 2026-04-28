@@ -1,3 +1,5 @@
+pub mod schedule;
+
 use chrono::{Datelike, NaiveDate};
 use chumsky::span::SimpleSpan;
 use rust_decimal::Decimal;
