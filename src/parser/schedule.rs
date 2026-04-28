@@ -3,6 +3,7 @@ use crate::ast::schedule::{Dow, Every, Month, MonthOccurrence, Ordinal, Period, 
 use crate::{lexer::Token, Span};
 
 use chumsky::{input::ValueInput, prelude::*};
+use rust_decimal::Decimal;
 
 pub fn parse_schedule<'src, I>(
 ) -> impl Parser<'src, I, Schedule, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
@@ -18,6 +19,10 @@ where
     // <nth> ::= "2nd" | "3rd" | [4-9] "th" | "second" | "third" | "fourth" | "fifth" | "sixth" | "seventh" | "eighth" | "ninth"
     let nth = choice((
         select! { Token::Ordinal(n) if n >= 2 => Ordinal::Nth(n) },
+        select! { Token::Float(n)
+            if n.fract() == Decimal::ZERO && n >= Decimal::from(2) && n <= Decimal::from(255)
+            => Ordinal::Nth(n.to_string().parse().unwrap())
+        },
         ident_ci("second").to(Ordinal::Nth(2)),
         ident_ci("third").to(Ordinal::Nth(3)),
         ident_ci("fourth").to(Ordinal::Nth(4)),
@@ -58,16 +63,16 @@ where
 
     // <dow> ::= "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday" | "weekday" | "weekend day"
     let dow = choice((
-        ident_ci("monday").or(ident_ci("mon")).to(Dow::Monday),
-        ident_ci("tuesday").or(ident_ci("tue")).to(Dow::Tuesday),
-        ident_ci("wednesday").or(ident_ci("wed")).to(Dow::Wednesday),
-        ident_ci("thursday").or(ident_ci("thu")).to(Dow::Thursday),
-        ident_ci("friday").or(ident_ci("fri")).to(Dow::Friday),
-        ident_ci("saturday").or(ident_ci("sat")).to(Dow::Saturday),
-        ident_ci("sunday").or(ident_ci("sun")).to(Dow::Sunday),
-        ident_ci("weekday").to(Dow::Weekday),
+        ident_ci("monday").or(ident_ci("mondays")).or(ident_ci("mon")).to(Dow::Monday),
+        ident_ci("tuesday").or(ident_ci("tuesdays")).or(ident_ci("tue")).to(Dow::Tuesday),
+        ident_ci("wednesday").or(ident_ci("wednesdays")).or(ident_ci("wed")).to(Dow::Wednesday),
+        ident_ci("thursday").or(ident_ci("thursdays")).or(ident_ci("thu")).to(Dow::Thursday),
+        ident_ci("friday").or(ident_ci("fridays")).or(ident_ci("fri")).to(Dow::Friday),
+        ident_ci("saturday").or(ident_ci("saturdays")).or(ident_ci("sat")).to(Dow::Saturday),
+        ident_ci("sunday").or(ident_ci("sundays")).or(ident_ci("sun")).to(Dow::Sunday),
+        ident_ci("weekday").or(ident_ci("weekdays")).to(Dow::Weekday),
         ident_ci("weekend")
-            .then(ident_ci("day").or_not())
+            .then(ident_ci("days").or(ident_ci("day")).or_not())
             .to(Dow::WeekendDay),
     ));
 
@@ -97,11 +102,12 @@ where
     let dow_list = comma_list(dow.clone());
 
     // <day> ::= "day"
-    let day = ident_ci("day").to(Period::Day);
+    let day = ident_ci("day").or(ident_ci("days")).to(Period::Day);
 
     // <week> ::= "week" (" on " <dow_list>)?
     let week = ident_ci("week")
-        .ignore_then(ident_ci("on").ignore_then(dow_list).or_not())
+        .or(ident_ci("weeks"))
+        .ignore_then(ident_ci("on").ignore_then(dow_list.clone()).or_not())
         .map(|dows| {
             let on = dows.unwrap_or_else(Vec::new);
             Period::Week { on }
@@ -114,10 +120,11 @@ where
             .then(ordinal.clone().or_not())
             .map(|(month, day)| Period::NamedMonth { month, day }),
         ident_ci("month")
+            .or(ident_ci("months"))
             .ignore_then(
                 ident_ci("on")
                     .ignore_then(ident_ci("the"))
-                    .ignore_then(month_occurrence_list)
+                    .ignore_then(month_occurrence_list.clone())
                     .or_not(),
             )
             .map(|on| Period::Month {
@@ -126,13 +133,14 @@ where
     ));
 
     // <quarter> ::= "quarter"
-    let quarter = ident_ci("quarter").to(Period::Quarter);
+    let quarter = ident_ci("quarter").or(ident_ci("quarters")).to(Period::Quarter);
 
     // <year> ::= "year" (" on " <month_name> <ordinal>)?
     let year = ident_ci("year")
+        .or(ident_ci("years"))
         .ignore_then(
             ident_ci("on")
-                .ignore_then(month_name)
+                .ignore_then(month_name.clone())
                 .then(ordinal.clone())
                 .or_not(),
         )
@@ -168,8 +176,35 @@ where
             start: Some(start),
         });
 
-    // <every> ::= <simple_every> | <anchored_every>
-    let every = choice((simple_every, anchored_every)).map(Schedule::Every);
+    // daily | weekly [on <dow_list>] | monthly [on the <month_occurrence_list>] | quarterly | yearly/annually [on <month> <ordinal>]
+    let adverbial = choice((
+        ident_ci("daily").to(Period::Day),
+        ident_ci("weekly")
+            .ignore_then(ident_ci("on").ignore_then(dow_list).or_not())
+            .map(|dows| Period::Week { on: dows.unwrap_or_default() }),
+        ident_ci("monthly")
+            .ignore_then(
+                ident_ci("on")
+                    .ignore_then(ident_ci("the"))
+                    .ignore_then(month_occurrence_list)
+                    .or_not(),
+            )
+            .map(|on| Period::Month { on: on.unwrap_or_default() }),
+        ident_ci("quarterly").to(Period::Quarter),
+        ident_ci("yearly")
+            .or(ident_ci("annually"))
+            .ignore_then(
+                ident_ci("on")
+                    .ignore_then(month_name)
+                    .then(ordinal.clone())
+                    .or_not(),
+            )
+            .map(|on| Period::Year { on }),
+    ))
+    .map(|period| Every { nth: None, period, start: None });
+
+    // <every> ::= <simple_every> | <anchored_every> | <adverbial>
+    let every = choice((simple_every, anchored_every, adverbial)).map(Schedule::Every);
 
     // <shifter> ::= <ordinal> " " <dow> " on or"? (" before " | " after ")
     let _shifter = ordinal
@@ -461,6 +496,51 @@ mod tests {
                     assert_eq!(Ordinal::Nth(5), ordinal);
                 }
             }
+        }
+
+        mod adverbial {
+            use super::*;
+
+            #[test]
+            fn daily() {
+                let sched = parse("daily");
+                let Schedule::Every(every) = sched else { panic!("not an every") };
+                assert!(every.nth.is_none());
+                assert!(every.start.is_none());
+                assert_eq!(Period::Day, every.period);
+            }
+
+            #[test]
+            fn weekly_with_on() {
+                let sched = parse("weekly on monday and wednesday");
+                let Schedule::Every(every) = sched else { panic!("not an every") };
+                let Period::Week { on } = every.period else { panic!("not a week") };
+                assert_eq!(vec![Dow::Monday, Dow::Wednesday], on);
+            }
+
+            #[test]
+            fn monthly_with_on() {
+                let sched = parse("monthly on the 1st and last day");
+                let Schedule::Every(every) = sched else { panic!("not an every") };
+                let Period::Month { on } = every.period else { panic!("not a month") };
+                assert_eq!(2, on.len());
+                assert_eq!(MonthOccurrence::Day(Ordinal::Nth(1)), on[0]);
+                assert_eq!(MonthOccurrence::Day(Ordinal::Last), on[1]);
+            }
+        }
+
+        #[test]
+        fn numeric_plural_form() {
+            let sched = parse("every 2 fridays starting on 2025-01-01");
+            let Schedule::Every(every) = sched else {
+                panic!("not an every")
+            };
+            assert_eq!(Some(Ordinal::Nth(2)), every.nth);
+            assert_eq!(
+                Some(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()),
+                every.start
+            );
+            assert_eq!(Period::Weekday(Dow::Friday), every.period);
         }
 
         #[test]
