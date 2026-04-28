@@ -1,10 +1,11 @@
 use crate::ast::{
-    Decl, Expr, ParamBody, Path, Posting, PostingAmount, Program, ScheduleKind, Span, SpannedExpr
+    Decl, Expr, ParamBody, Path, Posting, PostingAmount, Program, ScheduleRef, Schedule, Span, SpannedExpr
 };
 use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet, VecDeque};
+use crate::ast::schedule::{Every, Period};
 
 #[derive(Debug, Clone)]
 pub struct Account {
@@ -15,7 +16,7 @@ pub struct Account {
 pub struct FlowDef {
     pub label: String,
     pub alias: Option<String>,
-    pub schedule: ScheduleKind,
+    pub schedule: Schedule,
     pub postings: Vec<Posting>,
     pub span: Span,
 }
@@ -34,23 +35,40 @@ pub struct Model {
     pub stocks: IndexMap<Path, Account>,
     pub params: IndexMap<String, ParamBody>,
     pub flows: Vec<FlowDef>,
-    pub asserts: Vec<(ScheduleKind, SpannedExpr)>,
+    pub asserts: Vec<(Schedule, SpannedExpr)>,
     pub leg_names: HashSet<(String, String)>,
 }
 
 pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
     let mut stocks: IndexMap<Path, Account> = IndexMap::new();
+    let mut schedules: IndexMap<String, Schedule> = IndexMap::new();
     let mut params_map: HashMap<String, ParamBody> = HashMap::new();
     let mut flow_aliases: HashMap<String, Span> = HashMap::new();
     let mut flows: Vec<FlowDef> = Vec::new();
-    let mut asserts: Vec<(ScheduleKind, SpannedExpr)> = Vec::new();
+    let mut asserts: Vec<(Schedule, SpannedExpr)> = Vec::new();
+    let mut schedule_spans: HashMap<String, Span> = HashMap::new();
     let mut stock_spans: HashMap<Path, Span> = HashMap::new();
     let mut param_spans: HashMap<String, Span> = HashMap::new();
     // (flow_name, leg_name) pairs — legs are namespaced under their flow.
     let mut all_leg_names: HashSet<(String, String)> = HashSet::new();
     let mut diags: Vec<Diagnostic> = Vec::new();
 
-    // Pass 1: collect declarations, enforce unique names.
+    // Pass 1: collect schedule decls so they can be resolved in next pass
+    for (decl, span) in &program.decls {
+        if let Decl::Schedule { name, schedule } = decl {
+            if let Some(prev) = schedule_spans.get(name) {
+                    diags.push(
+                        Diagnostic::new(*span, format!("duplicate schedule `{name}`"))
+                            .with_note(*prev, "previously declared here"),
+                    );
+
+            } else {
+                schedule_spans.insert(name.clone(), *span);
+                schedules.insert(name.clone(), schedule.clone());
+            }
+        }
+    }
+    // Pass 2: collect declarations, enforce unique names.
     for (decl, span) in &program.decls {
         match decl {
             Decl::Account { name, init } => {
@@ -63,6 +81,9 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                     stock_spans.insert(name.clone(), *span);
                     stocks.insert(name.clone(), Account { init: init.clone() });
                 }
+            }
+            Decl::Schedule { .. } => {
+                // already processed in previous pass
             }
             Decl::Param { name, body, .. } => {
                 if let Some(prev) = param_spans.get(name) {
@@ -160,6 +181,21 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 if let Some(a) = alias {
                     flow_aliases.insert(a.clone(), *span);
                 }
+                let schedule = match schedule {
+                    ScheduleRef::Literal(s) => s,
+                    ScheduleRef::Named(n) => {
+                        match schedules.get(n) {
+                            Some(s) => s,
+                            None => {
+                                diags.push(Diagnostic::new(
+                                        *span,
+                                        format!("schedule `{n}` is not defined")
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                };
                 flows.push(FlowDef {
                     label: label.clone(),
                     alias: alias.clone(),
@@ -168,11 +204,32 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                     span: *span,
                 });
             }
-            Decl::Assert(sched, e) => asserts.push((sched.clone(), e.clone())),
+            Decl::Assert(sched, e) => {
+                let schedule = match sched {
+                    None => {
+                        // Default to daily check
+                        Schedule::Every(Every { period: Period::Day, nth: None, start: None })
+                    },
+                    Some(ScheduleRef::Literal(s)) => s.clone(),
+                    Some(ScheduleRef::Named(n)) => {
+                        match schedules.get(n) {
+                            Some(s) => s.clone(),
+                            None => {
+                                diags.push(Diagnostic::new(
+                                        *span,
+                                        format!("schedule `{n}` is not defined")
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                };
+                asserts.push((schedule, e.clone()))
+            },
         }
     }
 
-    // Pass 2: reference checks.
+    // Pass 3: reference checks.
     let stock_set: HashSet<Path> = stocks.keys().cloned().collect();
     let param_set: HashSet<String> = params_map.keys().cloned().collect();
 

@@ -1,6 +1,9 @@
-use chrono::{Datelike, NaiveDate};
+pub mod schedule;
+
+use chrono::NaiveDate;
 use chumsky::span::SimpleSpan;
 use rust_decimal::Decimal;
+pub use schedule::Schedule;
 
 pub type Span = SimpleSpan<usize>;
 pub type SpannedExpr = (Box<Expr>, Span);
@@ -60,39 +63,9 @@ pub enum Expr {
 }
 
 #[derive(Clone, Debug)]
-pub enum ScheduleKind {
-    Daily,
-    Monthly,
-    Quarterly,
-    Yearly,
-    On(NaiveDate),
-}
-
-impl ScheduleKind {
-    pub fn matches(&self, t: NaiveDate) -> bool {
-        fn days_in_month(year: i32, month: u32) -> u32 {
-            let (following_year, following_month) = if month == 12 {
-                (year + 1, 1)
-            } else {
-                (year, month + 1)
-            };
-            NaiveDate::from_ymd_opt(following_year, following_month, 1)
-                .and_then(|d| d.pred_opt())
-                .map(|d| d.day())
-                .unwrap_or(28)
-        }
-
-        match self {
-            ScheduleKind::Daily => true,
-            ScheduleKind::Monthly => t.day() == days_in_month(t.year(), t.month()),
-            ScheduleKind::Quarterly => match (t.month(), t.day()) {
-                (3 | 12, 31) | (6 | 9, 30) => true,
-                _ => false,
-            },
-            ScheduleKind::Yearly => t.month() == 12 && t.day() == 31,
-            ScheduleKind::On(d) => t == *d,
-        }
-    }
+pub enum ScheduleRef {
+    Literal(Schedule),
+    Named(String),
 }
 
 #[derive(Clone, Debug)]
@@ -133,6 +106,10 @@ pub enum Decl {
         name: Path,
         init: Option<SpannedExpr>,
     },
+    Schedule {
+        name: String,
+        schedule: Schedule,
+    },
     Param {
         name: String,
         #[allow(dead_code)]
@@ -142,10 +119,10 @@ pub enum Decl {
     Flow {
         label: String,
         alias: Option<String>,
-        schedule: ScheduleKind,
+        schedule: ScheduleRef,
         postings: Vec<Posting>,
     },
-    Assert(ScheduleKind, SpannedExpr),
+    Assert(Option<ScheduleRef>, SpannedExpr),
 }
 
 #[derive(Clone, Debug)]

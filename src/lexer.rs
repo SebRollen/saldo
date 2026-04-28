@@ -10,6 +10,7 @@ pub enum Token<'src> {
     Date(NaiveDate),
     Ident(&'src str),
     Str(String),
+    Ordinal(u8),
     True,
     False,
     Eq,
@@ -39,6 +40,19 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Date(d) => write!(f, "{}", d.format("%Y-%m-%d")),
             Token::Ident(s) => write!(f, "{s}"),
             Token::Str(s) => write!(f, "\"{s}\""),
+            Token::Ordinal(i) => {
+                let suffix = if *i == 11 || *i == 12 || *i == 13 {
+                    "th"
+                } else {
+                    match i % 10 {
+                        1 => "st",
+                        2 => "nd",
+                        3 => "rd",
+                        _ => "th",
+                    }
+                };
+                write!(f, "{i}{suffix}")
+            }
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),
             Token::Eq => write!(f, "="),
@@ -102,6 +116,19 @@ pub fn lexer<'src>(
         });
 
     let date = choice((at_date, bare_date));
+
+    let ordinal_suffix = choice((just("st"), just("nd"), just("rd"), just("th")));
+
+    let ordinal = digit
+        .repeated()
+        .at_least(1)
+        .collect::<String>()
+        .then_ignore(ordinal_suffix)
+        .try_map(|n, span| {
+            n.parse::<u8>()
+                .map(Token::Ordinal)
+                .map_err(|_| Rich::custom(span, format!("ordinal out of range: {n}")))
+        });
 
     let digits_with_underscores = any()
         .filter(|c: &char| c.is_ascii_digit() || *c == '_')
@@ -181,6 +208,7 @@ pub fn lexer<'src>(
         comment,
         date.map(Some),
         boolean.map(Some),
+        ordinal.map(Some),
         num.map(Some),
         string.map(Some),
         ident.map(Some),

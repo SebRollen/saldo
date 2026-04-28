@@ -1,9 +1,13 @@
+mod schedule;
+mod util;
+
 use crate::ast::{
     AggKind, BinOp, Decl, Expr, Interval, ParamBody, Path, Posting, PostingAmount, Program,
-    ScheduleKind, SpannedExpr,
+    ScheduleRef, SpannedExpr,
 };
 use crate::{lexer::Token, Span};
 use chumsky::{input::ValueInput, prelude::*};
+use schedule::parse_schedule;
 
 pub fn parser<'src, I>(
 ) -> impl Parser<'src, I, Program, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
@@ -178,6 +182,16 @@ where
         .then(just(Token::Eq).ignore_then(expr.clone()).or_not())
         .map(|(name, init)| Decl::Account { name, init });
 
+    // `schedule <schedule>`
+    let schedule_decl = just(Token::Ident("schedule"))
+        .ignore_then(ident)
+        .then_ignore(just(Token::Eq))
+        .then(parse_schedule())
+        .map(|(name, schedule)| Decl::Schedule {
+            name: name.to_string(),
+            schedule,
+        });
+
     // `from <date> [to <date>] = <expr>`
     let interval = just(Token::Ident("from"))
         .ignore_then(date)
@@ -209,14 +223,16 @@ where
             },
         );
 
-    let sched_kind = choice((
-        just(Token::Ident("daily")).to(ScheduleKind::Daily),
-        just(Token::Ident("monthly")).to(ScheduleKind::Monthly),
-        just(Token::Ident("quarterly")).to(ScheduleKind::Quarterly),
-        just(Token::Ident("yearly")).to(ScheduleKind::Yearly),
-        just(Token::Ident("on"))
-            .ignore_then(date)
-            .map(ScheduleKind::On),
+    let schedule_ref = choice((
+        parse_schedule().map(ScheduleRef::Literal),
+        // Named ref — exclude expression-starting idents: followed by `:` (colon_path),
+        // followed by `(` (function call), or the `if` keyword.
+        ident
+            .filter(|s: &&str| *s != "if")
+            .then_ignore(just(Token::Colon).not())
+            .then_ignore(just(Token::LParen).not())
+            .then_ignore(just(Token::Period).not())
+            .map(|s: &str| ScheduleRef::Named(s.to_string())),
     ));
 
     // A posting amount: `all` or an expression.
@@ -242,16 +258,16 @@ where
             },
         );
 
-    // `assert [<sched_kind>] <expr>` — schedule defaults to Daily.
+    // `assert [<schedule_ref>] <expr>` — schedule defaults to Daily.
     let assert_decl = just(Token::Ident("assert"))
-        .ignore_then(sched_kind.clone().or_not())
+        .ignore_then(schedule_ref.clone().or_not())
         .then(expr.clone())
-        .map(|(sched, e)| Decl::Assert(sched.unwrap_or(ScheduleKind::Daily), e));
+        .map(|(sched, e)| Decl::Assert(sched, e));
 
     let str_lit = select! { Token::Str(s) => s };
 
-    // `<sched_kind> <str_lit> { <posting>* } [as <ident>]`
-    let flow_decl = sched_kind
+    // `<schedule_ref> <str_lit> { <posting>* } [as <ident>]`
+    let flow_decl = schedule_ref
         .then(str_lit)
         .then(
             posting
@@ -267,8 +283,14 @@ where
             postings,
         });
 
-    let decl =
-        choice((account_decl, param_decl, assert_decl, flow_decl)).map_with(|d, e| (d, e.span()));
+    let decl = choice((
+        account_decl,
+        schedule_decl,
+        param_decl,
+        assert_decl,
+        flow_decl,
+    ))
+    .map_with(|d, e| (d, e.span()));
 
     decl.repeated()
         .collect::<Vec<_>>()
@@ -279,7 +301,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::lexer;
+    use crate::{ast::schedule::Schedule, lexer::lexer};
     use chrono::NaiveDate;
     use chumsky::Parser;
 
@@ -367,7 +389,7 @@ mod tests {
             } => {
                 assert_eq!(label, "paycheck");
                 assert!(alias.is_none());
-                assert!(matches!(schedule, ScheduleKind::Monthly));
+                assert!(matches!(schedule, ScheduleRef::Literal(Schedule::Every(_))));
                 assert_eq!(postings.len(), 2);
                 assert_eq!(postings[0].account.join(), "Assets:Cash");
                 assert!(postings[0].amount.is_some());
@@ -406,10 +428,7 @@ mod tests {
     #[test]
     fn parses_assert() {
         let prog = parse("assert Assets:Cash >= 0");
-        assert!(matches!(
-            prog.decls[0].0,
-            Decl::Assert(ScheduleKind::Daily, _)
-        ));
+        assert!(matches!(prog.decls[0].0, Decl::Assert(None, _)));
     }
 
     #[test]
@@ -417,19 +436,19 @@ mod tests {
         let prog = parse("assert yearly Assets:Retirement >= 0");
         assert!(matches!(
             prog.decls[0].0,
-            Decl::Assert(ScheduleKind::Yearly, _)
+            Decl::Assert(Some(ScheduleRef::Literal(_)), _)
         ));
 
         let prog = parse("assert quarterly Assets:Cash >= 0");
         assert!(matches!(
             prog.decls[0].0,
-            Decl::Assert(ScheduleKind::Quarterly, _)
+            Decl::Assert(Some(ScheduleRef::Literal(_)), _)
         ));
 
         let prog = parse("assert monthly Assets:Cash >= 0");
         assert!(matches!(
             prog.decls[0].0,
-            Decl::Assert(ScheduleKind::Monthly, _)
+            Decl::Assert(Some(ScheduleRef::Literal(_)), _)
         ));
     }
 

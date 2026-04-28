@@ -161,7 +161,8 @@ impl Model {
                         })?;
                         let amt = amt.round_dp(2);
                         if let Some(leg) = &posting.leg_name {
-                            env.leg_values.insert((flow.key().to_string(), leg.clone()), amt);
+                            env.leg_values
+                                .insert((flow.key().to_string(), leg.clone()), amt);
                         }
                         explicit.push((posting.account.clone(), amt));
                     }
@@ -170,7 +171,8 @@ impl Model {
                         let current = *env.stocks.get(&posting.account).unwrap_or(&Decimal::ZERO);
                         let amt = -current.round_dp(2);
                         if let Some(leg) = &posting.leg_name {
-                            env.leg_values.insert((flow.key().to_string(), leg.clone()), amt);
+                            env.leg_values
+                                .insert((flow.key().to_string(), leg.clone()), amt);
                         }
                         explicit.push((posting.account.clone(), amt));
                     }
