@@ -32,7 +32,7 @@ pub enum MonthOccurrence {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ordinal {
-    Nth(u8), // 1–9
+    Nth(u8),
     Last,
 }
 

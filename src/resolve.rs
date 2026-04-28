@@ -5,6 +5,7 @@ use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet, VecDeque};
+use crate::ast::schedule::Schedule;
 
 #[derive(Debug, Clone)]
 pub struct Account {
@@ -32,6 +33,7 @@ impl FlowDef {
 pub struct Model {
     /// Accounts in declaration order (used as column order in CSV output).
     pub stocks: IndexMap<Path, Account>,
+    pub schedules: IndexMap<String, Schedule>,
     pub params: IndexMap<String, ParamBody>,
     pub flows: Vec<FlowDef>,
     pub asserts: Vec<(ScheduleKind, SpannedExpr)>,
@@ -40,6 +42,7 @@ pub struct Model {
 
 pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
     let mut stocks: IndexMap<Path, Account> = IndexMap::new();
+    let mut schedules: IndexMap<String, Schedule> = IndexMap::new();
     let mut params_map: HashMap<String, ParamBody> = HashMap::new();
     let mut flow_aliases: HashMap<String, Span> = HashMap::new();
     let mut flows: Vec<FlowDef> = Vec::new();
@@ -65,7 +68,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 }
             }
             Decl::Schedule { name, schedule } => {
-                // TODO: resolve schedules
+                schedules.insert(name.clone(), schedule.clone());
             }
             Decl::Param { name, body, .. } => {
                 if let Some(prev) = param_spans.get(name) {
@@ -275,6 +278,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
     if diags.is_empty() {
         Ok(Model {
             stocks,
+            schedules,
             params: topo_sort_params(params_map),
             flows,
             asserts,
