@@ -6,12 +6,12 @@ mod parser;
 mod resolve;
 
 use chrono::NaiveDate;
-use chumsky::input::Input;
-use chumsky::prelude::*;
 use rust_decimal::Decimal;
 
 pub use ast::Span;
-pub use lexer::lexer;
+pub use errors::Diagnostic;
+pub use lexer::Lexer;
+pub use parser::Parser;
 
 pub enum OutputFormat {
     Ledger,
@@ -37,29 +37,21 @@ pub fn run(path: &str, opts: &RunOpts) -> Result<(), ()> {
         return Err(());
     }
 
-    let (tokens, lex_errs) = lexer().parse(&source).into_output_errors();
-    let lex_diags: Vec<_> = lex_errs
-        .into_iter()
-        .map(errors::Diagnostic::from_lex_err)
-        .collect();
-    if !lex_diags.is_empty() {
-        errors::report(path, &source, &lex_diags);
-        return Err(());
-    }
-    let tokens = tokens.unwrap();
+    let tokens = match Lexer::new(&source).lex() {
+        Ok(tokens) => tokens,
+        Err(diagnostics) => {
+            errors::report(path, &source, &diagnostics);
+            return Err(());
+        }
+    };
 
-    let eoi = (source.len()..source.len()).into();
-    let input = tokens.as_slice().map(eoi, |(t, s)| (t, s));
-    let (program, parse_errs) = parser::parser().parse(input).into_output_errors();
-    let parse_diags: Vec<_> = parse_errs
-        .into_iter()
-        .map(errors::Diagnostic::from_parse_err)
-        .collect();
-    if !parse_diags.is_empty() {
-        errors::report(path, &source, &parse_diags);
-        return Err(());
-    }
-    let program = program.unwrap();
+    let program = match Parser::new(tokens).parse() {
+        Ok(p) => p,
+        Err(diags) => {
+            errors::report(path, &source, &diags);
+            return Err(());
+        }
+    };
 
     let model = match resolve::resolve(&program) {
         Ok(m) => m,
@@ -89,10 +81,8 @@ fn emit_ledger(model: &resolve::Model, log: &eval::SimLog, start: NaiveDate) {
     use std::io::{self, Write};
     let mut out = io::stdout().lock();
 
-    // Opening-balances transaction: balances before any flows ran on `start`.
     writeln!(out, "{start} opening-balances").ok();
     if let Some(first_snap) = log.snapshots.first() {
-        // Back out any flows that fired on `start` to recover the initial state.
         let mut equity = Decimal::ZERO;
         for path in model.stocks.keys() {
             let snap_bal = first_snap
@@ -118,9 +108,8 @@ fn emit_ledger(model: &resolve::Model, log: &eval::SimLog, start: NaiveDate) {
     }
     writeln!(out).ok();
 
-    // One ledger transaction per flow firing.
     for tx in &log.transactions {
-        writeln!(out, "{} {}", tx.date, tx.flow).ok();
+        writeln!(out, "{} {}", tx.date, tx.label).ok();
         for (account, amt) in &tx.postings {
             writeln!(out, "  {account}  {}", amt).ok();
         }

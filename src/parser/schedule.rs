@@ -1,274 +1,384 @@
-use super::util::{comma_list, ident_ci};
+use super::Parser;
 use crate::ast::schedule::{Dow, Every, Month, MonthOccurrence, Nth, Ordinal, Period, Schedule};
-use crate::{lexer::Token, Span};
-
-use chumsky::{input::ValueInput, prelude::*};
+use crate::errors::Diagnostic;
+use crate::lexer::Token;
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
-pub fn parse_schedule<'src, I>(
-) -> impl Parser<'src, I, Schedule, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
-where
-    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
-{
-    // <date> ::= [0-9] [0-9] [0-9] [0-9] "-" ("0" [1-9] | "1" [0-2]) "-" (([0-2] [1-9]) | ("3" [0-1]))
-    let date = select! { Token::Date(d) => d }.labelled("date");
+impl<'src> Parser<'src> {
+    pub(super) fn parse_schedule_literal(&mut self) -> Option<Schedule> {
+        match self.peek() {
+            Token::Ident(s) => {
+                let s = *s;
+                if s.eq_ignore_ascii_case("every") {
+                    self.parse_every()
+                } else if matches!(
+                    s.to_lowercase().as_str(),
+                    "daily" | "weekly" | "monthly" | "quarterly" | "yearly" | "annually"
+                ) {
+                    self.parse_adverbial()
+                } else {
+                    None
+                }
+            }
+            Token::Date(_) => self.parse_date_list().map(Schedule::Dates),
+            _ => None,
+        }
+    }
 
-    // <date_list> ::= <date> ((", " <date>)* ((", and " | " and ") <date>))?
-    let date_list = comma_list(date);
+    fn parse_every(&mut self) -> Option<Schedule> {
+        self.eat_ident_ci("every")?;
+        let nth = self.try_parse_nth();
+        let period = self.parse_period()?;
+        let start = if self.eat_ident_ci("from").is_some() {
+            Some(self.parse_date()?)
+        } else {
+            None
+        };
+        Some(Schedule::Every(Every { nth, period, start }))
+    }
 
-    // <nth> ::= "2nd" | "3rd" | [4-9] "th" | "second" | "third" | "fourth" | "fifth" | "sixth" | "seventh" | "eighth" | "ninth"
-    let nth = choice((
-        select! { Token::Ordinal(n) if n >= 2 => Nth(n) },
-        select! { Token::Float(n)
-            if n.fract() == Decimal::ZERO && n >= Decimal::from(2) && n <= Decimal::from(255)
-            => Nth(n.to_string().parse().unwrap())
-        },
-        ident_ci("second").to(Nth(2)),
-        ident_ci("third").to(Nth(3)),
-        ident_ci("fourth").to(Nth(4)),
-        ident_ci("fifth").to(Nth(5)),
-        ident_ci("sixth").to(Nth(6)),
-        ident_ci("seventh").to(Nth(7)),
-        ident_ci("eighth").to(Nth(8)),
-        ident_ci("ninth").to(Nth(9)),
-        ident_ci("tenth").to(Nth(10)),
-    ));
-
-    // <ordinal> ::= "first" | "1st" | <nth> | "last"
-    let ordinal = choice((
-        just(Token::Ordinal(1))
-            .or(just(Token::Ident("first")))
-            .to(Ordinal::First),
-        nth.clone().map(Ordinal::Nth),
-        ident_ci("last").to(Ordinal::Last),
-    ));
-
-    // <month_name> ::= "january" | "february" | "march" | "april" | "may" | "june" | "july" | "august" | "september" | "october" | "november" | "december"
-    let month_name = choice((
-        ident_ci("january").or(ident_ci("jan")).to(Month::January),
-        ident_ci("february").or(ident_ci("feb")).to(Month::February),
-        ident_ci("march").or(ident_ci("mar")).to(Month::March),
-        ident_ci("april").or(ident_ci("apr")).to(Month::April),
-        ident_ci("may").to(Month::May),
-        ident_ci("june").or(ident_ci("jun")).to(Month::June),
-        ident_ci("july").or(ident_ci("jul")).to(Month::July),
-        ident_ci("august").or(ident_ci("aug")).to(Month::August),
-        ident_ci("september")
-            .or(ident_ci("sep"))
-            .to(Month::September),
-        ident_ci("october").or(ident_ci("oct")).to(Month::October),
-        ident_ci("november").or(ident_ci("nov")).to(Month::November),
-        ident_ci("december").or(ident_ci("dec")).to(Month::December),
-    ));
-
-    // <dow> ::= "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday" | "weekday" | "weekend day"
-    let dow = choice((
-        ident_ci("monday")
-            .or(ident_ci("mondays"))
-            .or(ident_ci("mon"))
-            .to(Dow::Monday),
-        ident_ci("tuesday")
-            .or(ident_ci("tuesdays"))
-            .or(ident_ci("tue"))
-            .to(Dow::Tuesday),
-        ident_ci("wednesday")
-            .or(ident_ci("wednesdays"))
-            .or(ident_ci("wed"))
-            .to(Dow::Wednesday),
-        ident_ci("thursday")
-            .or(ident_ci("thursdays"))
-            .or(ident_ci("thu"))
-            .to(Dow::Thursday),
-        ident_ci("friday")
-            .or(ident_ci("fridays"))
-            .or(ident_ci("fri"))
-            .to(Dow::Friday),
-        ident_ci("saturday")
-            .or(ident_ci("saturdays"))
-            .or(ident_ci("sat"))
-            .to(Dow::Saturday),
-        ident_ci("sunday")
-            .or(ident_ci("sundays"))
-            .or(ident_ci("sun"))
-            .to(Dow::Sunday),
-        ident_ci("weekday")
-            .or(ident_ci("weekdays"))
-            .to(Dow::Weekday),
-        ident_ci("weekend").to(Dow::Weekend),
-    ));
-
-    // <ordinal_day> ::= <ordinal> " day"?
-    let ordinal_day = ordinal.clone().then_ignore(ident_ci("day").or_not());
-
-    // <ordinal_weekday> ::= <ordinal> " " <dow>
-    let ordinal_weekday = ordinal.clone().then(dow.clone());
-
-    // <month_occurrence> ::= <ordinal_day> | <ordinal_weekday>
-    let month_occurrence = choice((
-        ordinal_weekday
-            .clone()
-            .map(|(ordinal, dow)| MonthOccurrence::Weekday(ordinal, dow)),
-        ordinal_day.clone().map(MonthOccurrence::Day),
-    ));
-
-    // <month_occurrence_list> ::= <month_occurrence> ((", " <month_occurrence>)* ((", and " | " and ") <month_occurrence>))?
-    let month_occurrence_list = comma_list(month_occurrence);
-
-    // <start> ::= " from " <date>
-    let start = ident_ci("from").ignore_then(date);
-
-    // <dow_list> ::= <dow> ((", " <dow>)* ((", and " | " and ") <dow>))?
-    let dow_list = comma_list(dow.clone());
-
-    // <day> ::= "day"
-    let day = ident_ci("day").or(ident_ci("days")).to(Period::Day);
-
-    // <week> ::= "week" (" on " <dow_list>)?
-    let week = ident_ci("week")
-        .or(ident_ci("weeks"))
-        .ignore_then(ident_ci("on").ignore_then(dow_list.clone()).or_not())
-        .map(|dows| {
-            let on = dows.unwrap_or_else(Vec::new);
-            Period::Week { on }
-        });
-
-    // <month> ::= <month_name> (" " <ordinal>)? | "month" (" on the " <month_occurrence_list>)?
-    let month = choice((
-        month_name
-            .clone()
-            .then(ordinal.clone().or_not())
-            .map(|(month, day)| Period::NamedMonth { month, day }),
-        ident_ci("month")
-            .or(ident_ci("months"))
-            .ignore_then(
-                ident_ci("on")
-                    .ignore_then(ident_ci("the"))
-                    .ignore_then(month_occurrence_list.clone())
-                    .or_not(),
-            )
-            .map(|on| Period::Month {
-                on: on.unwrap_or_else(Vec::new),
-            }),
-    ));
-
-    // <quarter> ::= "quarter"
-    let quarter = ident_ci("quarter")
-        .or(ident_ci("quarters"))
-        .to(Period::Quarter);
-
-    // <year_occurrence> ::= <month_name> <ordinal>
-    let year_occurrence = month_name.clone().then(ordinal.clone());
-
-    // <year_occurrence_list> ::= <year_occurrence> ((", " year_occurrence>)* ((", and " | " and ") <year_occurrence>))?
-    let year_occurrence_list = comma_list(year_occurrence);
-
-    // <year> ::= "year" (" on " <year_occurrence_list>)?
-    let year = ident_ci("year")
-        .or(ident_ci("years"))
-        .ignore_then(
-            ident_ci("on")
-                .ignore_then(year_occurrence_list.clone())
-                .or_not(),
-        )
-        .map(|on| Period::Year {
-            on: on.unwrap_or_else(Vec::new),
-        });
-
-    // <period> ::= "day" | <week> | <dow> | <month> | <quarter> | <year>
-    let period = choice((
-        day,
-        dow.clone().map(Period::Weekday),
-        week,
-        month,
-        quarter,
-        year,
-    ));
-
-    // <simple_every> ::= "every " <period>
-    let simple_every = ident_ci("every")
-        .ignore_then(period.clone())
-        .map(|period| Every {
+    fn parse_adverbial(&mut self) -> Option<Schedule> {
+        let Token::Ident(s) = self.peek() else {
+            return None;
+        };
+        let s = s.to_lowercase();
+        let period = match s.as_str() {
+            "daily" => {
+                self.advance();
+                Period::Day
+            }
+            "weekly" => {
+                self.advance();
+                let on = if self.eat_ident_ci("on").is_some() {
+                    self.parse_dow_list()
+                } else {
+                    Vec::new()
+                };
+                Period::Week { on }
+            }
+            "monthly" => {
+                self.advance();
+                let on = if self.eat_ident_ci("on").is_some() {
+                    self.eat_ident_ci("the");
+                    self.parse_month_occurrence_list()
+                } else {
+                    Vec::new()
+                };
+                Period::Month { on }
+            }
+            "quarterly" => {
+                self.advance();
+                Period::Quarter
+            }
+            "yearly" | "annually" => {
+                self.advance();
+                let on = if self.eat_ident_ci("on").is_some() {
+                    self.parse_year_occurrence_list()
+                } else {
+                    Vec::new()
+                };
+                Period::Year { on }
+            }
+            _ => return None,
+        };
+        Some(Schedule::Every(Every {
             nth: None,
             period,
             start: None,
-        });
+        }))
+    }
 
-    // <anchored_every> ::= "every " (<nth> " ")? <period> <start>
-    let anchored_every = ident_ci("every")
-        .ignore_then(nth.or_not())
-        .then(period)
-        .then(start)
-        .map(|((nth, period), start)| Every {
-            nth,
-            period,
-            start: Some(start),
-        });
+    fn parse_period(&mut self) -> Option<Period> {
+        if let Some(p) = self.try_parse_day() {
+            return Some(p);
+        }
+        if let Some(d) = self.try_parse_dow() {
+            return Some(Period::Weekday(d));
+        }
+        if let Some(p) = self.try_parse_week() {
+            return Some(p);
+        }
+        if let Some(p) = self.try_parse_month_period() {
+            return Some(p);
+        }
+        if let Some(p) = self.try_parse_quarter() {
+            return Some(p);
+        }
+        if let Some(p) = self.try_parse_year() {
+            return Some(p);
+        }
+        let span = self.peek_span();
+        self.errors.push(Diagnostic::new(
+            span,
+            "expected period (day, week, month, quarter, year, or day-of-week)",
+        ));
+        None
+    }
 
-    // daily | weekly [on <dow_list>] | monthly [on the <month_occurrence_list>] | quarterly | yearly/annually [on <month> <ordinal>]
-    let adverbial = choice((
-        ident_ci("daily").to(Period::Day),
-        ident_ci("weekly")
-            .ignore_then(ident_ci("on").ignore_then(dow_list).or_not())
-            .map(|dows| Period::Week {
-                on: dows.unwrap_or_default(),
-            }),
-        ident_ci("monthly")
-            .ignore_then(
-                ident_ci("on")
-                    .ignore_then(ident_ci("the"))
-                    .ignore_then(month_occurrence_list)
-                    .or_not(),
-            )
-            .map(|on| Period::Month {
-                on: on.unwrap_or_default(),
-            }),
-        ident_ci("quarterly").to(Period::Quarter),
-        ident_ci("yearly")
-            .or(ident_ci("annually"))
-            .ignore_then(ident_ci("on").ignore_then(year_occurrence_list).or_not())
-            .map(|on| Period::Year {
-                on: on.unwrap_or_else(Vec::new),
-            }),
-    ))
-    .map(|period| Every {
-        nth: None,
-        period,
-        start: None,
-    });
+    fn try_parse_day(&mut self) -> Option<Period> {
+        if let Token::Ident(s) = self.peek() {
+            if s.eq_ignore_ascii_case("day") || s.eq_ignore_ascii_case("days") {
+                self.advance();
+                return Some(Period::Day);
+            }
+        }
+        None
+    }
 
-    // <every> ::= <simple_every> | <anchored_every> | <adverbial>
-    let every = choice((simple_every, anchored_every, adverbial)).map(Schedule::Every);
+    fn try_parse_week(&mut self) -> Option<Period> {
+        if let Token::Ident(s) = self.peek() {
+            if s.eq_ignore_ascii_case("week") || s.eq_ignore_ascii_case("weeks") {
+                self.advance();
+                let on = if self.eat_ident_ci("on").is_some() {
+                    self.parse_dow_list()
+                } else {
+                    Vec::new()
+                };
+                return Some(Period::Week { on });
+            }
+        }
+        None
+    }
 
-    // <shifter> ::= <ordinal> " " <dow> " on or"? (" before " | " after ")
-    let _shifter = ordinal
-        .then(dow)
-        .then_ignore(ident_ci("on").then(ident_ci("or")).or_not())
-        .then(ident_ci("before").or(ident_ci("after")));
+    fn try_parse_month_period(&mut self) -> Option<Period> {
+        if let Some(month) = self.try_parse_month_name() {
+            let day = self.try_parse_ordinal();
+            return Some(Period::NamedMonth { month, day });
+        }
+        if let Token::Ident(s) = self.peek() {
+            if s.eq_ignore_ascii_case("month") || s.eq_ignore_ascii_case("months") {
+                self.advance();
+                let on = if self.eat_ident_ci("on").is_some() {
+                    self.eat_ident_ci("the");
+                    self.parse_month_occurrence_list()
+                } else {
+                    Vec::new()
+                };
+                return Some(Period::Month { on });
+            }
+        }
+        None
+    }
 
-    // <schedule> ::= <shifter>? (<every> | <date_list>)
-    every.or(date_list.map(Schedule::Dates))
+    fn try_parse_quarter(&mut self) -> Option<Period> {
+        if let Token::Ident(s) = self.peek() {
+            if s.eq_ignore_ascii_case("quarter") || s.eq_ignore_ascii_case("quarters") {
+                self.advance();
+                return Some(Period::Quarter);
+            }
+        }
+        None
+    }
+
+    fn try_parse_year(&mut self) -> Option<Period> {
+        if let Token::Ident(s) = self.peek() {
+            if s.eq_ignore_ascii_case("year") || s.eq_ignore_ascii_case("years") {
+                self.advance();
+                let on = if self.eat_ident_ci("on").is_some() {
+                    self.parse_year_occurrence_list()
+                } else {
+                    Vec::new()
+                };
+                return Some(Period::Year { on });
+            }
+        }
+        None
+    }
+
+    fn try_parse_dow(&mut self) -> Option<Dow> {
+        let Token::Ident(s) = self.peek() else {
+            return None;
+        };
+        let dow = match s.to_lowercase().as_str() {
+            "monday" | "mondays" | "mon" => Dow::Monday,
+            "tuesday" | "tuesdays" | "tue" => Dow::Tuesday,
+            "wednesday" | "wednesdays" | "wed" => Dow::Wednesday,
+            "thursday" | "thursdays" | "thu" => Dow::Thursday,
+            "friday" | "fridays" | "fri" => Dow::Friday,
+            "saturday" | "saturdays" | "sat" => Dow::Saturday,
+            "sunday" | "sundays" | "sun" => Dow::Sunday,
+            "weekday" | "weekdays" => Dow::Weekday,
+            "weekend" => Dow::Weekend,
+            _ => return None,
+        };
+        self.advance();
+        Some(dow)
+    }
+
+    fn try_parse_month_name(&mut self) -> Option<Month> {
+        let Token::Ident(s) = self.peek() else {
+            return None;
+        };
+        let month = match s.to_lowercase().as_str() {
+            "january" | "jan" => Month::January,
+            "february" | "feb" => Month::February,
+            "march" | "mar" => Month::March,
+            "april" | "apr" => Month::April,
+            "may" => Month::May,
+            "june" | "jun" => Month::June,
+            "july" | "jul" => Month::July,
+            "august" | "aug" => Month::August,
+            "september" | "sep" => Month::September,
+            "october" | "oct" => Month::October,
+            "november" | "nov" => Month::November,
+            "december" | "dec" => Month::December,
+            _ => return None,
+        };
+        self.advance();
+        Some(month)
+    }
+
+    fn try_parse_nth(&mut self) -> Option<Nth> {
+        if let Token::Ordinal(n) = self.peek() {
+            if *n >= 2 {
+                let n = *n;
+                self.advance();
+                return Some(Nth(n));
+            }
+        }
+        if let Token::Float(n) = self.peek() {
+            let n = *n;
+            if n.fract() == Decimal::ZERO && n >= Decimal::from(2) && n <= Decimal::from(255) {
+                if let Ok(val) = n.to_string().parse::<u8>() {
+                    self.advance();
+                    return Some(Nth(val));
+                }
+            }
+        }
+        if let Token::Ident(s) = self.peek() {
+            let n: u8 = match s.to_lowercase().as_str() {
+                "second" => 2,
+                "third" => 3,
+                "fourth" => 4,
+                "fifth" => 5,
+                "sixth" => 6,
+                "seventh" => 7,
+                "eighth" => 8,
+                "ninth" => 9,
+                "tenth" => 10,
+                _ => return None,
+            };
+            self.advance();
+            return Some(Nth(n));
+        }
+        None
+    }
+
+    fn try_parse_ordinal(&mut self) -> Option<Ordinal> {
+        if let Token::Ordinal(1) = self.peek() {
+            self.advance();
+            return Some(Ordinal::First);
+        }
+        if let Token::Ident(s) = self.peek() {
+            if s.eq_ignore_ascii_case("first") {
+                self.advance();
+                return Some(Ordinal::First);
+            }
+            if s.eq_ignore_ascii_case("last") {
+                self.advance();
+                return Some(Ordinal::Last);
+            }
+        }
+        self.try_parse_nth().map(Ordinal::Nth)
+    }
+
+    fn require_ordinal(&mut self) -> Option<Ordinal> {
+        if let Some(o) = self.try_parse_ordinal() {
+            return Some(o);
+        }
+        let span = self.peek_span();
+        self.errors.push(Diagnostic::new(span, "expected ordinal"));
+        None
+    }
+
+    fn parse_dow_list(&mut self) -> Vec<Dow> {
+        self.parse_comma_list(|p| p.try_parse_dow())
+    }
+
+    fn parse_month_occurrence_list(&mut self) -> Vec<MonthOccurrence> {
+        self.parse_comma_list(|p| p.try_parse_month_occurrence())
+    }
+
+    fn try_parse_month_occurrence(&mut self) -> Option<MonthOccurrence> {
+        let ordinal = self.try_parse_ordinal()?;
+        if let Some(dow) = self.try_parse_dow() {
+            return Some(MonthOccurrence::Weekday(ordinal, dow));
+        }
+        let _ = self
+            .eat_ident_ci("day")
+            .or_else(|| self.eat_ident_ci("days"));
+        Some(MonthOccurrence::Day(ordinal))
+    }
+
+    fn parse_year_occurrence_list(&mut self) -> Vec<(Month, Ordinal)> {
+        self.parse_comma_list(|p| p.try_parse_year_occurrence())
+    }
+
+    fn try_parse_year_occurrence(&mut self) -> Option<(Month, Ordinal)> {
+        let month = self.try_parse_month_name()?;
+        let ordinal = self.require_ordinal()?;
+        Some((month, ordinal))
+    }
+
+    fn parse_date_list(&mut self) -> Option<Vec<NaiveDate>> {
+        if !matches!(self.peek(), Token::Date(_)) {
+            return None;
+        }
+        Some(self.parse_comma_list(|p| {
+            if let Token::Date(d) = p.peek() {
+                let d = *d;
+                p.advance();
+                Some(d)
+            } else {
+                None
+            }
+        }))
+    }
+
+    pub(super) fn parse_date(&mut self) -> Option<NaiveDate> {
+        if let Token::Date(d) = self.peek() {
+            let d = *d;
+            self.advance();
+            Some(d)
+        } else {
+            let span = self.peek_span();
+            self.errors.push(Diagnostic::new(span, "expected date"));
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::lexer;
+    use crate::{Lexer, Span};
+
+    fn parse_schedule_str(src: &str) -> Result<Schedule, Vec<Diagnostic>> {
+        let tokens = Lexer::new(src).lex()?;
+        let mut p = Parser::new(tokens);
+        let sched = p.parse_schedule_literal();
+        if sched.is_none() && p.errors.is_empty() {
+            p.errors
+                .push(Diagnostic::new(Span::new(0, 0), "expected schedule"));
+        }
+        if p.errors.is_empty() {
+            Ok(sched.unwrap())
+        } else {
+            Err(p.errors)
+        }
+    }
+
+    use crate::ast::schedule::*;
     use chrono::NaiveDate;
-    use chumsky::Parser;
 
     fn parse(src: &str) -> Schedule {
-        let (tokens, lex_errs) = lexer().parse(src).into_output_errors();
-        assert!(lex_errs.is_empty(), "lex errs: {lex_errs:?}");
-        let tokens = tokens.unwrap();
-        let eoi = (src.len()..src.len()).into();
-        let input = tokens.as_slice().map(eoi, |(t, s)| (t, s));
-        let (sched, errs) = parse_schedule().parse(input).into_output_errors();
-        assert!(errs.is_empty(), "parse errs: {errs:?}");
-        sched.unwrap()
+        parse_schedule_str(src).unwrap_or_else(|errs| panic!("parse errs: {errs:?}"))
     }
 
     mod dates {
         use super::*;
+
         #[test]
         fn parse_single() {
             let sched = parse("2025-01-01");
@@ -299,6 +409,7 @@ mod tests {
 
             mod day {
                 use super::*;
+
                 #[test]
                 fn parses() {
                     let sched = parse("every day");
@@ -307,9 +418,8 @@ mod tests {
                     };
                     assert!(every.nth.is_none());
                     assert!(every.start.is_none());
-
                     let Period::Day = every.period else {
-                        panic!("Not a year")
+                        panic!("Not a day")
                     };
                 }
             }
@@ -325,7 +435,6 @@ mod tests {
                     };
                     assert!(every.nth.is_none());
                     assert!(every.start.is_none());
-
                     let Period::Week { on } = every.period else {
                         panic!("Not a week")
                     };
@@ -338,9 +447,6 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::Week { on } = every.period else {
                         panic!("Not a week")
                     };
@@ -354,9 +460,6 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::Week { on } = every.period else {
                         panic!("Not a week")
                     };
@@ -375,9 +478,6 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::NamedMonth { month, day } = every.period else {
                         panic!("Not a named month")
                     };
@@ -391,9 +491,6 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::NamedMonth { month, day } = every.period else {
                         panic!("Not a named month")
                     };
@@ -407,9 +504,6 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::Month { on } = every.period else {
                         panic!("Not a month")
                     };
@@ -422,9 +516,6 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::Month { on } = every.period else {
                         panic!("Not a month")
                     };
@@ -438,9 +529,6 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::Month { on } = every.period else {
                         panic!("Not a month")
                     };
@@ -457,9 +545,6 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::Month { on } = every.period else {
                         panic!("Not a month")
                     };
@@ -484,7 +569,6 @@ mod tests {
                 };
                 assert!(every.nth.is_none());
                 assert!(every.start.is_none());
-
                 let Period::Quarter = every.period else {
                     panic!("Not a quarter")
                 };
@@ -499,9 +583,6 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::Year { on } = every.period else {
                         panic!("Not a year")
                     };
@@ -514,13 +595,9 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::Year { on } = every.period else {
                         panic!("Not a year")
                     };
-
                     assert_eq!(1, on.len());
                     assert_eq!(Month::April, on[0].0);
                     assert_eq!(Ordinal::Nth(Nth(5)), on[0].1);
@@ -532,13 +609,9 @@ mod tests {
                     let Schedule::Every(every) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-
                     let Period::Year { on } = every.period else {
                         panic!("Not a year")
                     };
-
                     assert_eq!(2, on.len());
                     assert_eq!(Month::May, on[0].0);
                     assert_eq!(Ordinal::First, on[0].1);

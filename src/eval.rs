@@ -19,7 +19,7 @@ pub struct SimLog {
 
 pub struct Transaction {
     pub date: NaiveDate,
-    pub flow: String,
+    pub label: String,
     pub postings: Vec<(Path, Decimal)>,
 }
 
@@ -40,7 +40,7 @@ struct Environment {
     /// All declared (flow_name, leg_name) pairs.
     leg_set: HashSet<(String, String)>,
     /// Name of the flow currently being evaluated (empty outside of flows).
-    current_flow: String,
+    current_entry: String,
 }
 
 impl Environment {
@@ -56,7 +56,7 @@ impl Environment {
             stock_set,
             param_set,
             leg_set,
-            current_flow: String::new(),
+            current_entry: String::new(),
         }
     }
 
@@ -145,24 +145,24 @@ impl Model {
         env: &mut Environment,
     ) -> Result<Vec<Transaction>, Diagnostic> {
         let mut txs = Vec::new();
-        for flow in &self.flows {
-            if !flow.schedule.matches(t) {
+        for entry in &self.entries {
+            if !entry.schedule.matches(t) {
                 continue;
             }
-            env.current_flow = flow.key().to_string();
+            env.current_entry = entry.key().to_string();
             let mut explicit: Vec<(Path, Decimal)> = Vec::new();
             let mut auto_leg: Option<(Path, Option<String>)> = None;
 
-            for posting in &flow.postings {
+            for posting in &entry.postings {
                 match &posting.amount {
                     Some(PostingAmount::Expr(e)) => {
                         let amt = eval_num(e, env).map_err(|d| {
-                            d.with_note(flow.span, format!("in flow `{}`", flow.label))
+                            d.with_note(entry.span, format!("in entry `{}`", entry.label))
                         })?;
                         let amt = amt.round_dp(2);
                         if let Some(leg) = &posting.leg_name {
                             env.leg_values
-                                .insert((flow.key().to_string(), leg.clone()), amt);
+                                .insert((entry.key().to_string(), leg.clone()), amt);
                         }
                         explicit.push((posting.account.clone(), amt));
                     }
@@ -172,7 +172,7 @@ impl Model {
                         let amt = -current.round_dp(2);
                         if let Some(leg) = &posting.leg_name {
                             env.leg_values
-                                .insert((flow.key().to_string(), leg.clone()), amt);
+                                .insert((entry.key().to_string(), leg.clone()), amt);
                         }
                         explicit.push((posting.account.clone(), amt));
                     }
@@ -196,7 +196,7 @@ impl Model {
             if let Some((account, leg_name)) = auto_leg {
                 let auto = -explicit_sum;
                 if let Some(leg) = leg_name {
-                    env.leg_values.insert((flow.key().to_string(), leg), auto);
+                    env.leg_values.insert((entry.key().to_string(), leg), auto);
                 }
                 *env.stocks_mut()
                     .entry(account.clone())
@@ -206,11 +206,11 @@ impl Model {
 
             txs.push(Transaction {
                 date: t,
-                flow: flow.label.clone(),
+                label: entry.label.clone(),
                 postings,
             });
         }
-        env.current_flow = String::new();
+        env.current_entry = String::new();
         Ok(txs)
     }
 
@@ -308,8 +308,8 @@ fn eval_expr((expr, span): &SpannedExpr, env: &Environment) -> Result<Value, Dia
         }
         Expr::Ref(path) => {
             // Bare leg name: resolves to the current-day value within the same flow (0 if not fired yet).
-            if path.0.len() == 1 && !env.current_flow.is_empty() {
-                let key = (env.current_flow.clone(), path.0[0].clone());
+            if path.0.len() == 1 && !env.current_entry.is_empty() {
+                let key = (env.current_entry.clone(), path.0[0].clone());
                 if env.leg_set.contains(&key) {
                     return Ok(Value::Num(
                         env.leg_values.get(&key).copied().unwrap_or(Decimal::ZERO),
@@ -334,7 +334,7 @@ fn eval_expr((expr, span): &SpannedExpr, env: &Environment) -> Result<Value, Dia
         Expr::ParamAgg(flow_opt, leg, kind) => {
             let key = match flow_opt {
                 Some(flow) => (flow.clone(), leg.clone()),
-                None => (env.current_flow.clone(), leg.clone()),
+                None => (env.current_entry.clone(), leg.clone()),
             };
             let v = env
                 .accumulators
@@ -395,7 +395,7 @@ fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagn
                 _ => unreachable!(),
             }))
         }
-        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+        BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
             let (Value::Num(x), Value::Num(y)) = (a, b) else {
                 return Err(Diagnostic::new(
                     span,
@@ -404,9 +404,9 @@ fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagn
             };
             Ok(Value::Bool(match op {
                 BinOp::Lt => x < y,
-                BinOp::Le => x <= y,
+                BinOp::LtEq => x <= y,
                 BinOp::Gt => x > y,
-                BinOp::Ge => x >= y,
+                BinOp::GtEq => x >= y,
                 _ => unreachable!(),
             }))
         }

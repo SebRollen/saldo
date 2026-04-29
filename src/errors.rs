@@ -1,7 +1,5 @@
 use crate::ast::Span;
-use crate::lexer::Token;
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind};
-use chumsky::error::Rich;
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -22,22 +20,6 @@ impl Diagnostic {
     pub fn with_note(mut self, span: Span, message: impl Into<String>) -> Self {
         self.extra.push((span, message.into()));
         self
-    }
-
-    pub fn from_lex_err(err: Rich<'_, char>) -> Self {
-        Diagnostic {
-            message: err.to_string(),
-            span: *err.span(),
-            extra: Vec::new(),
-        }
-    }
-
-    pub fn from_parse_err<'src>(err: Rich<'src, Token<'src>>) -> Self {
-        Diagnostic {
-            message: err.to_string(),
-            span: *err.span(),
-            extra: Vec::new(),
-        }
     }
 }
 

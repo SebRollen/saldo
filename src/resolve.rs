@@ -13,7 +13,7 @@ pub struct Account {
 }
 
 #[derive(Debug)]
-pub struct FlowDef {
+pub struct EntryDef {
     pub label: String,
     pub alias: Option<String>,
     pub schedule: Schedule,
@@ -21,7 +21,7 @@ pub struct FlowDef {
     pub span: Span,
 }
 
-impl FlowDef {
+impl EntryDef {
     /// The internal identifier used for leg namespacing and cross-flow references.
     /// Equals the alias if present, otherwise the label.
     pub fn key(&self) -> &str {
@@ -34,7 +34,7 @@ pub struct Model {
     /// Accounts in declaration order (used as column order in CSV output).
     pub stocks: IndexMap<Path, Account>,
     pub params: IndexMap<String, ParamBody>,
-    pub flows: Vec<FlowDef>,
+    pub entries: Vec<EntryDef>,
     pub asserts: Vec<(Schedule, SpannedExpr)>,
     pub leg_names: HashSet<(String, String)>,
 }
@@ -43,13 +43,13 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
     let mut stocks: IndexMap<Path, Account> = IndexMap::new();
     let mut schedules: IndexMap<String, Schedule> = IndexMap::new();
     let mut params_map: HashMap<String, ParamBody> = HashMap::new();
-    let mut flow_aliases: HashMap<String, Span> = HashMap::new();
-    let mut flows: Vec<FlowDef> = Vec::new();
+    let mut entry_aliases: HashMap<String, Span> = HashMap::new();
+    let mut entries: Vec<EntryDef> = Vec::new();
     let mut asserts: Vec<(Schedule, SpannedExpr)> = Vec::new();
     let mut schedule_spans: HashMap<String, Span> = HashMap::new();
     let mut stock_spans: HashMap<Path, Span> = HashMap::new();
     let mut param_spans: HashMap<String, Span> = HashMap::new();
-    // (flow_name, leg_name) pairs — legs are namespaced under their flow.
+    // (entry_name, leg_name) pairs — legs are namespaced under their entry.
     let mut all_leg_names: HashSet<(String, String)> = HashSet::new();
     let mut diags: Vec<Diagnostic> = Vec::new();
 
@@ -127,16 +127,16 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 }
                 param_spans.insert(name.clone(), *span);
             }
-            Decl::Flow {
+            Decl::Entry {
                 label,
                 alias,
                 schedule,
                 postings,
             } => {
                 if let Some(a) = alias {
-                    if let Some(prev) = flow_aliases.get(a) {
+                    if let Some(prev) = entry_aliases.get(a) {
                         diags.push(
-                            Diagnostic::new(*span, format!("duplicate flow alias `{a}`"))
+                            Diagnostic::new(*span, format!("duplicate entry alias `{a}`"))
                                 .with_note(*prev, "previously declared here"),
                         );
                         continue;
@@ -145,7 +145,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 if postings.is_empty() {
                     diags.push(Diagnostic::new(
                         *span,
-                        format!("flow `{label}` has no postings"),
+                        format!("entry `{label}` has no postings"),
                     ));
                 }
                 // At most one auto-balance leg.
@@ -153,20 +153,20 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 if auto_count > 1 {
                     diags.push(Diagnostic::new(
                         *span,
-                        format!("flow `{label}` has more than one auto-balance posting"),
+                        format!("entry `{label}` has more than one auto-balance posting"),
                     ));
                 }
 
                 let key = alias.as_deref().unwrap_or(label.as_str());
 
                 // Collect and validate named legs.
-                let mut flow_leg_names: HashSet<String> = HashSet::new();
+                let mut entry_leg_names: HashSet<String> = HashSet::new();
                 for posting in postings {
                     let Some(leg) = &posting.leg_name else { continue };
-                    if !flow_leg_names.insert(leg.clone()) {
+                    if !entry_leg_names.insert(leg.clone()) {
                         diags.push(Diagnostic::new(
                             *span,
-                            format!("duplicate leg name `{leg}` in flow `{label}`"),
+                            format!("duplicate leg name `{leg}` in entry `{label}`"),
                         ));
                     } else if param_spans.contains_key(leg) {
                         diags.push(Diagnostic::new(
@@ -179,7 +179,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 }
 
                 if let Some(a) = alias {
-                    flow_aliases.insert(a.clone(), *span);
+                    entry_aliases.insert(a.clone(), *span);
                 }
                 let schedule = match schedule {
                     ScheduleRef::Literal(s) => s,
@@ -196,11 +196,11 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                         }
                     }
                 };
-                flows.push(FlowDef {
+                entries.push(EntryDef {
                     label: label.clone(),
                     alias: alias.clone(),
                     schedule: schedule.clone(),
-                    postings: topo_sort_postings(postings.clone(), &flow_leg_names, *span, label, &mut diags),
+                    postings: topo_sort_postings(postings.clone(), &entry_leg_names, *span, label, &mut diags),
                     span: *span,
                 });
             }
@@ -239,11 +239,11 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
         }
     };
 
-    // flow_context: name of the enclosing flow (if any), used to validate ParamAgg references.
-    // extra_refs: bare leg names valid inside the current flow's posting expressions.
+    // entry_context: name of the enclosing entry (if any), used to validate ParamAgg references.
+    // extra_refs: bare leg names valid inside the current entry's posting expressions.
     let check_expr = |e: &SpannedExpr,
                       diags: &mut Vec<Diagnostic>,
-                      flow_context: Option<&str>,
+                      entry_context: Option<&str>,
                       extra_refs: &HashSet<String>| {
         walk_expr(e, &mut |sub: &SpannedExpr| {
             if let Expr::Ref(path) = sub.0.as_ref()
@@ -271,15 +271,15 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                     _ => {}
                 }
             }
-            if let Expr::ParamAgg(flow_opt, leg, _) = sub.0.as_ref() {
-                let key: (String, String) = match flow_opt {
-                    Some(flow) => (flow.clone(), leg.clone()),
-                    None => match flow_context {
-                        Some(f) => (f.to_string(), leg.clone()),
+            if let Expr::ParamAgg(entry_opt, leg, _) = sub.0.as_ref() {
+                let key: (String, String) = match entry_opt {
+                    Some(entry) => (entry.clone(), leg.clone()),
+                    None => match entry_context {
+                        Some(e) => (e.to_string(), leg.clone()),
                         None => {
                             diags.push(Diagnostic::new(
                                 sub.1,
-                                format!("unqualified leg `{leg}` — use `<flow>.{leg}.ytd` outside of a flow"),
+                                format!("unqualified leg `{leg}` — use `<entry>.{leg}.ytd` outside of an entry"),
                             ));
                             return;
                         }
@@ -307,9 +307,9 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                     }
                 }
             },
-            Decl::Flow { label, alias, postings, .. } => {
+            Decl::Entry { label, alias, postings, .. } => {
                 let key = alias.as_deref().unwrap_or(label.as_str());
-                let flow_legs: HashSet<String> = postings
+                let entry_legs: HashSet<String> = postings
                     .iter()
                     .filter_map(|p| p.leg_name.as_ref())
                     .cloned()
@@ -317,7 +317,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 for posting in postings {
                     check_path_is_stock(&posting.account, *span, &mut diags);
                     if let Some(PostingAmount::Expr(e)) = &posting.amount {
-                        check_expr(e, &mut diags, Some(key), &flow_legs);
+                        check_expr(e, &mut diags, Some(key), &entry_legs);
                     }
                 }
             }
@@ -330,7 +330,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
         Ok(Model {
             stocks,
             params: topo_sort_params(params_map),
-            flows,
+            entries,
             asserts,
             leg_names: all_leg_names,
         })
@@ -412,9 +412,9 @@ fn topo_sort_params(mut map: HashMap<String, ParamBody>) -> IndexMap<String, Par
 
 fn topo_sort_postings(
     postings: Vec<Posting>,
-    flow_leg_names: &HashSet<String>,
+    entry_leg_names: &HashSet<String>,
     span: Span,
-    flow_name: &str,
+    entry_name: &str,
     diags: &mut Vec<Diagnostic>,
 ) -> Vec<Posting> {
     // Auto-balance posting (no amount) always goes last.
@@ -445,7 +445,7 @@ fn topo_sort_postings(
             walk_expr(e, &mut |sub| {
                 if let Expr::Ref(path) = sub.0.as_ref()
                     && path.0.len() == 1
-                    && flow_leg_names.contains(&path.0[0])
+                    && entry_leg_names.contains(&path.0[0])
                     && let Some(&j) = name_to_idx.get(&path.0[0])
                     && seen.insert(j) {
                             dependents[j].push(i);
@@ -470,7 +470,7 @@ fn topo_sort_postings(
     if order.len() != n {
         diags.push(Diagnostic::new(
             span,
-            format!("flow `{flow_name}` has a cycle among named legs"),
+            format!("entry `{entry_name}` has a cycle among named legs"),
         ));
         let mut result = explicit;
         if let Some(auto) = auto_leg {

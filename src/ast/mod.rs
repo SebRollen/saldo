@@ -1,12 +1,50 @@
 pub mod schedule;
 
 use chrono::NaiveDate;
-use chumsky::span::SimpleSpan;
 use rust_decimal::Decimal;
 pub use schedule::Schedule;
 
-pub type Span = SimpleSpan<usize>;
-pub type SpannedExpr = (Box<Expr>, Span);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Span {
+    pub fn new(start: usize, end: usize) -> Self {
+        Span { start, end }
+    }
+
+    pub fn merge(self, other: Self) -> Self {
+        Span {
+            start: self.start,
+            end: other.end,
+        }
+    }
+
+    pub fn into_range(self) -> std::ops::Range<usize> {
+        self.start..self.end
+    }
+}
+
+impl std::fmt::Display for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}..{}", self.start, self.end)
+    }
+}
+
+impl From<std::ops::Range<usize>> for Span {
+    fn from(r: std::ops::Range<usize>) -> Self {
+        Span {
+            start: r.start,
+            end: r.end,
+        }
+    }
+}
+
+
+pub type Spanned<T> = (T, Span);
+pub type SpannedExpr = Spanned<Box<Expr>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Path(pub Vec<String>);
@@ -37,9 +75,9 @@ pub enum BinOp {
     Mul,
     Div,
     Lt,
-    Le,
+    LtEq,
     Gt,
-    Ge,
+    GtEq,
     Eq,
 }
 
@@ -56,9 +94,9 @@ pub enum Expr {
         else_: SpannedExpr,
     },
     Call(String, Vec<SpannedExpr>),
-    /// `.ytd`/`.qtd`/`.mtd` aggregation. The optional first field is the flow
+    /// `.ytd`/`.qtd`/`.mtd` aggregation. The optional first field is the entry
     /// qualifier (e.g. `paycheck.k401_contrib.ytd` has `Some("paycheck")`).
-    /// Unqualified form (`k401_contrib.ytd`) is only valid inside the defining flow.
+    /// Unqualified form (`k401_contrib.ytd`) is only valid inside the defining entry.
     ParamAgg(Option<String>, String, AggKind),
 }
 
@@ -116,7 +154,7 @@ pub enum Decl {
         unit: Option<String>,
         body: ParamBody,
     },
-    Flow {
+    Entry {
         label: String,
         alias: Option<String>,
         schedule: ScheduleRef,
@@ -127,7 +165,7 @@ pub enum Decl {
 
 #[derive(Clone, Debug)]
 pub struct Program {
-    pub decls: Vec<(Decl, Span)>,
+    pub decls: Vec<Spanned<Decl>>,
 }
 
 #[cfg(test)]
