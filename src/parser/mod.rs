@@ -490,9 +490,15 @@ impl<'src> Parser<'src> {
 
         if self.eat_ident_ci("if").is_some() {
             let cond = self.parse_expr()?;
-            self.eat_ident_ci("then");
+            if self.eat_ident_ci("then").is_none() {
+                self.errors.push(Diagnostic::new(self.peek_span(), "expected `then`"));
+                return None;
+            }
             let then = self.parse_expr()?;
-            self.eat_ident_ci("else");
+            if self.eat_ident_ci("else").is_none() {
+                self.errors.push(Diagnostic::new(self.peek_span(), "expected `else`"));
+                return None;
+            }
             let else_ = self.parse_expr()?;
             let span = Span::new(start.start, self.last_span.end);
             return Some((Box::new(Expr::If { cond, then, else_ }), span));
@@ -809,5 +815,24 @@ mod tests {
         } else {
             panic!("expected if expression");
         }
+    }
+
+    fn parse_errs(src: &str) -> Vec<Diagnostic> {
+        let Ok(tokens) = Lexer::new(src).lex() else {
+            panic!("lexer errored")
+        };
+        Parser::new(tokens).parse().unwrap_err()
+    }
+
+    #[test]
+    fn if_requires_then() {
+        let errs = parse_errs("assert if Assets:Cash > 0 1 else 0");
+        assert!(errs.iter().any(|d| d.message.contains("then")));
+    }
+
+    #[test]
+    fn if_requires_else() {
+        let errs = parse_errs("assert if Assets:Cash > 0 then 1 0");
+        assert!(errs.iter().any(|d| d.message.contains("else")));
     }
 }
