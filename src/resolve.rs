@@ -23,6 +23,7 @@ pub struct EntryDef {
     pub span: Span,
 }
 
+
 #[derive(Debug)]
 pub struct Model {
     /// Accounts in declaration order (used as column order in CSV output).
@@ -33,37 +34,78 @@ pub struct Model {
     pub leg_names: HashSet<(String, String)>,
 }
 
-pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
-    let mut stocks: IndexMap<Path, Account> = IndexMap::new();
-    let mut schedules: IndexMap<String, Schedule> = IndexMap::new();
-    let mut params_map: HashMap<String, ParamBody> = HashMap::new();
-    let mut entry_aliases: HashMap<String, Span> = HashMap::new();
-    let mut entries: Vec<EntryDef> = Vec::new();
-    let mut asserts: Vec<(Schedule, SpannedExpr)> = Vec::new();
-    let mut schedule_spans: HashMap<String, Span> = HashMap::new();
-    let mut stock_spans: HashMap<Path, Span> = HashMap::new();
-    let mut param_spans: HashMap<String, Span> = HashMap::new();
-    // (entry_name, leg_name) pairs — legs are namespaced under their entry.
-    let mut all_leg_names: HashSet<(String, String)> = HashSet::new();
-    let mut diags: Vec<Diagnostic> = Vec::new();
+/// Intermediate output of Pass 2, consumed by Pass 3 and converted to Model.
+struct Declarations {
+    stocks:    IndexMap<Path, Account>,
+    params:    HashMap<String, ParamBody>, // un-sorted; topo-sorted in into_model()
+    entries:   Vec<EntryDef>,
+    asserts:   Vec<(Schedule, SpannedExpr)>,
+    leg_names: HashSet<(String, String)>,
+}
 
-    // Pass 1: collect schedule decls so they can be resolved in next pass
+impl Declarations {
+    fn into_model(self) -> Model {
+        Model {
+            stocks:    self.stocks,
+            params:    topo_sort_params(self.params),
+            entries:   self.entries,
+            asserts:   self.asserts,
+            leg_names: self.leg_names,
+        }
+    }
+}
+
+pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
+    let mut diags = Vec::new();
+    let schedules = collect_schedules(program, &mut diags);
+    let decls     = collect_declarations(program, &schedules, &mut diags);
+    validate_references(&decls, program, &mut diags);
+    if diags.is_empty() {
+        Ok(decls.into_model())
+    } else {
+        Err(diags)
+    }
+}
+
+fn collect_schedules(
+    program: &Program,
+    diags: &mut Vec<Diagnostic>,
+) -> IndexMap<String, Schedule> {
+    let mut schedules: IndexMap<String, Schedule> = IndexMap::new();
+    let mut schedule_spans: HashMap<String, Span> = HashMap::new();
     for (decl, span) in &program.decls {
         if let Decl::Schedule { name, schedule } = decl {
             if let Some(prev) = schedule_spans.get(name) {
-                    diags.push(
-                        Diagnostic::new(*span, format!("duplicate schedule `{name}`"))
-                            .with_note(*prev, "previously declared here"),
-                    );
-
+                diags.push(
+                    Diagnostic::new(*span, format!("duplicate schedule `{name}`"))
+                        .with_note(*prev, "previously declared here"),
+                );
             } else {
-                check_every_schedule(schedule, *span, &mut diags);
+                check_every_schedule(schedule, *span, diags);
                 schedule_spans.insert(name.clone(), *span);
                 schedules.insert(name.clone(), schedule.clone());
             }
         }
     }
-    // Pass 2: collect declarations, enforce unique names.
+    schedules
+}
+
+fn collect_declarations(
+    program: &Program,
+    schedules: &IndexMap<String, Schedule>,
+    diags: &mut Vec<Diagnostic>,
+) -> Declarations {
+    let mut stocks: IndexMap<Path, Account> = IndexMap::new();
+    let mut params_map: HashMap<String, ParamBody> = HashMap::new();
+    let mut entries: Vec<EntryDef> = Vec::new();
+    let mut asserts: Vec<(Schedule, SpannedExpr)> = Vec::new();
+    let mut all_leg_names: HashSet<(String, String)> = HashSet::new();
+
+    // dup-detection maps, local to this pass
+    let mut stock_spans: HashMap<Path, Span> = HashMap::new();
+    let mut param_spans: HashMap<String, Span> = HashMap::new();
+    let mut entry_aliases: HashMap<String, Span> = HashMap::new();
+
     for (decl, span) in &program.decls {
         match decl {
             Decl::Account { name, init } => {
@@ -78,7 +120,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 }
             }
             Decl::Schedule { .. } => {
-                // already processed in previous pass
+                // already processed in collect_schedules
             }
             Decl::Param { name, body, .. } => {
                 if let Some(prev) = param_spans.get(name) {
@@ -143,7 +185,6 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                         format!("entry `{label}` has no postings"),
                     ));
                 }
-                // At most one auto-balance leg.
                 let auto_count = postings.iter().filter(|p| p.amount.is_none()).count();
                 if auto_count > 1 {
                     diags.push(Diagnostic::new(
@@ -154,7 +195,6 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
 
                 let key = alias.clone().unwrap_or_else(|| format!("${}", entries.len()));
 
-                // Collect and validate named legs.
                 let mut entry_leg_names: HashSet<String> = HashSet::new();
                 for posting in postings {
                     let Some(leg) = &posting.leg_name else { continue };
@@ -183,52 +223,56 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                             Some(s) => s,
                             None => {
                                 diags.push(Diagnostic::new(
-                                        *span,
-                                        format!("schedule `{n}` is not defined")
+                                    *span,
+                                    format!("schedule `{n}` is not defined"),
                                 ));
                                 continue;
                             }
                         }
                     }
                 };
-                check_every_schedule(schedule, *span, &mut diags);
+                check_every_schedule(schedule, *span, diags);
                 entries.push(EntryDef {
                     label: label.clone(),
                     key,
                     schedule: schedule.clone(),
-                    postings: topo_sort_postings(postings.clone(), &entry_leg_names, *span, label, &mut diags),
+                    postings: topo_sort_postings(postings.clone(), &entry_leg_names, *span, label, diags),
                     span: *span,
                 });
             }
             Decl::Assert(sched, e) => {
                 let schedule = match sched {
-                    None => {
-                        // Default to daily check
-                        Schedule::Every(Every { period: Period::Day, nth: None, start: None })
-                    },
+                    None => Schedule::Every(Every { period: Period::Day, nth: None, start: None }),
                     Some(ScheduleRef::Literal(s)) => s.clone(),
                     Some(ScheduleRef::Named(n)) => {
                         match schedules.get(n) {
                             Some(s) => s.clone(),
                             None => {
                                 diags.push(Diagnostic::new(
-                                        *span,
-                                        format!("schedule `{n}` is not defined")
+                                    *span,
+                                    format!("schedule `{n}` is not defined"),
                                 ));
                                 continue;
                             }
                         }
                     }
                 };
-                check_every_schedule(&schedule, *span, &mut diags);
-                asserts.push((schedule, e.clone()))
-            },
+                check_every_schedule(&schedule, *span, diags);
+                asserts.push((schedule, e.clone()));
+            }
         }
     }
 
-    // Pass 3: reference checks.
-    let stock_set: HashSet<Path> = stocks.keys().cloned().collect();
-    let param_set: HashSet<String> = params_map.keys().cloned().collect();
+    Declarations { stocks, params: params_map, entries, asserts, leg_names: all_leg_names }
+}
+
+fn validate_references(
+    decls: &Declarations,
+    program: &Program,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let stock_set: HashSet<Path> = decls.stocks.keys().cloned().collect();
+    let param_set: HashSet<String> = decls.params.keys().cloned().collect();
 
     let check_path_is_stock = |p: &Path, span: Span, diags: &mut Vec<Diagnostic>| {
         if !stock_set.contains(p) {
@@ -236,7 +280,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
         }
     };
 
-    // entry_context: name of the enclosing entry (if any), used to validate ParamAgg references.
+    // entry_context: key of the enclosing entry (if any), for validating ParamAgg refs.
     // extra_refs: bare leg names valid inside the current entry's posting expressions.
     let check_expr = |e: &SpannedExpr,
                       diags: &mut Vec<Diagnostic>,
@@ -282,7 +326,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                         }
                     },
                 };
-                if !all_leg_names.contains(&key) {
+                if !decls.leg_names.contains(&key) {
                     diags.push(Diagnostic::new(
                         sub.1,
                         format!("unknown named leg `{}.{}`", key.0, key.1),
@@ -295,43 +339,49 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
 
     for (decl, _span) in &program.decls {
         match decl {
-            Decl::Account { init: Some(e), .. } => check_expr(e, &mut diags, None, &no_extra),
+            Decl::Account { init: Some(e), .. } => check_expr(e, diags, None, &no_extra),
             Decl::Param { body, .. } => match body {
-                ParamBody::Const(e) => check_expr(e, &mut diags, None, &no_extra),
+                ParamBody::Const(e) => check_expr(e, diags, None, &no_extra),
                 ParamBody::Schedule(intervals) => {
                     for i in intervals {
-                        check_expr(&i.value, &mut diags, None, &no_extra);
+                        check_expr(&i.value, diags, None, &no_extra);
                     }
                 }
             },
-            Decl::Assert(_, e) => check_expr(e, &mut diags, None, &no_extra),
+            Decl::Assert(_, e) => check_expr(e, diags, None, &no_extra),
             _ => {}
         }
     }
-    for entry in &entries {
+    for entry in &decls.entries {
         let entry_legs: HashSet<String> = entry.postings
             .iter()
             .filter_map(|p| p.leg_name.as_ref())
             .cloned()
             .collect();
         for posting in &entry.postings {
-            check_path_is_stock(&posting.account, entry.span, &mut diags);
+            check_path_is_stock(&posting.account, entry.span, diags);
             if let Some(PostingAmount::Expr(e)) = &posting.amount {
-                check_expr(e, &mut diags, Some(&entry.key), &entry_legs);
+                check_expr(e, diags, Some(&entry.key), &entry_legs);
             }
         }
     }
+}
 
-    if diags.is_empty() {
-        Ok(Model {
-            stocks,
-            params: topo_sort_params(params_map),
-            entries,
-            asserts,
-            leg_names: all_leg_names,
-        })
-    } else {
-        Err(diags)
+fn check_every_schedule(schedule: &Schedule, span: Span, diags: &mut Vec<Diagnostic>) {
+    if let Schedule::Every(Every { nth: Some(_), start: None, period }) = schedule {
+        let label = match period {
+            Period::Day => "days",
+            Period::Week { .. } => "weeks",
+            Period::Weekday(_) => "weekdays",
+            Period::NamedMonth { .. } => "months",
+            Period::Month { .. } => "months",
+            Period::Quarter => "quarters",
+            Period::Year { .. } => "years",
+        };
+        diags.push(Diagnostic::new(
+            span,
+            format!("schedule with `every N {label}` requires a `from` date"),
+        ));
     }
 }
 
@@ -355,24 +405,6 @@ fn collect_param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> 
     }
     deps.dedup();
     deps
-}
-
-fn check_every_schedule(schedule: &Schedule, span: Span, diags: &mut Vec<Diagnostic>) {
-    if let Schedule::Every(Every { nth: Some(_), start: None, period }) = schedule {
-        let label = match period {
-            Period::Day => "days",
-            Period::Week { .. } => "weeks",
-            Period::Weekday(_) => "weekdays",
-            Period::NamedMonth { .. } => "months",
-            Period::Month { .. } => "months",
-            Period::Quarter => "quarters",
-            Period::Year { .. } => "years",
-        };
-        diags.push(Diagnostic::new(
-            span,
-            format!("schedule with `every N {label}` requires a `from` date"),
-        ));
-    }
 }
 
 fn topo_sort_params(mut map: HashMap<String, ParamBody>) -> IndexMap<String, ParamBody> {
@@ -409,7 +441,7 @@ fn topo_sort_params(mut map: HashMap<String, ParamBody>) -> IndexMap<String, Par
                     *deg -= 1;
                     (*deg == 0).then(|| d.clone())
                 })
-            .collect();
+                .collect();
             next.sort();
             queue.extend(next);
         }
@@ -431,7 +463,6 @@ fn topo_sort_postings(
     entry_name: &str,
     diags: &mut Vec<Diagnostic>,
 ) -> Vec<Posting> {
-    // Auto-balance posting (no amount) always goes last.
     let mut auto_leg: Option<Posting> = None;
     let mut explicit: Vec<Posting> = Vec::new();
     for p in postings {
@@ -461,10 +492,11 @@ fn topo_sort_postings(
                     && path.0.len() == 1
                     && entry_leg_names.contains(&path.0[0])
                     && let Some(&j) = name_to_idx.get(&path.0[0])
-                    && seen.insert(j) {
-                            dependents[j].push(i);
-                            in_deg[i] += 1;
-                        }
+                    && seen.insert(j)
+                {
+                    dependents[j].push(i);
+                    in_deg[i] += 1;
+                }
             });
         }
     }
@@ -549,11 +581,101 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
 
-    fn resolve_src(src: &str) -> Result<Model, Vec<Diagnostic>> {
+    fn parse(src: &str) -> Program {
         let tokens = Lexer::new(src).lex().expect("lex failed");
-        let prog = Parser::new(tokens).parse().expect("parse failed");
-        resolve(&prog)
+        Parser::new(tokens).parse().expect("parse failed")
     }
+
+    fn resolve_src(src: &str) -> Result<Model, Vec<Diagnostic>> {
+        resolve(&parse(src))
+    }
+
+    // --- collect_schedules ---
+
+    #[test]
+    fn collect_schedules_deduplicates() {
+        let prog = parse("schedule biweekly = every 2 weeks from 2024-01-01\nschedule biweekly = every week");
+        let mut diags = Vec::new();
+        collect_schedules(&prog, &mut diags);
+        assert!(diags.iter().any(|d| d.message.contains("duplicate schedule")));
+    }
+
+    #[test]
+    fn collect_schedules_returns_named_schedule() {
+        let prog = parse("schedule payday = every month");
+        let mut diags = Vec::new();
+        let schedules = collect_schedules(&prog, &mut diags);
+        assert!(diags.is_empty());
+        assert!(schedules.contains_key("payday"));
+    }
+
+    // --- collect_declarations ---
+
+    #[test]
+    fn collect_declarations_rejects_unknown_named_schedule() {
+        let prog = parse("account Assets:Cash\naccount Liabilities:Loan\nentry payday \"Test\" {\n  Assets:Cash = 100\n  Liabilities:Loan\n}");
+        let mut diags = Vec::new();
+        let schedules = collect_schedules(&prog, &mut diags);
+        collect_declarations(&prog, &schedules, &mut diags);
+        assert!(diags.iter().any(|d| d.message.contains("not defined")));
+    }
+
+    #[test]
+    fn collect_declarations_aliased_entry_uses_alias_as_key() {
+        let prog = parse("account Assets:Cash\naccount Liabilities:Loan\nentry monthly \"Test\" {\n  Assets:Cash = 100\n  Liabilities:Loan\n} as myentry");
+        let mut diags = Vec::new();
+        let schedules = collect_schedules(&prog, &mut diags);
+        let decls = collect_declarations(&prog, &schedules, &mut diags);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(decls.entries[0].key, "myentry");
+    }
+
+    #[test]
+    fn collect_declarations_aliasless_entry_uses_synthetic_key() {
+        let prog = parse("account Assets:Cash\naccount Liabilities:Loan\nentry monthly \"Test\" {\n  Assets:Cash = 100\n  Liabilities:Loan\n}");
+        let mut diags = Vec::new();
+        let schedules = collect_schedules(&prog, &mut diags);
+        let decls = collect_declarations(&prog, &schedules, &mut diags);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(decls.entries[0].key, "$0");
+    }
+
+    #[test]
+    fn collect_declarations_duplicate_alias_is_rejected() {
+        let prog = parse(
+            "account Assets:Cash\naccount Liabilities:Loan\n\
+             entry monthly \"A\" { Assets:Cash = 100\n  Liabilities:Loan } as foo\n\
+             entry monthly \"B\" { Assets:Cash = 200\n  Liabilities:Loan } as foo",
+        );
+        let mut diags = Vec::new();
+        let schedules = collect_schedules(&prog, &mut diags);
+        collect_declarations(&prog, &schedules, &mut diags);
+        assert!(diags.iter().any(|d| d.message.contains("duplicate entry alias")));
+    }
+
+    // --- validate_references ---
+
+    #[test]
+    fn validate_references_rejects_unknown_account_in_posting() {
+        let prog = parse("account Assets:Cash\nentry monthly \"Test\" {\n  Assets:Cash = 100\n  Liabilities:Unknown\n}");
+        let mut diags = Vec::new();
+        let schedules = collect_schedules(&prog, &mut diags);
+        let decls = collect_declarations(&prog, &schedules, &mut diags);
+        validate_references(&decls, &prog, &mut diags);
+        assert!(diags.iter().any(|d| d.message.contains("unknown account")));
+    }
+
+    #[test]
+    fn validate_references_rejects_unknown_param_in_expr() {
+        let prog = parse("account Assets:Cash\naccount Liabilities:Loan\nentry monthly \"Test\" {\n  Assets:Cash = ghost_param\n  Liabilities:Loan\n}");
+        let mut diags = Vec::new();
+        let schedules = collect_schedules(&prog, &mut diags);
+        let decls = collect_declarations(&prog, &schedules, &mut diags);
+        validate_references(&decls, &prog, &mut diags);
+        assert!(diags.iter().any(|d| d.message.contains("unknown reference")));
+    }
+
+    // --- resolve (end-to-end, existing tests) ---
 
     #[test]
     fn rejects_nth_schedule_without_from() {
