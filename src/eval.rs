@@ -149,7 +149,7 @@ impl Model {
             if !entry.schedule.matches(t) {
                 continue;
             }
-            env.current_entry = entry.key().to_string();
+            env.current_entry = entry.key.to_string();
             let mut explicit: Vec<(Path, Decimal)> = Vec::new();
             let mut auto_leg: Option<(Path, Option<String>)> = None;
 
@@ -162,7 +162,7 @@ impl Model {
                         let amt = amt.round_dp(2);
                         if let Some(leg) = &posting.leg_name {
                             env.leg_values
-                                .insert((entry.key().to_string(), leg.clone()), amt);
+                                .insert((entry.key.to_string(), leg.clone()), amt);
                         }
                         explicit.push((posting.account.clone(), amt));
                     }
@@ -172,7 +172,7 @@ impl Model {
                         let amt = -current.round_dp(2);
                         if let Some(leg) = &posting.leg_name {
                             env.leg_values
-                                .insert((entry.key().to_string(), leg.clone()), amt);
+                                .insert((entry.key.to_string(), leg.clone()), amt);
                         }
                         explicit.push((posting.account.clone(), amt));
                     }
@@ -196,7 +196,7 @@ impl Model {
             if let Some((account, leg_name)) = auto_leg {
                 let auto = -explicit_sum;
                 if let Some(leg) = leg_name {
-                    env.leg_values.insert((entry.key().to_string(), leg), auto);
+                    env.leg_values.insert((entry.key.to_string(), leg), auto);
                 }
                 *env.stocks_mut()
                     .entry(account.clone())

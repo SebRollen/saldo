@@ -15,18 +15,12 @@ pub struct Account {
 #[derive(Debug)]
 pub struct EntryDef {
     pub label: String,
-    pub alias: Option<String>,
+    /// Stable key for leg namespacing: equals the alias when present, otherwise a
+    /// synthetic "$N" index. Never derived from the label, so duplicate labels are fine.
+    pub key: String,
     pub schedule: Schedule,
     pub postings: Vec<Posting>,
     pub span: Span,
-}
-
-impl EntryDef {
-    /// The internal identifier used for leg namespacing and cross-flow references.
-    /// Equals the alias if present, otherwise the label.
-    pub fn key(&self) -> &str {
-        self.alias.as_deref().unwrap_or(&self.label)
-    }
 }
 
 #[derive(Debug)]
@@ -158,7 +152,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                     ));
                 }
 
-                let key = alias.as_deref().unwrap_or(label.as_str());
+                let key = alias.clone().unwrap_or_else(|| format!("${}", entries.len()));
 
                 // Collect and validate named legs.
                 let mut entry_leg_names: HashSet<String> = HashSet::new();
@@ -175,7 +169,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                             format!("leg name `{leg}` conflicts with a param of the same name"),
                         ));
                     } else {
-                        all_leg_names.insert((key.to_string(), leg.clone()));
+                        all_leg_names.insert((key.clone(), leg.clone()));
                     }
                 }
 
@@ -200,7 +194,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                 check_every_schedule(schedule, *span, &mut diags);
                 entries.push(EntryDef {
                     label: label.clone(),
-                    alias: alias.clone(),
+                    key,
                     schedule: schedule.clone(),
                     postings: topo_sort_postings(postings.clone(), &entry_leg_names, *span, label, &mut diags),
                     span: *span,
@@ -299,7 +293,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
     };
     let no_extra: HashSet<String> = HashSet::new();
 
-    for (decl, span) in &program.decls {
+    for (decl, _span) in &program.decls {
         match decl {
             Decl::Account { init: Some(e), .. } => check_expr(e, &mut diags, None, &no_extra),
             Decl::Param { body, .. } => match body {
@@ -310,22 +304,21 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                     }
                 }
             },
-            Decl::Entry { label, alias, postings, .. } => {
-                let key = alias.as_deref().unwrap_or(label.as_str());
-                let entry_legs: HashSet<String> = postings
-                    .iter()
-                    .filter_map(|p| p.leg_name.as_ref())
-                    .cloned()
-                    .collect();
-                for posting in postings {
-                    check_path_is_stock(&posting.account, *span, &mut diags);
-                    if let Some(PostingAmount::Expr(e)) = &posting.amount {
-                        check_expr(e, &mut diags, Some(key), &entry_legs);
-                    }
-                }
-            }
             Decl::Assert(_, e) => check_expr(e, &mut diags, None, &no_extra),
             _ => {}
+        }
+    }
+    for entry in &entries {
+        let entry_legs: HashSet<String> = entry.postings
+            .iter()
+            .filter_map(|p| p.leg_name.as_ref())
+            .cloned()
+            .collect();
+        for posting in &entry.postings {
+            check_path_is_stock(&posting.account, entry.span, &mut diags);
+            if let Some(PostingAmount::Expr(e)) = &posting.amount {
+                check_expr(e, &mut diags, Some(&entry.key), &entry_legs);
+            }
         }
     }
 
