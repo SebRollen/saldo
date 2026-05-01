@@ -63,6 +63,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                     );
 
             } else {
+                check_every_schedule(schedule, *span, &mut diags);
                 schedule_spans.insert(name.clone(), *span);
                 schedules.insert(name.clone(), schedule.clone());
             }
@@ -196,6 +197,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                         }
                     }
                 };
+                check_every_schedule(schedule, *span, &mut diags);
                 entries.push(EntryDef {
                     label: label.clone(),
                     alias: alias.clone(),
@@ -224,6 +226,7 @@ pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
                         }
                     }
                 };
+                check_every_schedule(&schedule, *span, &mut diags);
                 asserts.push((schedule, e.clone()))
             },
         }
@@ -359,6 +362,24 @@ fn collect_param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> 
     }
     deps.dedup();
     deps
+}
+
+fn check_every_schedule(schedule: &Schedule, span: Span, diags: &mut Vec<Diagnostic>) {
+    if let Schedule::Every(Every { nth: Some(_), start: None, period }) = schedule {
+        let label = match period {
+            Period::Day => "days",
+            Period::Week { .. } => "weeks",
+            Period::Weekday(_) => "weekdays",
+            Period::NamedMonth { .. } => "months",
+            Period::Month { .. } => "months",
+            Period::Quarter => "quarters",
+            Period::Year { .. } => "years",
+        };
+        diags.push(Diagnostic::new(
+            span,
+            format!("schedule with `every N {label}` requires a `from` date"),
+        ));
+    }
 }
 
 fn topo_sort_params(mut map: HashMap<String, ParamBody>) -> IndexMap<String, ParamBody> {
@@ -526,5 +547,48 @@ fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
                 walk_expr(a, f);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn resolve_src(src: &str) -> Result<Model, Vec<Diagnostic>> {
+        let tokens = Lexer::new(src).lex().expect("lex failed");
+        let prog = Parser::new(tokens).parse().expect("parse failed");
+        resolve(&prog)
+    }
+
+    #[test]
+    fn rejects_nth_schedule_without_from() {
+        let src = r#"
+            account Assets:Cash
+            account Liabilities:Loan
+            entry every 2 months "Test" {
+                Assets:Cash = 100
+                Liabilities:Loan
+            }
+        "#;
+        let errs = resolve_src(src).unwrap_err();
+        assert!(
+            errs.iter().any(|d| d.message.contains("from")),
+            "expected a diagnostic about missing `from`, got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_nth_schedule_with_from() {
+        let src = r#"
+            account Assets:Cash
+            account Liabilities:Loan
+            entry every 2 months from 2024-01-01 "Test" {
+                Assets:Cash = 100
+                Liabilities:Loan
+            }
+        "#;
+        assert!(resolve_src(src).is_ok());
     }
 }
