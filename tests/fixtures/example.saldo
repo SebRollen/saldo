@@ -26,29 +26,29 @@ param beth_salary : usd/year {
 param retirement_rate = 0.16
 param bonus_amount    = 50_000
 
-monthly "Jim's paycheck" {
+entry monthly "Jim's paycheck" {
   Assets:Retirement:Jim = min(max_401k - retirement_contribution.ytd, jim_salary * retirement_rate / 12) as retirement_contribution
   Assets:Cash           = jim_salary / 12 - retirement_contribution
   Income:Gross:Salary:Jim
 } as jim_paycheck
 
-monthly "Beth's paycheck" {
+entry monthly "Beth's paycheck" {
   Assets:Retirement:Beth = min(max_401k - retirement_contribution.ytd, beth_salary * retirement_rate / 12) as retirement_contribution
   Assets:Cash            = beth_salary / 12 - retirement_contribution
   Income:Gross:Salary:Beth
 }
 
-yearly "Annual bonus" {
+entry yearly "Annual bonus" {
   Assets:Cash = bonus_amount
   Income:Gross:Bonus
 }
 
-daily "Interest accrual" {
+entry daily "Interest accrual" {
   Liabilities:AccruedInterest = Liabilities:Loan * interest_rate / 365
   Expenses:Interest
 }
 
-monthly "Loan payment" {
+entry monthly "Loan payment" {
   Liabilities:AccruedInterest = all
   Liabilities:Loan            = 2_000
   Assets:Cash
@@ -56,4 +56,4 @@ monthly "Loan payment" {
 
 assert Assets:Cash >= 0
 assert jim_paycheck.retirement_contribution.ytd <= 24_500
-assert on 2026-12-31 Assets:Retirement:Beth == 24_500
+assert 2026-12-31 Assets:Retirement:Beth == 24_500
