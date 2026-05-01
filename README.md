@@ -1,29 +1,90 @@
 # saldo
 
-A small domain-specific language for personal financial simulation. You describe accounts, parameters, and recurring cash flows in a plain-text file, then ask saldo to simulate them over a date range and emit transactions.
+A small domain-specific language for personal financial simulation. You
+describe accounts, parameters, and recurring cash flows in a plain-text
+file, then ask saldo to simulate them over a date range and emit
+transactions. The default output is plain-text accounting transactions
+that can be imported into tools like ledger/hledger for reporting and
+analysis.
 
 ## Example
 
 ```
 account Assets:Cash       =   5_000
 account Liabilities:Loan  = -30_000
+account Liabilities:AccruedInterest
+account Income:Salary
 account Expenses:Interest
 
+schedule paycheck_schedule = monthly on the 15th and last
 param interest_rate = 0.05
+param salary {
+    from 2025-01-01 to 2025-04-16 = 80_000
+    from 2025-04-16               = 95_000 // promoted!
+}
 
-daily "Interest accrual" {
+entry paycheck_schedule "Paycheck" {
+  Assets:Cash = salary / 24
+  Income:Salary
+}
+
+entry daily "Interest accrual" {
   Liabilities:AccruedInterest = Liabilities:Loan * interest_rate / 365
   Expenses:Interest
 }
 
-monthly "Loan payment" {
+entry monthly on the 17th "Loan payment" {
   Liabilities:AccruedInterest = all
   Liabilities:Loan            = 2_000
   Assets:Cash
 }
-
-assert Assets:Cash >= 0
+assert daily Assets:Cash >= 0
 ```
+
+When run through the `saldo` CLI, this file generates transactions:
+```
+❯ saldo budget.saldo --from 2026-01-01 --to 2027-01-01
+2026-01-01 opening-balances
+  Assets:Cash              5000
+  Liabilities:Loan       -30000
+  Equity:OpeningBalances  25000
+
+2026-01-01 Interest accrual
+  Liabilities:AccruedInterest  -4.11
+  Expenses:Interest             4.11
+
+2026-01-02 Interest accrual
+  Liabilities:AccruedInterest  -4.11
+  Expenses:Interest             4.11
+…
+2026-01-15 Paycheck
+  Assets:Cash     3958.33
+  Income:Salary  -3958.33
+…
+2026-01-17 Loan payment
+  Liabilities:AccruedInterest  69.87
+  Liabilities:Loan           2000
+  Assets:Cash               -2069.87
+
+2026-01-18 Interest accrual
+  Liabilities:AccruedInterest  -3.84
+  Expenses:Interest             3.84
+…
+```
+
+The transactions can be piped into other PTA tools for reporting:
+```
+> saldo budget.saldo --from 2026-01-01 --to 2027-01-01 | hledger -f - bal
+            75107.92  Assets:Cash
+            25000.00  Equity:OpeningBalances
+              904.30  Expenses:Interest
+           -94999.92  Income:Salary
+              -12.30  Liabilities:AccruedInterest
+            -6000.00  Liabilities:Loan
+--------------------
+                   0
+```
+
 
 ## Usage
 
@@ -59,25 +120,26 @@ param jim_salary : usd/year {
 
 Parameters are named scalars used inside flow expressions. A parameter can be a constant or a date-scheduled value that changes over time. The optional `: unit` annotation is documentation only.
 
-### Flows
+### Entries
 
 ```
-monthly "Jim's paycheck" {
+entry monthly "Jim's paycheck" {
   Assets:Retirement:Jim = min(max_401k - retirement_contribution.ytd, jim_salary * retirement_rate / 12)  as retirement_contribution
   Assets:Cash           = jim_salary / 12 - retirement_contribution
   Income:Gross:Salary:Jim
 } as jim_paycheck
 ```
 
-A flow fires on a schedule and posts amounts to accounts. Every flow is a double-entry transaction: if one posting has no amount, it auto-balances to the negation of the sum of the other postings.
+An entry fires on a schedule and posts amounts to accounts. Every entry is a double-entry transaction: if one posting has no amount, it auto-balances to the negation of the sum of the other postings.
 
-The string label (e.g. `"Jim's paycheck"`) is mandatory and appears in ledger output. The `as <ident>` alias is optional; add it when you need to reference the flow's named legs from other flows (e.g. `jim_paycheck.retirement_contribution.ytd`).
+The string label (e.g. `"Jim's paycheck"`) is mandatory and appears in ledger output. The `as <ident>` alias is optional; add it when you need to reference the entry's named legs from other entries (e.g. `jim_paycheck.retirement_contribution.ytd`).
 
-**Schedules:** `daily`, `monthly`, `quarterly`, `yearly`, `on YYYY-MM-DD`
+**Schedules:**
 
-- `monthly` fires on the last day of each month
-- `quarterly` fires on the last day of March, June, September, and December
-- `yearly` fires on December 31
+Schedules determine when assertions and entries are triggered. They can
+be simple, like `daily` which triggers every day, or complex like
+`every 3rd month on the 17th and last day from 2024-01-01`. Schedules
+can be declared using the `schedule` keyword, or built inline.
 
 **Named legs** (`as <name>`) make a posting's value referenceable inside the same flow and via period aggregates.
 
