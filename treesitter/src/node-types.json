@@ -67,6 +67,52 @@
     "fields": {}
   },
   {
+    "type": "adverbial_schedule",
+    "named": true,
+    "fields": {
+      "kind": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "annually",
+            "named": false
+          },
+          {
+            "type": "daily",
+            "named": false
+          },
+          {
+            "type": "monthly",
+            "named": false
+          },
+          {
+            "type": "quarterly",
+            "named": false
+          },
+          {
+            "type": "weekly",
+            "named": false
+          },
+          {
+            "type": "yearly",
+            "named": false
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "on_clause",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "agg_expr",
     "named": true,
     "fields": {
@@ -162,7 +208,7 @@
         "required": false,
         "types": [
           {
-            "type": "schedule_kind",
+            "type": "schedule_literal",
             "named": true
           }
         ]
@@ -428,6 +474,26 @@
     }
   },
   {
+    "type": "date_schedule",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "date",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "day_of_week",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "declaration",
     "named": true,
     "fields": {},
@@ -444,26 +510,40 @@
           "named": true
         },
         {
-          "type": "flow_decl",
+          "type": "entry_decl",
           "named": true
         },
         {
           "type": "param_decl",
+          "named": true
+        },
+        {
+          "type": "schedule_decl",
           "named": true
         }
       ]
     }
   },
   {
-    "type": "flow_decl",
+    "type": "entry_decl",
     "named": true,
     "fields": {
-      "name": {
+      "alias": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "label": {
         "multiple": false,
         "required": true,
         "types": [
           {
-            "type": "identifier",
+            "type": "string",
             "named": true
           }
         ]
@@ -473,7 +553,7 @@
         "required": true,
         "types": [
           {
-            "type": "schedule_kind",
+            "type": "schedule_ref",
             "named": true
           }
         ]
@@ -488,6 +568,106 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "every_schedule",
+    "named": true,
+    "fields": {
+      "nth": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "ordinal_suffix",
+            "named": true
+          },
+          {
+            "type": "ordinal_word",
+            "named": true
+          }
+        ]
+      },
+      "period": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "day",
+            "named": false
+          },
+          {
+            "type": "day_of_week",
+            "named": true
+          },
+          {
+            "type": "days",
+            "named": false
+          },
+          {
+            "type": "month",
+            "named": false
+          },
+          {
+            "type": "month_name",
+            "named": true
+          },
+          {
+            "type": "months",
+            "named": false
+          },
+          {
+            "type": "on_clause",
+            "named": true
+          },
+          {
+            "type": "ordinal_suffix",
+            "named": true
+          },
+          {
+            "type": "ordinal_word",
+            "named": true
+          },
+          {
+            "type": "quarter",
+            "named": false
+          },
+          {
+            "type": "quarters",
+            "named": false
+          },
+          {
+            "type": "week",
+            "named": false
+          },
+          {
+            "type": "weeks",
+            "named": false
+          },
+          {
+            "type": "year",
+            "named": false
+          },
+          {
+            "type": "years",
+            "named": false
+          }
+        ]
+      },
+      "start": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "date",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -707,7 +887,52 @@
     }
   },
   {
+    "type": "month_name",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "multiplicative_operator",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "on_clause",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "date",
+          "named": true
+        },
+        {
+          "type": "day_of_week",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "month_name",
+          "named": true
+        },
+        {
+          "type": "ordinal_suffix",
+          "named": true
+        },
+        {
+          "type": "ordinal_word",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "ordinal_word",
     "named": true,
     "fields": {}
   },
@@ -905,19 +1130,71 @@
     }
   },
   {
-    "type": "schedule_kind",
+    "type": "schedule_decl",
     "named": true,
     "fields": {
-      "date": {
+      "name": {
         "multiple": false,
-        "required": false,
+        "required": true,
         "types": [
           {
-            "type": "date",
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "schedule": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "schedule_literal",
             "named": true
           }
         ]
       }
+    }
+  },
+  {
+    "type": "schedule_literal",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "adverbial_schedule",
+          "named": true
+        },
+        {
+          "type": "date_schedule",
+          "named": true
+        },
+        {
+          "type": "every_schedule",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "schedule_ref",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "schedule_literal",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -1076,11 +1353,35 @@
     "named": false
   },
   {
+    "type": "and",
+    "named": false
+  },
+  {
+    "type": "annually",
+    "named": false
+  },
+  {
+    "type": "apr",
+    "named": false
+  },
+  {
+    "type": "april",
+    "named": false
+  },
+  {
     "type": "as",
     "named": false
   },
   {
     "type": "assert",
+    "named": false
+  },
+  {
+    "type": "aug",
+    "named": false
+  },
+  {
+    "type": "august",
     "named": false
   },
   {
@@ -1097,7 +1398,35 @@
     "named": true
   },
   {
+    "type": "day",
+    "named": false
+  },
+  {
+    "type": "days",
+    "named": false
+  },
+  {
+    "type": "dec",
+    "named": false
+  },
+  {
+    "type": "december",
+    "named": false
+  },
+  {
+    "type": "eighth",
+    "named": false
+  },
+  {
     "type": "else",
+    "named": false
+  },
+  {
+    "type": "entry",
+    "named": false
+  },
+  {
+    "type": "every",
     "named": false
   },
   {
@@ -1105,8 +1434,40 @@
     "named": false
   },
   {
+    "type": "feb",
+    "named": false
+  },
+  {
+    "type": "february",
+    "named": false
+  },
+  {
+    "type": "fifth",
+    "named": false
+  },
+  {
+    "type": "first",
+    "named": false
+  },
+  {
     "type": "float",
     "named": true
+  },
+  {
+    "type": "fourth",
+    "named": false
+  },
+  {
+    "type": "fri",
+    "named": false
+  },
+  {
+    "type": "friday",
+    "named": false
+  },
+  {
+    "type": "fridays",
+    "named": false
   },
   {
     "type": "from",
@@ -1125,7 +1486,67 @@
     "named": true
   },
   {
+    "type": "jan",
+    "named": false
+  },
+  {
+    "type": "january",
+    "named": false
+  },
+  {
+    "type": "jul",
+    "named": false
+  },
+  {
+    "type": "july",
+    "named": false
+  },
+  {
+    "type": "jun",
+    "named": false
+  },
+  {
+    "type": "june",
+    "named": false
+  },
+  {
+    "type": "last",
+    "named": false
+  },
+  {
+    "type": "mar",
+    "named": false
+  },
+  {
+    "type": "march",
+    "named": false
+  },
+  {
+    "type": "may",
+    "named": false
+  },
+  {
+    "type": "mon",
+    "named": false
+  },
+  {
+    "type": "monday",
+    "named": false
+  },
+  {
+    "type": "mondays",
+    "named": false
+  },
+  {
+    "type": "month",
+    "named": false
+  },
+  {
     "type": "monthly",
+    "named": false
+  },
+  {
+    "type": "months",
     "named": false
   },
   {
@@ -1133,8 +1554,32 @@
     "named": false
   },
   {
+    "type": "ninth",
+    "named": false
+  },
+  {
+    "type": "nov",
+    "named": false
+  },
+  {
+    "type": "november",
+    "named": false
+  },
+  {
+    "type": "oct",
+    "named": false
+  },
+  {
+    "type": "october",
+    "named": false
+  },
+  {
     "type": "on",
     "named": false
+  },
+  {
+    "type": "ordinal_suffix",
+    "named": true
   },
   {
     "type": "param",
@@ -1145,11 +1590,95 @@
     "named": false
   },
   {
+    "type": "quarter",
+    "named": false
+  },
+  {
     "type": "quarterly",
     "named": false
   },
   {
+    "type": "quarters",
+    "named": false
+  },
+  {
+    "type": "sat",
+    "named": false
+  },
+  {
+    "type": "saturday",
+    "named": false
+  },
+  {
+    "type": "saturdays",
+    "named": false
+  },
+  {
+    "type": "schedule",
+    "named": false
+  },
+  {
+    "type": "second",
+    "named": false
+  },
+  {
+    "type": "sep",
+    "named": false
+  },
+  {
+    "type": "september",
+    "named": false
+  },
+  {
+    "type": "seventh",
+    "named": false
+  },
+  {
+    "type": "sixth",
+    "named": false
+  },
+  {
+    "type": "string",
+    "named": true
+  },
+  {
+    "type": "sun",
+    "named": false
+  },
+  {
+    "type": "sunday",
+    "named": false
+  },
+  {
+    "type": "sundays",
+    "named": false
+  },
+  {
+    "type": "tenth",
+    "named": false
+  },
+  {
+    "type": "the",
+    "named": false
+  },
+  {
     "type": "then",
+    "named": false
+  },
+  {
+    "type": "third",
+    "named": false
+  },
+  {
+    "type": "thu",
+    "named": false
+  },
+  {
+    "type": "thursday",
+    "named": false
+  },
+  {
+    "type": "thursdays",
     "named": false
   },
   {
@@ -1161,7 +1690,63 @@
     "named": false
   },
   {
+    "type": "tue",
+    "named": false
+  },
+  {
+    "type": "tuesday",
+    "named": false
+  },
+  {
+    "type": "tuesdays",
+    "named": false
+  },
+  {
+    "type": "wed",
+    "named": false
+  },
+  {
+    "type": "wednesday",
+    "named": false
+  },
+  {
+    "type": "wednesdays",
+    "named": false
+  },
+  {
+    "type": "week",
+    "named": false
+  },
+  {
+    "type": "weekday",
+    "named": false
+  },
+  {
+    "type": "weekdays",
+    "named": false
+  },
+  {
+    "type": "weekend",
+    "named": false
+  },
+  {
+    "type": "weekly",
+    "named": false
+  },
+  {
+    "type": "weeks",
+    "named": false
+  },
+  {
+    "type": "year",
+    "named": false
+  },
+  {
     "type": "yearly",
+    "named": false
+  },
+  {
+    "type": "years",
     "named": false
   },
   {

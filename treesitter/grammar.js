@@ -19,7 +19,8 @@ module.exports = grammar({
       choice(
         $.account_decl,
         $.param_decl,
-        $.flow_decl,
+        $.schedule_decl,
+        $.entry_decl,
         $.assert_decl,
       ),
 
@@ -71,56 +72,178 @@ module.exports = grammar({
       ),
 
     // -----------------------------------------------------------------------
-    // Flow declaration (indentation-based in source; layout pass injects braces)
-    //   monthly jim_paycheck
-    //     Assets:Retirement:Jim  min(...) as retirement_contribution
-    //     Assets:Cash            jim_salary / 12 - retirement_contribution
-    //     Income:Gross:Salary:Jim
+    // Schedule declaration
+    //   schedule semi_monthly = every month on the 15th, last day
+    //   schedule every_two = every second friday from 2026-01-02
     // -----------------------------------------------------------------------
 
-    flow_decl: ($) =>
+    schedule_decl: ($) =>
       seq(
-        field("schedule", $.schedule_kind),
+        "schedule",
         field("name", $.identifier),
+        "=",
+        field("schedule", $.schedule_literal),
+      ),
+
+    // -----------------------------------------------------------------------
+    // Entry declaration
+    //   entry monthly "Jim's paycheck" { ... }
+    //   entry semi_monthly "Seb's paycheck" { ... } as seb_paycheck
+    //   entry yearly on dec 11 "Annual bonus" { ... } as bonus
+    // -----------------------------------------------------------------------
+
+    entry_decl: ($) =>
+      seq(
+        "entry",
+        field("schedule", $.schedule_ref),
+        field("label", $.string),
+        "{",
         repeat($.posting),
+        "}",
+        optional(seq("as", field("alias", $.identifier))),
       ),
-
-    schedule_kind: ($) =>
-      choice(
-        "daily",
-        "monthly",
-        "quarterly",
-        "yearly",
-        seq("on", "(", field("date", $.date), ")"),
-      ),
-
-    // A posting line: <colon_path> [<amount>] [as <ident>]
-    // prec.right resolves the shift-reduce conflict between ending the posting
-    // and continuing to parse the amount — prefer shift (consume more tokens).
-    posting: ($) =>
-      prec.right(
-        seq(
-          field("account", $.colon_path),
-          optional(field("amount", $.posting_amount)),
-          optional(seq("as", field("leg_name", $.identifier))),
-        ),
-      ),
-
-    posting_amount: ($) => choice("all", $._expr),
 
     // -----------------------------------------------------------------------
     // Assert declaration
     //   assert Assets:Cash >= 0
-    //   assert yearly Assets:Retirement:Jim <= 24_500
-    //   assert on(2026-12-31) Assets:Retirement:Beth == 24_500
+    //   assert 2026-12-31 Assets:Retirement:Seb == 24_500
+    //   assert yearly Assets:Cash >= 0
     // -----------------------------------------------------------------------
 
     assert_decl: ($) =>
       seq(
         "assert",
-        optional(field("schedule", $.schedule_kind)),
+        optional(field("schedule", $.schedule_literal)),
         field("condition", $._expr),
       ),
+
+    // -----------------------------------------------------------------------
+    // Schedule reference — literal schedule or a named schedule identifier
+    // -----------------------------------------------------------------------
+
+    schedule_ref: ($) =>
+      choice(
+        prec(1, $.schedule_literal),
+        $.identifier,
+      ),
+
+    // -----------------------------------------------------------------------
+    // Schedule literal
+    //   daily / weekly / monthly / quarterly / yearly / annually [on ...]
+    //   every [nth] period [on ...] [from date]
+    //   2026-01-01 [, 2026-02-01 ...]
+    // -----------------------------------------------------------------------
+
+    schedule_literal: ($) =>
+      choice(
+        $.adverbial_schedule,
+        $.every_schedule,
+        $.date_schedule,
+      ),
+
+    adverbial_schedule: ($) =>
+      seq(
+        field(
+          "kind",
+          choice("daily", "weekly", "monthly", "quarterly", "yearly", "annually"),
+        ),
+        optional($.on_clause),
+      ),
+
+    every_schedule: ($) =>
+      seq(
+        "every",
+        optional(field("nth", $._ordinal)),
+        field("period", $._period_spec),
+        optional(seq("from", field("start", $.date))),
+      ),
+
+    _period_spec: ($) =>
+      choice(
+        choice("day", "days"),
+        seq(choice("week", "weeks"), optional($.on_clause)),
+        seq(choice("month", "months"), optional($.on_clause)),
+        choice("quarter", "quarters"),
+        seq(choice("year", "years"), optional($.on_clause)),
+        $.day_of_week,
+        // month_name uses _period_ordinal (no bare integer) to avoid ambiguity with
+        // the expression that follows the schedule in assert_decl.
+        seq($.month_name, optional($._period_ordinal)),
+      ),
+
+    // Ordinals in period specs: suffix (15th) or word (first/last/second/…) only.
+    // Plain integers are excluded here to prevent ambiguity with following expressions.
+    _period_ordinal: ($) =>
+      choice(
+        $.ordinal_suffix,
+        $.ordinal_word,
+      ),
+
+    on_clause: ($) =>
+      seq(
+        "on",
+        optional("the"),
+        $._occurrence_list,
+      ),
+
+    _occurrence_list: ($) =>
+      seq(
+        $._occurrence_item,
+        repeat(seq(choice(",", "and"), optional("the"), $._occurrence_item)),
+      ),
+
+    // An item in an on-clause can be:
+    //   15th day / last monday / first  (ordinal with optional day/dow)
+    //   dec 31 / jan first              (month name + ordinal)
+    //   2026-01-15                      (explicit date)
+    _occurrence_item: ($) =>
+      choice(
+        seq($._ordinal, optional(choice($.day_of_week, "day", "days"))),
+        seq($.month_name, $._ordinal),
+        $.date,
+      ),
+
+    // Ordinals may be: 1st/2nd/15th (suffix form), a plain integer (11, 31),
+    // or a word-form (first, last, second, third, ...).
+    _ordinal: ($) =>
+      choice(
+        $.ordinal_suffix,
+        $.integer,
+        $.ordinal_word,
+      ),
+
+    ordinal_word: (_) =>
+      choice(
+        "first", "last",
+        "second", "third", "fourth", "fifth",
+        "sixth", "seventh", "eighth", "ninth", "tenth",
+      ),
+
+    // 1st, 2nd, 3rd, 15th …
+    ordinal_suffix: (_) => token(/[0-9]+(st|nd|rd|th)/),
+
+    date_schedule: ($) =>
+      seq(
+        $.date,
+        repeat(seq(choice(",", "and"), $.date)),
+      ),
+
+    // -----------------------------------------------------------------------
+    // Posting  (inside entry body)
+    //   Assets:Retirement:Seb = expr [as leg_name]
+    //   Income:Gross:Salary:Jim        [as leg_name]
+    // -----------------------------------------------------------------------
+
+    posting: ($) =>
+      prec.right(
+        seq(
+          field("account", $.colon_path),
+          optional(seq("=", field("amount", $.posting_amount))),
+          optional(seq("as", field("leg_name", $.identifier))),
+        ),
+      ),
+
+    posting_amount: ($) => choice("all", $._expr),
 
     // -----------------------------------------------------------------------
     // Unit annotation  e.g. `usd`, `usd/year`, `%`
@@ -158,7 +281,6 @@ module.exports = grammar({
         $.parenthesized_expr,
       ),
 
-    // if <cond> then <then> else <else>
     if_expr: ($) =>
       prec.right(
         0,
@@ -172,7 +294,6 @@ module.exports = grammar({
         ),
       ),
 
-    // Binary operators, by ascending precedence
     binary_expr: ($) =>
       choice(
         prec.left(
@@ -207,7 +328,6 @@ module.exports = grammar({
 
     unary_minus: ($) => prec(4, seq("-", field("operand", $._expr))),
 
-    // Function call  e.g. `min(cash, 2_000)`
     call_expr: ($) =>
       prec(
         5,
@@ -224,9 +344,6 @@ module.exports = grammar({
         ),
       ),
 
-    // YTD/QTD/MTD aggregation access
-    //   retirement_contribution.ytd          (unqualified)
-    //   paycheck.retirement_contribution.ytd  (flow-qualified)
     agg_expr: ($) =>
       prec(
         6,
@@ -251,26 +368,57 @@ module.exports = grammar({
     parenthesized_expr: ($) => seq("(", $._expr, ")"),
 
     // -----------------------------------------------------------------------
+    // Day-of-week names
+    // -----------------------------------------------------------------------
+
+    day_of_week: (_) =>
+      choice(
+        "monday", "mondays", "mon",
+        "tuesday", "tuesdays", "tue",
+        "wednesday", "wednesdays", "wed",
+        "thursday", "thursdays", "thu",
+        "friday", "fridays", "fri",
+        "saturday", "saturdays", "sat",
+        "sunday", "sundays", "sun",
+        "weekday", "weekdays",
+        "weekend",
+      ),
+
+    // -----------------------------------------------------------------------
+    // Month names
+    // -----------------------------------------------------------------------
+
+    month_name: (_) =>
+      choice(
+        "january", "jan",
+        "february", "feb",
+        "march", "mar",
+        "april", "apr",
+        "may",
+        "june", "jun",
+        "july", "jul",
+        "august", "aug",
+        "september", "sep",
+        "october", "oct",
+        "november", "nov",
+        "december", "dec",
+      ),
+
+    // -----------------------------------------------------------------------
     // Terminals
     // -----------------------------------------------------------------------
 
     identifier: (_) => /[a-zA-Z_][a-zA-Z0-9_]*/,
 
-    // Bare date (YYYY-MM-DD) or @-prefixed date (@YYYY-MM-DD).
-    date: (_) =>
-      token(
-        choice(
-          /@\d{4}-\d{2}-\d{2}/,
-          /\d{4}-\d{2}-\d{2}/,
-        ),
-      ),
+    date: (_) => token(/\d{4}-\d{2}-\d{2}/),
 
-    // Float before integer so `0.05` isn't split into `0` + `.05`.
     float: (_) => token(/[0-9][0-9_]*\.[0-9][0-9_]*/),
 
     integer: (_) => token(/[0-9][0-9_]*/),
 
     boolean: (_) => choice("true", "false"),
+
+    string: (_) => token(seq('"', /[^"]*/, '"')),
 
     comment: (_) => token(seq("//", /.*/)),
   },

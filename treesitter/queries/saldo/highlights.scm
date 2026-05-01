@@ -1,19 +1,10 @@
-; Account declaration keyword
-"account" @keyword.type
-
 ; Declaration keywords
 [
+  "account"
   "param"
+  "schedule"
+  "entry"
   "assert"
-] @keyword
-
-; Schedule kinds
-[
-  "daily"
-  "monthly"
-  "quarterly"
-  "yearly"
-  "on"
 ] @keyword
 
 ; Temporal / interval keywords
@@ -22,7 +13,29 @@
   "to"
 ] @keyword
 
-; Posting label keyword
+; Schedule period keywords
+[
+  "every"
+  "daily"
+  "weekly"
+  "monthly"
+  "quarterly"
+  "yearly"
+  "annually"
+  "on"
+  "the"
+] @keyword
+
+; Day-of-week names
+(day_of_week) @keyword
+
+; Month names
+(month_name) @keyword
+
+; Ordinal words (first, last, second, …)
+(ordinal_word) @keyword
+
+; Posting / binding keyword
 "as" @keyword
 
 ; Posting wildcard
@@ -30,6 +43,9 @@
 
 ; Aggregation kinds
 (agg_kind) @keyword.builtin
+
+; Boolean literals
+(boolean) @boolean
 
 ; Control flow
 [
@@ -47,10 +63,11 @@
 ] @operator
 
 ; Literals
-(integer) @number
-(float)   @number.float
-(date)    @string.special
-(boolean) @boolean
+(integer)       @number
+(float)         @number.float
+(ordinal_suffix) @number
+(date)          @string.special
+(string)        @string
 
 ; Comments
 (comment) @comment
@@ -58,7 +75,11 @@
 ; Declaration names
 (account_decl  name: (colon_path)  @variable)
 (param_decl    name: (identifier)  @variable)
-(flow_decl     name: (identifier)  @function)
+(schedule_decl name: (identifier)  @function)
+(entry_decl    alias: (identifier) @function)
+
+; Entry label string highlighted as a function name (it names the entry)
+(entry_decl label: (string) @function)
 
 ; Posting account path and optional leg label
 (posting account:  (colon_path)  @variable)
@@ -67,6 +88,9 @@
 ; Aggregation expressions — flow/leg qualifiers
 (agg_expr flow: (identifier) @variable)
 (agg_expr leg:  (identifier) @variable)
+
+; Named schedule reference in entry/assert
+(schedule_ref (identifier) @function)
 
 ; Builtin function calls
 (call_expr function: (identifier) @function.builtin)
