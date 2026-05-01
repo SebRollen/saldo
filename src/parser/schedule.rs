@@ -234,7 +234,7 @@ impl<'src> Parser<'src> {
             if *n >= 2 {
                 let n = *n;
                 self.advance();
-                return Some(Nth(n));
+                return Some(Nth::new(n));
             }
         }
         if let Token::Float(n) = self.peek() {
@@ -242,7 +242,7 @@ impl<'src> Parser<'src> {
             if n.fract() == Decimal::ZERO && n >= Decimal::from(2) && n <= Decimal::from(255) {
                 if let Ok(val) = n.to_string().parse::<u8>() {
                     self.advance();
-                    return Some(Nth(val));
+                    return Some(Nth::new(val));
                 }
             }
         }
@@ -260,7 +260,7 @@ impl<'src> Parser<'src> {
                 _ => return None,
             };
             self.advance();
-            return Some(Nth(n));
+            return Some(Nth::new(n));
         }
         None
     }
@@ -534,7 +534,7 @@ mod tests {
                     };
                     assert_eq!(1, on.len());
                     assert_eq!(
-                        MonthOccurrence::Weekday(Ordinal::Nth(Nth(2)), Dow::Monday),
+                        MonthOccurrence::Weekday(Ordinal::Nth(Nth::new(2)), Dow::Monday),
                         on[0]
                     );
                 }
@@ -550,12 +550,12 @@ mod tests {
                     };
                     assert_eq!(3, on.len());
                     assert_eq!(
-                        MonthOccurrence::Weekday(Ordinal::Nth(Nth(3)), Dow::Thursday),
+                        MonthOccurrence::Weekday(Ordinal::Nth(Nth::new(3)), Dow::Thursday),
                         on[0]
                     );
-                    assert_eq!(MonthOccurrence::Day(Ordinal::Nth(Nth(4))), on[1]);
+                    assert_eq!(MonthOccurrence::Day(Ordinal::Nth(Nth::new(4))), on[1]);
                     assert_eq!(
-                        MonthOccurrence::Weekday(Ordinal::Nth(Nth(15)), Dow::Weekday),
+                        MonthOccurrence::Weekday(Ordinal::Nth(Nth::new(15)), Dow::Weekday),
                         on[2]
                     );
                 }
@@ -600,7 +600,7 @@ mod tests {
                     };
                     assert_eq!(1, on.len());
                     assert_eq!(Month::April, on[0].0);
-                    assert_eq!(Ordinal::Nth(Nth(5)), on[0].1);
+                    assert_eq!(Ordinal::Nth(Nth::new(5)), on[0].1);
                 }
 
                 #[test]
@@ -668,7 +668,7 @@ mod tests {
             let Schedule::Every(every) = sched else {
                 panic!("not an every")
             };
-            assert_eq!(Some(Nth(2)), every.nth);
+            assert_eq!(Some(Nth::new(2)), every.nth);
             assert_eq!(
                 Some(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()),
                 every.start
@@ -688,7 +688,7 @@ mod tests {
             let Some(start) = every.start else {
                 panic!("start is missing")
             };
-            assert_eq!(Nth(2), nth);
+            assert_eq!(Nth::new(2), nth);
             assert_eq!(Period::Weekday(Dow::Friday), every.period);
             assert_eq!(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(), start);
         }

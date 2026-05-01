@@ -54,7 +54,14 @@ impl Month {
 
 // Non-first ordinal
 #[derive(Debug, Clone, PartialEq)]
-pub struct Nth(pub u8);
+pub struct Nth(u8);
+
+impl Nth {
+    pub fn new(inner: u8) -> Self{
+        debug_assert!(inner > 1);
+        Self(inner)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ordinal {
