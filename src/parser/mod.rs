@@ -198,7 +198,7 @@ impl<'src> Parser<'src> {
                 self.advance();
                 return self.parse_schedule_decl();
             }
-            Token::Ident(kw) if kw.eq_ignore_ascii_case("account") => {
+            Token::Account => {
                 self.advance();
                 return self.parse_account_decl();
             }

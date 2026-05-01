@@ -15,6 +15,7 @@ pub enum Token<'src> {
     // keywords
     True,
     False,
+    Account,
     Assert,
     Entry,
     Param,
@@ -64,6 +65,7 @@ impl<'src> fmt::Display for Token<'src> {
             }
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),
+            Token::Account => write!(f, "account"),
             Token::Assert => write!(f, "assert"),
             Token::Entry => write!(f, "entry"),
             Token::Param => write!(f, "param"),
@@ -287,6 +289,7 @@ impl<'src> Lexer<'src> {
         let token = match word {
             "true" => Token::True,
             "false" => Token::False,
+            "account" => Token::Account,
             "assert" => Token::Assert,
             "entry" => Token::Entry,
             "param" => Token::Param,
