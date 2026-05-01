@@ -387,6 +387,9 @@ fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagn
                     "arithmetic operations require numeric operands",
                 ));
             };
+            if op == BinOp::Div && y.is_zero() {
+                return Err(Diagnostic::new(span, "division by zero"));
+            }
             Ok(Value::Num(match op {
                 BinOp::Add => x + y,
                 BinOp::Sub => x - y,
