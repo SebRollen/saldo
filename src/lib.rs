@@ -8,83 +8,85 @@ mod resolve;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
-pub use ast::Span;
-pub use errors::Diagnostic;
+pub use ast::{Path, Span};
+pub use errors::{Diagnostic, Error};
+pub use eval::{DaySnapshot, SimLog, Transaction};
 pub use lexer::Lexer;
 pub use parser::Parser;
-
-pub enum OutputFormat {
-    Ledger,
-    Csv,
-}
 
 pub struct RunOpts {
     pub from: NaiveDate,
     pub to: NaiveDate,
-    pub format: OutputFormat,
 }
 
-pub fn run(path: &str, opts: &RunOpts) -> Result<(), ()> {
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("could not read `{path}`: {e}");
-            return Err(());
-        }
-    };
+#[derive(Debug)]
+pub struct Output {
+    pub accounts: Vec<Path>,
+    pub log: SimLog,
+}
+
+impl Output {
+    pub fn to_ledger(&self, from: NaiveDate) -> String {
+        emit_ledger(&self.accounts, &self.log, from)
+    }
+
+    pub fn to_csv(&self) -> String {
+        emit_csv(&self.accounts, &self.log)
+    }
+}
+
+pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
     if opts.from > opts.to {
-        eprintln!("--from ({}) is after --to ({})", opts.from, opts.to);
-        return Err(());
+        return Err(vec![Error::InvalidDateRange {
+            from: opts.from,
+            to: opts.to,
+        }]);
     }
 
-    let tokens = match Lexer::new(&source).lex() {
-        Ok(tokens) => tokens,
-        Err(diagnostics) => {
-            errors::report(path, &source, &diagnostics);
-            return Err(());
-        }
-    };
+    let tokens = Lexer::new(src)
+        .lex()
+        .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
 
-    let program = match Parser::new(tokens).parse() {
-        Ok(p) => p,
-        Err(diags) => {
-            errors::report(path, &source, &diags);
-            return Err(());
-        }
-    };
+    let program = Parser::new(tokens)
+        .parse()
+        .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
 
-    let model = match resolve::resolve(&program) {
-        Ok(m) => m,
-        Err(diags) => {
-            errors::report(path, &source, &diags);
-            return Err(());
-        }
-    };
+    let model = resolve::resolve(&program)
+        .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
 
-    let log = match model.simulate(opts.from, opts.to) {
-        Ok(l) => l,
-        Err(d) => {
-            errors::report(path, &source, &[d]);
-            return Err(());
-        }
-    };
+    let log = model
+        .simulate(opts.from, opts.to)
+        .map_err(|d| vec![Error::Diagnostic(d)])?;
 
-    match opts.format {
-        OutputFormat::Ledger => emit_ledger(&model, &log, opts.from),
-        OutputFormat::Csv => emit_csv(&model, &log),
-    }
+    let accounts = model.stocks.keys().cloned().collect();
 
-    Ok(())
+    Ok(Output { accounts, log })
 }
 
-fn emit_ledger(model: &resolve::Model, log: &eval::SimLog, start: NaiveDate) {
-    use std::io::{self, Write};
-    let mut out = io::stdout().lock();
+pub fn format_errors(path: &str, src: &str, errors: &[Error]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for e in errors {
+        match e {
+            Error::InvalidDateRange { from, to } => {
+                writeln!(out, "--from ({from}) is after --to ({to})").ok();
+            }
+            Error::Diagnostic(d) => {
+                out.push_str(&errors::format_diagnostics(path, src, &[d.clone()]));
+            }
+        }
+    }
+    out
+}
+
+fn emit_ledger(accounts: &[Path], log: &eval::SimLog, start: NaiveDate) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
 
     writeln!(out, "{start} opening-balances").ok();
     if let Some(first_snap) = log.snapshots.first() {
         let mut equity = Decimal::ZERO;
-        for path in model.stocks.keys() {
+        for path in accounts {
             let snap_bal = first_snap
                 .balances
                 .get(path)
@@ -115,24 +117,28 @@ fn emit_ledger(model: &resolve::Model, log: &eval::SimLog, start: NaiveDate) {
         }
         writeln!(out).ok();
     }
+
+    out
 }
 
-fn emit_csv(model: &resolve::Model, log: &eval::SimLog) {
-    use std::io::{self, Write};
-    let mut out = io::stdout().lock();
+fn emit_csv(accounts: &[Path], log: &eval::SimLog) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
 
     write!(out, "date").ok();
-    for name in model.stocks.keys() {
+    for name in accounts {
         write!(out, ",{name}").ok();
     }
     writeln!(out).ok();
 
     for snap in &log.snapshots {
         write!(out, "{}", snap.date).ok();
-        for name in model.stocks.keys() {
+        for name in accounts {
             let v = snap.balances.get(name).copied().unwrap_or(Decimal::ZERO);
             write!(out, ",{v:.2}").ok();
         }
         writeln!(out).ok();
     }
+
+    out
 }

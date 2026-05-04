@@ -1,5 +1,6 @@
 use crate::ast::Span;
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind};
+use chrono::NaiveDate;
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -23,7 +24,8 @@ impl Diagnostic {
     }
 }
 
-pub fn report(path: &str, source: &str, diags: &[Diagnostic]) {
+pub fn format_diagnostics(path: &str, source: &str, diags: &[Diagnostic]) -> String {
+    let mut output = Vec::new();
     for d in diags {
         let range = d.span.into_range();
         let mut builder = Report::build(ReportKind::Error, (path, range.clone()))
@@ -43,6 +45,13 @@ pub fn report(path: &str, source: &str, diags: &[Diagnostic]) {
         }
         let _ = builder
             .finish()
-            .eprint((path, ariadne::Source::from(source)));
+            .write((path, ariadne::Source::from(source)), &mut output);
     }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[derive(Debug)]
+pub enum Error {
+    InvalidDateRange { from: NaiveDate, to: NaiveDate },
+    Diagnostic(Diagnostic),
 }

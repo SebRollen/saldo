@@ -12,17 +12,20 @@ pub enum Value {
     Bool(bool),
 }
 
+#[derive(Debug)]
 pub struct SimLog {
     pub transactions: Vec<Transaction>,
     pub snapshots: Vec<DaySnapshot>,
 }
 
+#[derive(Debug)]
 pub struct Transaction {
     pub date: NaiveDate,
     pub label: String,
     pub postings: Vec<(Path, Decimal)>,
 }
 
+#[derive(Debug)]
 pub struct DaySnapshot {
     pub date: NaiveDate,
     pub balances: IndexMap<Path, Decimal>,

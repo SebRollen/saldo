@@ -1,8 +1,10 @@
 use chrono::NaiveDate;
-use saldo::{OutputFormat, RunOpts, run};
+use saldo::{RunOpts, format_errors, run};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]";
+
+enum OutputFormat { Ledger, Csv }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -14,10 +16,28 @@ fn main() -> ExitCode {
         }
     };
 
-    let opts = RunOpts { from, to, format };
-    match run(&path, &opts) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(()) => ExitCode::from(1),
+    let src = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("could not read `{path}`: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let opts = RunOpts { from, to };
+    match run(&src, &opts) {
+        Ok(output) => {
+            let rendered = match format {
+                OutputFormat::Ledger => output.to_ledger(from),
+                OutputFormat::Csv => output.to_csv(),
+            };
+            print!("{rendered}");
+            ExitCode::SUCCESS
+        }
+        Err(errors) => {
+            eprint!("{}", format_errors(&path, &src, &errors));
+            ExitCode::from(1)
+        }
     }
 }
 
