@@ -10,7 +10,7 @@ use crate::Span;
 
 pub struct Parser<'src> {
     tokens: Vec<(Token<'src>, Span)>,
-    pos: usize,
+    current: usize,
     errors: Vec<Diagnostic>,
     last_span: Span,
 }
@@ -20,7 +20,7 @@ impl<'src> Parser<'src> {
         let last_span = tokens.first().map(|(_, s)| *s).unwrap_or(Span::new(0, 0));
         Self {
             tokens,
-            pos: 0,
+            current: 0,
             errors: Vec::new(),
             last_span,
         }
@@ -37,30 +37,30 @@ impl<'src> Parser<'src> {
 
     fn peek(&self) -> &Token<'src> {
         self.tokens
-            .get(self.pos)
+            .get(self.current)
             .map(|(t, _)| t)
             .unwrap_or(&Token::EOF)
     }
 
     fn peek_span(&self) -> Span {
         self.tokens
-            .get(self.pos)
+            .get(self.current)
             .map(|(_, s)| *s)
             .unwrap_or(self.last_span)
     }
 
     fn peek_next(&self) -> &Token<'src> {
         self.tokens
-            .get(self.pos + 1)
+            .get(self.current + 1)
             .map(|(t, _)| t)
             .unwrap_or(&Token::EOF)
     }
 
     fn advance(&mut self) -> (Token<'src>, Span) {
-        if self.pos < self.tokens.len() {
-            let (t, s) = self.tokens[self.pos].clone();
+        if self.current < self.tokens.len() {
+            let (t, s) = self.tokens[self.current].clone();
             self.last_span = s;
-            self.pos += 1;
+            self.current += 1;
             (t, s)
         } else {
             (Token::EOF, self.last_span)
@@ -107,11 +107,11 @@ impl<'src> Parser<'src> {
     }
 
     fn save(&self) -> (usize, usize) {
-        (self.pos, self.errors.len())
+        (self.current, self.errors.len())
     }
 
     fn restore(&mut self, (pos, err_len): (usize, usize)) {
-        self.pos = pos;
+        self.current = pos;
         self.errors.truncate(err_len);
     }
 
@@ -491,12 +491,14 @@ impl<'src> Parser<'src> {
         if self.eat_ident_ci("if").is_some() {
             let cond = self.parse_expr()?;
             if self.eat_ident_ci("then").is_none() {
-                self.errors.push(Diagnostic::new(self.peek_span(), "expected `then`"));
+                self.errors
+                    .push(Diagnostic::new(self.peek_span(), "expected `then`"));
                 return None;
             }
             let then = self.parse_expr()?;
             if self.eat_ident_ci("else").is_none() {
-                self.errors.push(Diagnostic::new(self.peek_span(), "expected `else`"));
+                self.errors
+                    .push(Diagnostic::new(self.peek_span(), "expected `else`"));
                 return None;
             }
             let else_ = self.parse_expr()?;
