@@ -74,6 +74,32 @@ impl Environment {
     fn stocks_mut(&mut self) -> &mut HashMap<Path, Decimal> {
         &mut self.stocks
     }
+
+    fn advance_period(&mut self) {
+        // Accumulate named leg values into period totals. Runs every day; since leg_values
+        // is cleared at the start of each day and only populated when a flow fires, this
+        // is a no-op on non-firing days and accumulates the actual amount on firing days.
+        for (key, &value) in &self.leg_values {
+            for kind in [AggKind::Mtd, AggKind::Qtd, AggKind::Ytd] {
+                *self
+                    .accumulators
+                    .entry((key.clone(), kind))
+                    .or_insert(Decimal::ZERO) += value;
+            }
+        }
+    }
+
+    fn reset_periods(&mut self, t: NaiveDate) {
+        if t.day() == 1 {
+            self.accumulators.retain(|(_, k), _| *k != AggKind::Mtd);
+        }
+        if t.day() == 1 && matches!(t.month(), 1 | 4 | 7 | 10) {
+            self.accumulators.retain(|(_, k), _| *k != AggKind::Qtd);
+        }
+        if t.month() == 1 && t.day() == 1 {
+            self.accumulators.retain(|(_, k), _| *k != AggKind::Ytd);
+        }
+    }
 }
 
 impl Model {
@@ -89,7 +115,7 @@ impl Model {
         let mut t = start;
         while t <= end {
             env.leg_values.clear();
-            reset_periods(t, &mut env);
+            env.reset_periods(t);
             self.evaluate_params(t, &mut env)?;
             let txs = self.apply_flows(t, &mut env)?;
             log.transactions.extend(txs);
@@ -103,7 +129,7 @@ impl Model {
                 .collect();
             log.snapshots.push(DaySnapshot { date: t, balances });
 
-            advance_period(&mut env);
+            env.advance_period();
 
             t = t
                 .checked_add_signed(Duration::days(1))
@@ -237,31 +263,6 @@ impl Model {
             }
         }
         Ok(())
-    }
-}
-
-fn reset_periods(t: NaiveDate, env: &mut Environment) {
-    if t.day() == 1 {
-        env.accumulators.retain(|(_, k), _| *k != AggKind::Mtd);
-    }
-    if t.day() == 1 && matches!(t.month(), 1 | 4 | 7 | 10) {
-        env.accumulators.retain(|(_, k), _| *k != AggKind::Qtd);
-    }
-    if t.month() == 1 && t.day() == 1 {
-        env.accumulators.retain(|(_, k), _| *k != AggKind::Ytd);
-    }
-}
-
-fn advance_period(env: &mut Environment) {
-    // Accumulate named leg values into period totals. Runs every day; since leg_values
-    // is cleared at the start of each day and only populated when a flow fires, this
-    // is a no-op on non-firing days and accumulates the actual amount on firing days.
-    for (key, &value) in &env.leg_values {
-        for kind in [AggKind::Mtd, AggKind::Qtd, AggKind::Ytd] {
-            *env.accumulators
-                .entry((key.clone(), kind))
-                .or_insert(Decimal::ZERO) += value;
-        }
     }
 }
 
