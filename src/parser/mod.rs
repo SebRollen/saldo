@@ -267,9 +267,9 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_assert_decl(&mut self) -> Option<Decl> {
-        let sched = self.try_parse_schedule_ref();
-        let expr = self.parse_expr()?;
-        Some(Decl::Assert(sched, expr))
+        let schedule = self.try_parse_schedule_ref();
+        let asserted = self.parse_expr()?;
+        Some(Decl::Assert { schedule, asserted })
     }
 
     fn parse_entry_decl(&mut self) -> Option<Decl> {
@@ -769,7 +769,10 @@ mod tests {
     #[test]
     fn parses_assert() {
         let prog = parse_prog("assert Assets:Cash >= 0");
-        assert!(matches!(prog.decls[0].0, Decl::Assert(None, _)));
+        assert!(matches!(
+            prog.decls[0].0,
+            Decl::Assert { schedule: None, .. }
+        ));
     }
 
     #[test]
@@ -777,19 +780,28 @@ mod tests {
         let prog = parse_prog("assert yearly Assets:Retirement >= 0");
         assert!(matches!(
             prog.decls[0].0,
-            Decl::Assert(Some(ScheduleRef::Literal(_)), _)
+            Decl::Assert {
+                schedule: Some(ScheduleRef::Literal(_)),
+                ..
+            }
         ));
 
         let prog = parse_prog("assert quarterly Assets:Cash >= 0");
         assert!(matches!(
             prog.decls[0].0,
-            Decl::Assert(Some(ScheduleRef::Literal(_)), _)
+            Decl::Assert {
+                schedule: Some(ScheduleRef::Literal(_)),
+                ..
+            }
         ));
 
         let prog = parse_prog("assert monthly Assets:Cash >= 0");
         assert!(matches!(
             prog.decls[0].0,
-            Decl::Assert(Some(ScheduleRef::Literal(_)), _)
+            Decl::Assert {
+                schedule: Some(ScheduleRef::Literal(_)),
+                ..
+            }
         ));
     }
 
@@ -812,7 +824,10 @@ mod tests {
     #[test]
     fn parses_if_expr() {
         let prog = parse_prog("assert if Assets:Cash > 0 then 1 else 0");
-        if let Decl::Assert(_, (e, _)) = &prog.decls[0].0 {
+        if let Decl::Assert {
+            asserted: (e, _), ..
+        } = &prog.decls[0].0
+        {
             assert!(matches!(e.as_ref(), Expr::If { .. }));
         } else {
             panic!("expected if expression");

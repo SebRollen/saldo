@@ -240,8 +240,8 @@ fn collect_declarations(
                     span: *span,
                 });
             }
-            Decl::Assert(sched, e) => {
-                let schedule = match sched {
+            Decl::Assert{schedule, asserted} => {
+                let schedule = match schedule {
                     None => Schedule::Every(Every { period: Period::Day, nth: None, start: None }),
                     Some(ScheduleRef::Literal(s)) => s.clone(),
                     Some(ScheduleRef::Named(n)) => {
@@ -258,7 +258,7 @@ fn collect_declarations(
                     }
                 };
                 check_every_schedule(&schedule, *span, diags);
-                asserts.push((schedule, e.clone()));
+                asserts.push((schedule, asserted.clone()));
             }
         }
     }
@@ -348,7 +348,7 @@ fn validate_references(
                     }
                 }
             },
-            Decl::Assert(_, e) => check_expr(e, diags, None, &no_extra),
+            Decl::Assert{ asserted, .. } => check_expr(asserted, diags, None, &no_extra),
             _ => {}
         }
     }

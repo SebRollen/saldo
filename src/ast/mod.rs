@@ -42,7 +42,6 @@ impl From<std::ops::Range<usize>> for Span {
     }
 }
 
-
 pub type Spanned<T> = (T, Span);
 pub type SpannedExpr = Spanned<Box<Expr>>;
 
@@ -160,7 +159,10 @@ pub enum Decl {
         schedule: ScheduleRef,
         postings: Vec<Posting>,
     },
-    Assert(Option<ScheduleRef>, SpannedExpr),
+    Assert {
+        schedule: Option<ScheduleRef>,
+        asserted: SpannedExpr,
+    },
 }
 
 #[derive(Clone, Debug)]
