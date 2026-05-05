@@ -42,8 +42,8 @@ struct Environment {
     param_set: HashSet<String>,
     /// All declared (flow_name, leg_name) pairs.
     leg_set: HashSet<(String, String)>,
-    /// Name of the flow currently being evaluated (empty outside of flows).
-    current_entry: String,
+    /// Name of the flow currently being evaluated
+    current_entry: Option<String>,
 }
 
 impl Environment {
@@ -59,7 +59,7 @@ impl Environment {
             stock_set,
             param_set,
             leg_set,
-            current_entry: String::new(),
+            current_entry: None,
         }
     }
 
@@ -178,7 +178,7 @@ impl Model {
             if !entry.schedule.matches(t) {
                 continue;
             }
-            env.current_entry = entry.key.to_string();
+            env.current_entry = Some(entry.key.to_string());
             let mut explicit: Vec<(Path, Decimal)> = Vec::new();
             let mut auto_leg: Option<(Path, Option<String>)> = None;
 
@@ -239,7 +239,7 @@ impl Model {
                 postings,
             });
         }
-        env.current_entry = String::new();
+        env.current_entry = None;
         Ok(txs)
     }
 
@@ -312,8 +312,8 @@ fn eval_expr((expr, span): &SpannedExpr, env: &Environment) -> Result<Value, Dia
         }
         Expr::Ref(path) => {
             // Bare leg name: resolves to the current-day value within the same flow (0 if not fired yet).
-            if path.0.len() == 1 && !env.current_entry.is_empty() {
-                let key = (env.current_entry.clone(), path.0[0].clone());
+            if path.0.len() == 1 && env.current_entry.is_some() {
+                let key = (env.current_entry.clone().unwrap(), path.0[0].clone());
                 if env.leg_set.contains(&key) {
                     return Ok(Value::Num(
                         env.leg_values.get(&key).copied().unwrap_or(Decimal::ZERO),
@@ -338,7 +338,10 @@ fn eval_expr((expr, span): &SpannedExpr, env: &Environment) -> Result<Value, Dia
         Expr::ParamAgg(flow_opt, leg, kind) => {
             let key = match flow_opt {
                 Some(flow) => (flow.clone(), leg.clone()),
-                None => (env.current_entry.clone(), leg.clone()),
+                None => (
+                    env.current_entry.clone().unwrap_or_else(String::new),
+                    leg.clone(),
+                ),
             };
             let v = env
                 .accumulators
