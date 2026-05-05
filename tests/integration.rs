@@ -1,12 +1,15 @@
 use chrono::NaiveDate;
-use saldo::{RunOpts, run};
+use saldo::{run, RunOpts};
 
 fn d(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
 }
 
 fn opts(from: &str, to: &str) -> RunOpts {
-    RunOpts { from: d(from), to: d(to) }
+    RunOpts {
+        from: d(from),
+        to: d(to),
+    }
 }
 
 // --- happy path ---
@@ -23,7 +26,7 @@ fn ledger_output_contains_transactions() {
         }
     ";
     let output = run(src, &opts("2025-01-01", "2025-03-31")).unwrap();
-    let ledger = output.to_ledger(d("2025-01-01"));
+    let ledger = output.to_ledger();
     assert!(ledger.contains("opening-balances"));
     assert!(ledger.contains("Assets:Cash  1000"));
     assert!(ledger.contains("Paycheck"));
@@ -44,8 +47,12 @@ fn csv_output_has_header_and_rows() {
 
 #[test]
 fn single_day_range_is_accepted() {
-    let output = run("account Assets:Cash = 100", &opts("2025-06-01", "2025-06-01")).unwrap();
-    assert!(output.to_ledger(d("2025-06-01")).contains("opening-balances"));
+    let output = run(
+        "account Assets:Cash = 100",
+        &opts("2025-06-01", "2025-06-01"),
+    )
+    .unwrap();
+    assert!(output.to_ledger().contains("opening-balances"));
 }
 
 #[test]
@@ -77,8 +84,11 @@ fn from_after_to_returns_error() {
 
 #[test]
 fn lexer_error_is_a_diagnostic() {
-    let errors = run("account Assets:Cash = 1_000\n@@@@", &opts("2025-01-01", "2025-01-31"))
-        .unwrap_err();
+    let errors = run(
+        "account Assets:Cash = 1_000\n@@@@",
+        &opts("2025-01-01", "2025-01-31"),
+    )
+    .unwrap_err();
     assert!(matches!(errors[0], saldo::Error::Diagnostic(_)));
 }
 
@@ -108,7 +118,9 @@ fn unknown_account_in_posting_is_a_diagnostic() {
         }
     ";
     let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(errors.iter().any(|e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("unknown account"))));
+    assert!(errors.iter().any(
+        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("unknown account"))
+    ));
 }
 
 #[test]
@@ -123,7 +135,9 @@ fn unknown_param_in_expr_is_a_diagnostic() {
         }
     ";
     let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(errors.iter().any(|e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("unknown reference"))));
+    assert!(errors.iter().any(
+        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("unknown reference"))
+    ));
 }
 
 // --- runtime / assertion errors ---
@@ -135,7 +149,9 @@ fn failing_assertion_is_a_diagnostic() {
         assert Assets:Cash >= 200
     ";
     let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(errors.iter().any(|e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("assertion failed"))));
+    assert!(errors.iter().any(
+        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("assertion failed"))
+    ));
 }
 
 #[test]

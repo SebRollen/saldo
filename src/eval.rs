@@ -16,6 +16,7 @@ pub enum Value {
 pub struct SimLog {
     pub transactions: Vec<Transaction>,
     pub snapshots: Vec<DaySnapshot>,
+    pub opening: IndexMap<Path, Decimal>,
 }
 
 #[derive(Debug)]
@@ -105,12 +106,20 @@ impl Environment {
 impl Model {
     pub fn simulate(&self, start: NaiveDate, end: NaiveDate) -> Result<SimLog, Diagnostic> {
         let mut env = Environment::new(self);
+
+        self.initialize_stocks(&mut env)?;
+
+        let opening: IndexMap<Path, Decimal> = self
+            .stocks
+            .keys()
+            .map(|p| (p.clone(), *env.stocks.get(p).unwrap_or(&Decimal::ZERO)))
+            .collect();
+
         let mut log = SimLog {
             transactions: Vec::new(),
             snapshots: Vec::new(),
+            opening,
         };
-
-        self.initialize_stocks(&mut env)?;
 
         let mut t = start;
         while t <= end {

@@ -26,8 +26,8 @@ pub struct Output {
 }
 
 impl Output {
-    pub fn to_ledger(&self, from: NaiveDate) -> String {
-        emit_ledger(&self.accounts, &self.log, from)
+    pub fn to_ledger(&self) -> String {
+        emit_ledger(&self.accounts, &self.log)
     }
 
     pub fn to_csv(&self) -> String {
@@ -79,35 +79,26 @@ pub fn format_errors(path: &str, src: &str, errors: &[Error]) -> String {
     out
 }
 
-fn emit_ledger(accounts: &[Path], log: &eval::SimLog, start: NaiveDate) -> String {
+fn emit_ledger(accounts: &[Path], log: &eval::SimLog) -> String {
     use std::fmt::Write;
     let mut out = String::new();
 
+    let start = log
+        .snapshots
+        .first()
+        .map(|s| s.date)
+        .unwrap_or_else(|| log.transactions.first().map(|t| t.date).unwrap_or_default());
+
     writeln!(out, "{start} opening-balances").ok();
-    if let Some(first_snap) = log.snapshots.first() {
-        let mut equity = Decimal::ZERO;
-        for path in accounts {
-            let snap_bal = first_snap
-                .balances
-                .get(path)
-                .copied()
-                .unwrap_or(Decimal::ZERO);
-            let flow_delta: Decimal = log
-                .transactions
-                .iter()
-                .filter(|tx| tx.date == start)
-                .flat_map(|tx| tx.postings.iter())
-                .filter(|(acc, _)| acc == path)
-                .map(|(_, amt)| *amt)
-                .sum();
-            let init = snap_bal - flow_delta;
-            equity -= init;
-            if init != Decimal::ZERO {
-                writeln!(out, "  {path}  {}", init).ok();
-            }
+    let mut equity = Decimal::ZERO;
+    for path in accounts {
+        let init = log.opening.get(path).copied().unwrap_or(Decimal::ZERO);
+        equity -= init;
+        if init != Decimal::ZERO {
+            writeln!(out, "  {path}  {}", init).ok();
         }
-        writeln!(out, "  Equity:OpeningBalances  {}", equity).ok();
     }
+    writeln!(out, "  Equity:OpeningBalances  {}", equity).ok();
     writeln!(out).ok();
 
     for tx in &log.transactions {

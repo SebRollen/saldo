@@ -28,7 +28,7 @@ fn main() -> ExitCode {
     match run(&src, &opts) {
         Ok(output) => {
             let rendered = match format {
-                OutputFormat::Ledger => output.to_ledger(from),
+                OutputFormat::Ledger => output.to_ledger(),
                 OutputFormat::Csv => output.to_csv(),
             };
             print!("{rendered}");
