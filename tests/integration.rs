@@ -38,7 +38,7 @@ fn csv_output_has_header_and_rows() {
     let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
     let csv = output.to_csv();
     let lines: Vec<&str> = csv.lines().collect();
-    assert_eq!(lines[0], "date,Assets:Cash,Liabilities:Loan");
+    assert_eq!(lines[0], r#""date","Assets:Cash","Liabilities:Loan""#);
     assert_eq!(lines.len(), 4); // header + 3 days
 }
 

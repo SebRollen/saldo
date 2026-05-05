@@ -125,9 +125,9 @@ fn emit_csv(accounts: &[Path], log: &eval::SimLog) -> String {
     use std::fmt::Write;
     let mut out = String::new();
 
-    write!(out, "date").ok();
+    write!(out, "\"date\"").ok();
     for name in accounts {
-        write!(out, ",{name}").ok();
+        write!(out, ",\"{name}\"").ok();
     }
     writeln!(out).ok();
 
