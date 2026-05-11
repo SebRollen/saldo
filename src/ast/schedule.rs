@@ -139,7 +139,7 @@ pub enum Period {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Every {
+pub struct Periodic {
     pub nth: Option<Nth>,
     pub period: Period,
     pub start: Option<NaiveDate>,
@@ -147,25 +147,25 @@ pub struct Every {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Schedule {
-    Every(Every),
+    Periodic(Periodic),
     Dates(Vec<NaiveDate>),
 }
 
 impl Schedule {
     pub fn matches(&self, t: NaiveDate) -> bool {
-        let every = match self {
+        let periodic = match self {
             Self::Dates(dates) => return dates.contains(&t),
-            Self::Every(every) => every,
+            Self::Periodic(periodic) => periodic,
         };
 
-        if every.start.is_some_and(|s| t < s) {
+        if periodic.start.is_some_and(|s| t < s) {
             return false;
         }
-        match &every.period {
-            Period::Day => match every.nth {
+        match &periodic.period {
+            Period::Day => match periodic.nth {
                 None => true,
                 Some(Nth(n)) => {
-                    let origin = every.start.unwrap();
+                    let origin = periodic.start.unwrap();
                     (t - origin).num_days() % n as i64 == 0
                 }
             },
@@ -178,10 +178,10 @@ impl Schedule {
                 if !dow_ok {
                     return false;
                 }
-                match every.nth {
+                match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = every.start.unwrap();
+                        let origin = periodic.start.unwrap();
                         (t - origin).num_days() / 7 % n as i64 == 0
                     }
                 }
@@ -190,10 +190,10 @@ impl Schedule {
                 if !dow.matches(t) {
                     return false;
                 }
-                match every.nth {
+                match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = every.start.unwrap();
+                        let origin = periodic.start.unwrap();
                         (t - origin).num_days() / 7 % n as i64 == 0
                     }
                 }
@@ -207,10 +207,10 @@ impl Schedule {
                 if !day_ok {
                     return false;
                 }
-                match every.nth {
+                match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = every.start.unwrap();
+                        let origin = periodic.start.unwrap();
                         let months = (t.year() - origin.year()) * 12
                             + t.month() as i32 - origin.month() as i32;
                         months % n as i32 == 0
@@ -228,10 +228,10 @@ impl Schedule {
                 if !day_ok {
                     return false;
                 }
-                match every.nth {
+                match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = every.start.unwrap();
+                        let origin = periodic.start.unwrap();
                         (t.year() - origin.year()) % n as i32 == 0
                     }
                 }
@@ -240,10 +240,10 @@ impl Schedule {
                 if !t.is_quarter_end() {
                     return false;
                 }
-                match every.nth {
+                match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = every.start.unwrap();
+                        let origin = periodic.start.unwrap();
                         let quarters = (t.year() - origin.year()) * 4
                             + t.quarter() as i32 - origin.quarter() as i32;
                         quarters % n as i32 == 0
@@ -259,10 +259,10 @@ impl Schedule {
                 if !day_ok {
                     return false;
                 }
-                match every.nth {
+                match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = every.start.unwrap();
+                        let origin = periodic.start.unwrap();
                         (t.year() - origin.year()) % n as i32 == 0
                     }
                 }
@@ -325,14 +325,14 @@ mod tests {
         }
     }
 
-    mod every {
+    mod periodic {
         use super::*;
 
         mod simple {
             use super::*;
 
             fn schedule(period: Period) -> Schedule {
-                Schedule::Every(Every {
+                Schedule::Periodic(Periodic {
                     nth: None,
                     period,
                     start: None,
@@ -609,7 +609,7 @@ mod tests {
             use super::*;
 
             fn schedule(nth: u8, period: Period, start: NaiveDate) -> Schedule {
-                Schedule::Every(Every {
+                Schedule::Periodic(Periodic {
                     nth: Some(Nth(nth)),
                     period,
                     start: Some(start),

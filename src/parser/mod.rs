@@ -728,7 +728,10 @@ mod tests {
             } => {
                 assert_eq!(label, "paycheck");
                 assert!(alias.is_none());
-                assert!(matches!(schedule, ScheduleRef::Literal(Schedule::Every(_))));
+                assert!(matches!(
+                    schedule,
+                    ScheduleRef::Literal(Schedule::Periodic(_))
+                ));
                 assert_eq!(postings.len(), 2);
                 assert_eq!(postings[0].account.join(), "Assets:Cash");
                 assert!(postings[0].amount.is_some());

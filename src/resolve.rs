@@ -5,7 +5,7 @@ use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet, VecDeque};
-use crate::ast::schedule::{Every, Period};
+use crate::ast::schedule::{Periodic, Period};
 
 #[derive(Debug, Clone)]
 pub struct Account {
@@ -81,7 +81,7 @@ fn collect_schedules(
                         .with_note(*prev, "previously declared here"),
                 );
             } else {
-                check_every_schedule(schedule, *span, diags);
+                check_periodic_schedule(schedule, *span, diags);
                 schedule_spans.insert(name.clone(), *span);
                 schedules.insert(name.clone(), schedule.clone());
             }
@@ -231,7 +231,7 @@ fn collect_declarations(
                         }
                     }
                 };
-                check_every_schedule(schedule, *span, diags);
+                check_periodic_schedule(schedule, *span, diags);
                 entries.push(EntryDef {
                     label: label.clone(),
                     key,
@@ -242,7 +242,7 @@ fn collect_declarations(
             }
             Decl::Assert{schedule, asserted} => {
                 let schedule = match schedule {
-                    None => Schedule::Every(Every { period: Period::Day, nth: None, start: None }),
+                    None => Schedule::Periodic(Periodic { period: Period::Day, nth: None, start: None }),
                     Some(ScheduleRef::Literal(s)) => s.clone(),
                     Some(ScheduleRef::Named(n)) => {
                         match schedules.get(n) {
@@ -257,7 +257,7 @@ fn collect_declarations(
                         }
                     }
                 };
-                check_every_schedule(&schedule, *span, diags);
+                check_periodic_schedule(&schedule, *span, diags);
                 asserts.push((schedule, asserted.clone()));
             }
         }
@@ -367,8 +367,8 @@ fn validate_references(
     }
 }
 
-fn check_every_schedule(schedule: &Schedule, span: Span, diags: &mut Vec<Diagnostic>) {
-    if let Schedule::Every(Every { nth: Some(_), start: None, period }) = schedule {
+fn check_periodic_schedule(schedule: &Schedule, span: Span, diags: &mut Vec<Diagnostic>) {
+    if let Schedule::Periodic(Periodic { nth: Some(_), start: None, period }) = schedule {
         let label = match period {
             Period::Day => "days",
             Period::Week { .. } => "weeks",

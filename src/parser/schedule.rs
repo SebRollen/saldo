@@ -1,5 +1,5 @@
 use super::Parser;
-use crate::ast::schedule::{Dow, Every, Month, MonthOccurrence, Nth, Ordinal, Period, Schedule};
+use crate::ast::schedule::{Dow, Month, MonthOccurrence, Nth, Ordinal, Period, Periodic, Schedule};
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
 use chrono::NaiveDate;
@@ -11,7 +11,7 @@ impl<'src> Parser<'src> {
             Token::Ident(s) => {
                 let s = *s;
                 if s.eq_ignore_ascii_case("every") {
-                    self.parse_every()
+                    self.parse_periodic()
                 } else if matches!(
                     s.to_lowercase().as_str(),
                     "daily" | "weekly" | "monthly" | "quarterly" | "yearly" | "annually"
@@ -26,7 +26,7 @@ impl<'src> Parser<'src> {
         }
     }
 
-    fn parse_every(&mut self) -> Option<Schedule> {
+    fn parse_periodic(&mut self) -> Option<Schedule> {
         self.eat_ident_ci("every")?;
         let nth = self.try_parse_nth();
         let period = self.parse_period()?;
@@ -35,7 +35,7 @@ impl<'src> Parser<'src> {
         } else {
             None
         };
-        Some(Schedule::Every(Every { nth, period, start }))
+        Some(Schedule::Periodic(Periodic { nth, period, start }))
     }
 
     fn parse_adverbial(&mut self) -> Option<Schedule> {
@@ -82,7 +82,7 @@ impl<'src> Parser<'src> {
             }
             _ => return None,
         };
-        Some(Schedule::Every(Every {
+        Some(Schedule::Periodic(Periodic {
             nth: None,
             period,
             start: None,
@@ -401,7 +401,7 @@ mod tests {
         }
     }
 
-    mod every {
+    mod periodic {
         use super::*;
 
         mod simple {
@@ -413,12 +413,12 @@ mod tests {
                 #[test]
                 fn parses() {
                     let sched = parse("every day");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-                    let Period::Day = every.period else {
+                    assert!(periodic.nth.is_none());
+                    assert!(periodic.start.is_none());
+                    let Period::Day = periodic.period else {
                         panic!("Not a day")
                     };
                 }
@@ -430,12 +430,12 @@ mod tests {
                 #[test]
                 fn without_on() {
                     let sched = parse("every week");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    assert!(every.nth.is_none());
-                    assert!(every.start.is_none());
-                    let Period::Week { on } = every.period else {
+                    assert!(periodic.nth.is_none());
+                    assert!(periodic.start.is_none());
+                    let Period::Week { on } = periodic.period else {
                         panic!("Not a week")
                     };
                     assert!(on.is_empty());
@@ -444,10 +444,10 @@ mod tests {
                 #[test]
                 fn with_single_on() {
                     let sched = parse("every week on thursday");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::Week { on } = every.period else {
+                    let Period::Week { on } = periodic.period else {
                         panic!("Not a week")
                     };
                     assert_eq!(1, on.len());
@@ -457,10 +457,10 @@ mod tests {
                 #[test]
                 fn with_multiple_on() {
                     let sched = parse("every week on weekend and fri");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::Week { on } = every.period else {
+                    let Period::Week { on } = periodic.period else {
                         panic!("Not a week")
                     };
                     assert_eq!(2, on.len());
@@ -475,10 +475,10 @@ mod tests {
                 #[test]
                 fn named_without_day() {
                     let sched = parse("every july");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::NamedMonth { month, day } = every.period else {
+                    let Period::NamedMonth { month, day } = periodic.period else {
                         panic!("Not a named month")
                     };
                     assert!(day.is_none());
@@ -488,10 +488,10 @@ mod tests {
                 #[test]
                 fn named_with_day() {
                     let sched = parse("every aug 1st");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::NamedMonth { month, day } = every.period else {
+                    let Period::NamedMonth { month, day } = periodic.period else {
                         panic!("Not a named month")
                     };
                     assert_eq!(Some(Ordinal::First), day);
@@ -501,10 +501,10 @@ mod tests {
                 #[test]
                 fn without_on() {
                     let sched = parse("every month");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::Month { on } = every.period else {
+                    let Period::Month { on } = periodic.period else {
                         panic!("Not a month")
                     };
                     assert!(on.is_empty());
@@ -513,10 +513,10 @@ mod tests {
                 #[test]
                 fn with_ordinal_day() {
                     let sched = parse("every month on the last day");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::Month { on } = every.period else {
+                    let Period::Month { on } = periodic.period else {
                         panic!("Not a month")
                     };
                     assert_eq!(1, on.len());
@@ -526,10 +526,10 @@ mod tests {
                 #[test]
                 fn with_ordinal_weekday() {
                     let sched = parse("every month on the second monday");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::Month { on } = every.period else {
+                    let Period::Month { on } = periodic.period else {
                         panic!("Not a month")
                     };
                     assert_eq!(1, on.len());
@@ -542,10 +542,10 @@ mod tests {
                 #[test]
                 fn with_multiple_ons() {
                     let sched = parse("every month on the 3rd thursday, fourth, and 15th weekday");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::Month { on } = every.period else {
+                    let Period::Month { on } = periodic.period else {
                         panic!("Not a month")
                     };
                     assert_eq!(3, on.len());
@@ -564,12 +564,12 @@ mod tests {
             #[test]
             fn quarter() {
                 let sched = parse("every quarter");
-                let Schedule::Every(every) = sched else {
+                let Schedule::Periodic(periodic) = sched else {
                     panic!("not an every")
                 };
-                assert!(every.nth.is_none());
-                assert!(every.start.is_none());
-                let Period::Quarter = every.period else {
+                assert!(periodic.nth.is_none());
+                assert!(periodic.start.is_none());
+                let Period::Quarter = periodic.period else {
                     panic!("Not a quarter")
                 };
             }
@@ -580,10 +580,10 @@ mod tests {
                 #[test]
                 fn without_on() {
                     let sched = parse("every year");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::Year { on } = every.period else {
+                    let Period::Year { on } = periodic.period else {
                         panic!("Not a year")
                     };
                     assert!(on.is_empty());
@@ -592,10 +592,10 @@ mod tests {
                 #[test]
                 fn with_single_on() {
                     let sched = parse("every year on april fifth");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::Year { on } = every.period else {
+                    let Period::Year { on } = periodic.period else {
                         panic!("Not a year")
                     };
                     assert_eq!(1, on.len());
@@ -606,10 +606,10 @@ mod tests {
                 #[test]
                 fn with_multiple_on() {
                     let sched = parse("every year on may first, jul last");
-                    let Schedule::Every(every) = sched else {
+                    let Schedule::Periodic(periodic) = sched else {
                         panic!("not an every")
                     };
-                    let Period::Year { on } = every.period else {
+                    let Period::Year { on } = periodic.period else {
                         panic!("Not a year")
                     };
                     assert_eq!(2, on.len());
@@ -627,21 +627,21 @@ mod tests {
             #[test]
             fn daily() {
                 let sched = parse("daily");
-                let Schedule::Every(every) = sched else {
+                let Schedule::Periodic(periodic) = sched else {
                     panic!("not an every")
                 };
-                assert!(every.nth.is_none());
-                assert!(every.start.is_none());
-                assert_eq!(Period::Day, every.period);
+                assert!(periodic.nth.is_none());
+                assert!(periodic.start.is_none());
+                assert_eq!(Period::Day, periodic.period);
             }
 
             #[test]
             fn weekly_with_on() {
                 let sched = parse("weekly on monday and wednesday");
-                let Schedule::Every(every) = sched else {
+                let Schedule::Periodic(periodic) = sched else {
                     panic!("not an every")
                 };
-                let Period::Week { on } = every.period else {
+                let Period::Week { on } = periodic.period else {
                     panic!("not a week")
                 };
                 assert_eq!(vec![Dow::Monday, Dow::Wednesday], on);
@@ -650,7 +650,7 @@ mod tests {
             #[test]
             fn monthly_with_on() {
                 let sched = parse("monthly on the 1st and last day");
-                let Schedule::Every(every) = sched else {
+                let Schedule::Periodic(every) = sched else {
                     panic!("not an every")
                 };
                 let Period::Month { on } = every.period else {
@@ -665,7 +665,7 @@ mod tests {
         #[test]
         fn numeric_plural_form() {
             let sched = parse("every 2 fridays from 2025-01-01");
-            let Schedule::Every(every) = sched else {
+            let Schedule::Periodic(every) = sched else {
                 panic!("not an every")
             };
             assert_eq!(Some(Nth::new(2)), every.nth);
@@ -679,7 +679,7 @@ mod tests {
         #[test]
         fn compund() {
             let sched = parse("every second friday from 2025-01-01");
-            let Schedule::Every(every) = sched else {
+            let Schedule::Periodic(every) = sched else {
                 panic!("not an every")
             };
             let Some(nth) = every.nth else {
