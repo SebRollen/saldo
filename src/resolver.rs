@@ -1,5 +1,5 @@
 use crate::ast::{
-    Decl, Expr, ParamBody, Path, Posting, PostingAmount, Program, ScheduleRef, Schedule, Span, SpannedExpr
+    Decl, Expr, ParamBody, Path, Posting, PostingAmount, Program, ScheduleRef, Schedule, Span, SpannedExpr, Stmt,
 };
 use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
@@ -25,11 +25,19 @@ pub struct EntryDef {
 }
 
 
+#[derive(Debug, Clone)]
+pub struct FnDef {
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
 #[derive(Debug)]
 pub struct Model {
     /// Accounts in declaration order (used as column order in CSV output).
     pub stocks: IndexMap<Path, Account>,
     pub params: IndexMap<String, ParamBody>,
+    pub fns: IndexMap<String, FnDef>,
     pub entries: Vec<EntryDef>,
     pub asserts: Vec<(Schedule, SpannedExpr)>,
     pub leg_names: HashSet<(String, String)>,
@@ -42,6 +50,7 @@ struct Resolver<'a> {
     schedules: IndexMap<String, Schedule>,
     stocks: IndexMap<Path, Account>,
     params: HashMap<String, ParamBody>,
+    fns: HashMap<String, FnDef>,
     entries: Vec<EntryDef>,
     asserts: Vec<(Schedule, SpannedExpr)>,
     leg_names: HashSet<(String, String)>,
@@ -49,6 +58,7 @@ struct Resolver<'a> {
     schedule_spans: HashMap<String, Span>,
     stock_spans: HashMap<Path, Span>,
     param_spans: HashMap<String, Span>,
+    fn_spans: HashMap<String, Span>,
     entry_aliases: HashMap<String, Span>,
 }
 
@@ -60,12 +70,14 @@ impl<'a> Resolver<'a> {
             schedules: IndexMap::new(),
             stocks: IndexMap::new(),
             params: HashMap::new(),
+            fns: HashMap::new(),
             entries: Vec::new(),
             asserts: Vec::new(),
             leg_names: HashSet::new(),
             schedule_spans: HashMap::new(),
             stock_spans: HashMap::new(),
             param_spans: HashMap::new(),
+            fn_spans: HashMap::new(),
             entry_aliases: HashMap::new(),
         }
     }
@@ -73,6 +85,7 @@ impl<'a> Resolver<'a> {
     fn resolve(mut self) -> Result<Model, Vec<Diagnostic>> {
         self.collect_schedules();
         self.collect_declarations();
+        validate_fn_bodies(&self.fns, &mut self.diags);
         self.validate_references();
         if self.diags.is_empty() {
             Ok(self.into_model())
@@ -244,6 +257,30 @@ impl<'a> Resolver<'a> {
                         span: *span,
                     });
                 }
+                Decl::Fn { name, params, body } => {
+                    if let Some(prev) = self.fn_spans.get(name) {
+                        self.diags.push(
+                            Diagnostic::new(*span, format!("duplicate function `{name}`"))
+                                .with_note(*prev, "previously declared here"),
+                        );
+                    } else {
+                        let mut seen_params: HashSet<&str> = HashSet::new();
+                        for p in params {
+                            if !seen_params.insert(p.as_str()) {
+                                self.diags.push(Diagnostic::new(
+                                    *span,
+                                    format!("duplicate parameter `{p}` in function `{name}`"),
+                                ));
+                            }
+                        }
+                        self.fn_spans.insert(name.clone(), *span);
+                        self.fns.insert(name.clone(), FnDef {
+                            params: params.clone(),
+                            body: body.clone(),
+                            span: *span,
+                        });
+                    }
+                }
                 Decl::Assert { schedule, asserted } => {
                     let schedule: Schedule = match schedule {
                         None => Schedule::Periodic(Periodic { period: Period::Day, nth: None, start: None }),
@@ -326,6 +363,7 @@ impl<'a> Resolver<'a> {
     ) {
         let mut local_diags: Vec<Diagnostic> = Vec::new();
         let leg_names = &self.leg_names;
+        let fns = &self.fns;
         walk_expr(e, &mut |sub: &SpannedExpr| {
             if let Expr::Ref(path) = sub.0.as_ref()
                 && resolve_ref(path, stock_set, param_set).is_none()
@@ -337,19 +375,27 @@ impl<'a> Resolver<'a> {
                 ));
             }
             if let Expr::Call(name, args) = sub.0.as_ref() {
-                match BUILTINS.iter().find(|(n, _)| *n == name.as_str()) {
-                    None => local_diags.push(Diagnostic::new(
-                        sub.1,
-                        format!("unknown function `{name}`"),
-                    )),
-                    Some((_, arity)) if args.len() != *arity => {
+                if let Some((_, arity)) = BUILTINS.iter().find(|(n, _)| *n == name.as_str()) {
+                    if args.len() != *arity {
                         let argument_str = if *arity == 1 { "argument" } else { "arguments" };
                         local_diags.push(Diagnostic::new(
                             sub.1,
                             format!("`{name}` takes {arity} {argument_str}, got {}", args.len()),
-                        ))
+                        ));
                     }
-                    _ => {}
+                } else if let Some(def) = fns.get(name.as_str()) {
+                    if args.len() != def.params.len() {
+                        let expected = def.params.len();
+                        local_diags.push(Diagnostic::new(
+                            sub.1,
+                            format!("`{name}` takes {expected} argument(s), got {}", args.len()),
+                        ));
+                    }
+                } else {
+                    local_diags.push(Diagnostic::new(
+                        sub.1,
+                        format!("unknown function `{name}`"),
+                    ));
                 }
             }
             if let Expr::ParamAgg(entry_opt, leg, _) = sub.0.as_ref() {
@@ -387,6 +433,7 @@ impl<'a> Resolver<'a> {
         Model {
             stocks: self.stocks,
             params: topo_sort_params(self.params),
+            fns: topo_sort_fns(self.fns),
             entries: self.entries,
             asserts: self.asserts,
             leg_names: self.leg_names,
@@ -590,6 +637,160 @@ fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
             }
         }
     }
+}
+
+fn collect_fn_call_deps(body: &[Stmt], known: &HashSet<String>) -> Vec<String> {
+    let mut deps: Vec<String> = Vec::new();
+    let mut visitor = |e: &SpannedExpr| {
+        if let Expr::Call(name, _) = e.0.as_ref() && known.contains(name.as_str()) {
+            deps.push(name.clone());
+        }
+    };
+    for stmt in body {
+        match stmt {
+            Stmt::Let { value, .. } => walk_expr(value, &mut visitor),
+            Stmt::Return(expr) => walk_expr(expr, &mut visitor),
+        }
+    }
+    deps.sort();
+    deps.dedup();
+    deps
+}
+
+fn validate_fn_bodies(fns: &HashMap<String, FnDef>, diags: &mut Vec<Diagnostic>) {
+    let fn_names: HashSet<String> = fns.keys().cloned().collect();
+
+    for (name, def) in fns {
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut stack: Vec<String> = collect_fn_call_deps(&def.body, &fn_names);
+        while let Some(callee) = stack.pop() {
+            if callee == *name {
+                diags.push(Diagnostic::new(
+                    def.span,
+                    format!("function `{name}` contains a recursive call cycle"),
+                ));
+                break;
+            }
+            if visited.insert(callee.clone()) {
+                if let Some(callee_def) = fns.get(&callee) {
+                    stack.extend(collect_fn_call_deps(&callee_def.body, &fn_names));
+                }
+            }
+        }
+    }
+
+    for (fn_name, def) in fns {
+        let mut scope: HashSet<String> = def.params.iter().cloned().collect();
+        for stmt in &def.body {
+            match stmt {
+                Stmt::Let { name: let_name, value } => {
+                    validate_fn_expr(value, &scope, fns, fn_name, def.span, diags);
+                    scope.insert(let_name.clone());
+                }
+                Stmt::Return(expr) => {
+                    validate_fn_expr(expr, &scope, fns, fn_name, def.span, diags);
+                }
+            }
+        }
+    }
+}
+
+fn validate_fn_expr(
+    expr: &SpannedExpr,
+    scope: &HashSet<String>,
+    user_fns: &HashMap<String, FnDef>,
+    fn_name: &str,
+    fn_span: Span,
+    diags: &mut Vec<Diagnostic>,
+) {
+    walk_expr(expr, &mut |sub: &SpannedExpr| {
+        match sub.0.as_ref() {
+            Expr::Ref(path) => {
+                if !(path.0.len() == 1 && scope.contains(&path.0[0])) {
+                    diags.push(Diagnostic::new(
+                        sub.1,
+                        format!(
+                            "unknown reference `{path}` in function `{fn_name}`; \
+                             function bodies can only reference their own parameters and local bindings"
+                        ),
+                    ));
+                }
+            }
+            Expr::Call(callee, args) => {
+                if let Some((_, arity)) = BUILTINS.iter().find(|(n, _)| *n == callee.as_str()) {
+                    if args.len() != *arity {
+                        let word = if *arity == 1 { "argument" } else { "arguments" };
+                        diags.push(Diagnostic::new(
+                            sub.1,
+                            format!("`{callee}` takes {arity} {word}, got {}", args.len()),
+                        ));
+                    }
+                } else if let Some(def) = user_fns.get(callee.as_str()) {
+                    if args.len() != def.params.len() {
+                        let expected = def.params.len();
+                        diags.push(Diagnostic::new(
+                            sub.1,
+                            format!("`{callee}` takes {expected} argument(s), got {}", args.len()),
+                        ));
+                    }
+                } else {
+                    diags.push(Diagnostic::new(
+                        sub.1,
+                        format!("unknown function `{callee}`"),
+                    ));
+                }
+            }
+            Expr::ParamAgg(..) => {
+                diags.push(Diagnostic::new(
+                    fn_span,
+                    format!("function `{fn_name}` cannot use `.ytd`/`.qtd`/`.mtd` aggregations"),
+                ));
+            }
+            _ => {}
+        }
+    });
+}
+
+fn topo_sort_fns(mut map: HashMap<String, FnDef>) -> IndexMap<String, FnDef> {
+    let known: HashSet<String> = map.keys().cloned().collect();
+
+    let mut names: Vec<String> = map.keys().cloned().collect();
+    names.sort();
+    let idx: HashMap<&str, usize> =
+        names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+    let n = names.len();
+
+    let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
+    for (name, def) in &map {
+        let i = idx[name.as_str()];
+        for dep in collect_fn_call_deps(&def.body, &known) {
+            let j = idx[dep.as_str()];
+            dependents[j].push(i);
+        }
+    }
+    for deps in &mut dependents {
+        deps.sort();
+    }
+
+    let (order, had_cycle) = crate::util::topological_sort(&dependents);
+
+    let mut result: IndexMap<String, FnDef> = IndexMap::new();
+    for i in order {
+        let name = &names[i];
+        if let Some(def) = map.remove(name) {
+            result.insert(name.clone(), def);
+        }
+    }
+    if had_cycle {
+        let mut remaining: Vec<String> = map.keys().cloned().collect();
+        remaining.sort();
+        for name in remaining {
+            if let Some(def) = map.remove(&name) {
+                result.insert(name, def);
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]

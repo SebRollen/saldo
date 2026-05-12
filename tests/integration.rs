@@ -1,4 +1,5 @@
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use saldo::{run, RunOpts};
 
 fn d(s: &str) -> NaiveDate {
@@ -200,6 +201,176 @@ fn reference_before_opening_date_is_error() {
     ));
 }
 
+// --- user-defined functions ---
+
+#[test]
+fn fn_doubles_a_constant_param() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+
+        fn double(x) { return x * 2; }
+        param salary = 100
+        param gross = double(salary)
+
+        entry monthly \"pay\" {
+          Assets:Cash = gross / 12
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    assert_eq!(output.log.transactions.len(), 1);
+    let posting = output.log.transactions[0]
+        .postings
+        .iter()
+        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .unwrap();
+    // gross = 200, gross/12 ≈ 16.67
+    assert_eq!(posting.1.round_dp(2), Decimal::new(1667, 2));
+}
+
+#[test]
+fn fn_with_let_binding() {
+    let src = "
+        account Assets:Cash
+        account Expenses:Tax
+
+        fn net(gross, rate) {
+          let tax = gross * rate;
+          return gross - tax;
+        }
+
+        entry monthly \"salary\" {
+          Assets:Cash = net(6000, 0.3)
+          Expenses:Tax
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    let posting = output.log.transactions[0]
+        .postings
+        .iter()
+        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .unwrap();
+    // net(6000, 0.3) = 6000 - 1800 = 4200
+    assert_eq!(posting.1, Decimal::new(4200, 0));
+}
+
+#[test]
+fn fn_with_time_varying_param() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+
+        fn double(x) { return x * 2; }
+
+        param salary {
+          from 2025-01-01 to 2025-07-01 = 100
+          from 2025-07-01               = 200
+        }
+        param doubled = double(salary)
+
+        entry monthly \"pay\" {
+          Assets:Cash = doubled
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-12-31")).unwrap();
+    assert_eq!(output.log.transactions.len(), 12);
+    // January: doubled = 200
+    let jan = &output.log.transactions[0];
+    let jan_cash = jan.postings.iter()
+        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .unwrap();
+    assert_eq!(jan_cash.1, Decimal::new(200, 0));
+    // July: doubled = 400
+    let jul = &output.log.transactions[6];
+    let jul_cash = jul.postings.iter()
+        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .unwrap();
+    assert_eq!(jul_cash.1, Decimal::new(400, 0));
+}
+
+#[test]
+fn fn_calling_another_fn() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+
+        fn double(x) { return x * 2; }
+        fn quad(x)   { return double(double(x)); }
+
+        entry monthly \"pay\" {
+          Assets:Cash = quad(10)
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    let posting = output.log.transactions[0]
+        .postings
+        .iter()
+        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .unwrap();
+    assert_eq!(posting.1, Decimal::new(40, 0));
+}
+
+#[test]
+fn fn_calling_builtin() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+
+        fn positive(x) { return max(x, 0); }
+
+        entry monthly \"pay\" {
+          Assets:Cash = positive(-50)
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    let posting = output.log.transactions[0]
+        .postings
+        .iter()
+        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .unwrap();
+    assert_eq!(posting.1, Decimal::ZERO);
+}
+
+#[test]
+fn fn_with_if_expr() {
+    let src = "
+        account Assets:Cash
+        account Income:Bonus
+
+        fn bonus(salary, target) {
+          return if target > 0 then salary * 0.1 else 0;
+        }
+
+        entry monthly \"bonus\" {
+          Assets:Cash = bonus(10000, 1)
+          Income:Bonus
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    let posting = output.log.transactions[0]
+        .postings
+        .iter()
+        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .unwrap();
+    assert_eq!(posting.1, Decimal::new(1000, 0));
+}
+
+#[test]
+fn fn_referencing_global_param_is_rejected() {
+    let src = "
+        param rate = 0.3
+        fn bad(x) { return x * rate; }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(errors.iter().any(
+        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("function bodies can only reference"))
+    ));
+}
+
 #[test]
 fn opening_balance_date_equals_sim_start() {
     let src = "
@@ -214,4 +385,66 @@ fn opening_balance_date_equals_sim_start() {
     let output = run(src, &opts("2025-03-01", "2025-03-31")).unwrap();
     let opening_cash = output.log.opening.get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()])).copied().unwrap_or_default();
     assert_eq!(opening_cash, rust_decimal::Decimal::new(500, 0));
+}
+
+#[test]
+fn recursive_fn_is_rejected() {
+    let src = "fn loop_(x) { return loop_(x); }";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(errors.iter().any(
+        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("recursive call cycle"))
+    ));
+}
+
+#[test]
+fn duplicate_fn_name_is_rejected() {
+    let src = "fn f(x) { return x; }\nfn f(y) { return y; }";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(errors.iter().any(
+        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("duplicate function"))
+    ));
+}
+
+#[test]
+fn fn_implicit_return() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+
+        fn double(x) { x * 2 }
+        fn net(gross, rate) {
+          let tax = gross * rate;
+          gross - tax
+        }
+
+        entry monthly \"pay\" {
+          Assets:Cash = net(double(50), 0.2)
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    let posting = output.log.transactions[0]
+        .postings
+        .iter()
+        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .unwrap();
+    // double(50) = 100; net(100, 0.2) = 100 - 20 = 80
+    assert_eq!(posting.1, Decimal::new(80, 0));
+}
+
+#[test]
+fn fn_arity_mismatch_is_rejected() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+        fn double(x) { return x * 2; }
+        entry monthly \"pay\" {
+          Assets:Cash = double(1, 2)
+          Income:Salary
+        }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(errors.iter().any(
+        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("argument"))
+    ));
 }

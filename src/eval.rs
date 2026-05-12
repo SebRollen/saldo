@@ -1,6 +1,6 @@
-use crate::ast::{AggKind, BinOp, Expr, ParamBody, Path, PostingAmount, Span, SpannedExpr};
+use crate::ast::{AggKind, BinOp, Expr, ParamBody, Path, PostingAmount, Span, SpannedExpr, Stmt};
 use crate::errors::Diagnostic;
-use crate::resolver::{resolve_ref, Model, RefKind};
+use crate::resolver::{resolve_ref, FnDef, Model, RefKind};
 use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
@@ -59,6 +59,8 @@ struct Environment<'m> {
     opening_dates: HashMap<Path, NaiveDate>,
     /// The current simulation date (set at the top of each day's loop iteration).
     current_date: NaiveDate,
+    /// User-defined functions, cloned from the model at construction time.
+    fns: HashMap<String, FnDef>,
 }
 
 impl<'m> Environment<'m> {
@@ -69,6 +71,7 @@ impl<'m> Environment<'m> {
         let opening_dates = model.stocks.iter()
             .filter_map(|(p, a)| a.opening.as_ref().map(|(_, d)| (p.clone(), *d)))
             .collect();
+        let fns = model.fns.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         Self {
             stocks: HashMap::new(),
             params: HashMap::new(),
@@ -80,6 +83,7 @@ impl<'m> Environment<'m> {
             current_entry: None,
             opening_dates,
             current_date: NaiveDate::MIN,
+            fns,
         }
     }
 
@@ -375,7 +379,13 @@ fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result
                     }
                 }
             }
-            call_builtin(name, &nums, *span)
+            if BUILTINS.iter().any(|(n, _)| *n == name.as_str()) {
+                call_builtin(name, &nums, *span)
+            } else if let Some(fn_def) = env.fns.get(name.as_str()).cloned() {
+                eval_fn_body(&fn_def, &nums, env, *span)
+            } else {
+                Err(Diagnostic::new(*span, format!("unknown function `{name}`")))
+            }
         }
         Expr::Ref(path) => {
             // Bare leg name: resolves to the current-day value within the same flow (0 if not fired yet).
@@ -460,6 +470,96 @@ fn check_account_open(env: &Environment<'_>, account: &Path, span: Span) -> Resu
         }
     }
     Ok(())
+}
+
+fn eval_fn_body(
+    fn_def: &FnDef,
+    arg_values: &[Decimal],
+    env: &Environment<'_>,
+    call_span: Span,
+) -> Result<Value, Diagnostic> {
+    let mut scope: HashMap<String, Decimal> = fn_def
+        .params
+        .iter()
+        .zip(arg_values.iter())
+        .map(|(k, &v)| (k.clone(), v))
+        .collect();
+
+    for stmt in &fn_def.body {
+        match stmt {
+            Stmt::Let { name, value } => {
+                let v = eval_fn_expr(value, &scope, env)?;
+                match v {
+                    Value::Num(n) => { scope.insert(name.clone(), n); }
+                    Value::Bool(_) => return Err(Diagnostic::new(
+                        value.1,
+                        format!("let binding `{name}` must evaluate to a number"),
+                    )),
+                }
+            }
+            Stmt::Return(expr) => {
+                return eval_fn_expr(expr, &scope, env);
+            }
+        }
+    }
+    Err(Diagnostic::new(call_span, "function has no return statement"))
+}
+
+fn eval_fn_expr(
+    (expr, span): &SpannedExpr,
+    scope: &HashMap<String, Decimal>,
+    env: &Environment<'_>,
+) -> Result<Value, Diagnostic> {
+    match expr.as_ref() {
+        Expr::Num(n) => Ok(Value::Num(*n)),
+        Expr::Bool(b) => Ok(Value::Bool(*b)),
+        Expr::Ref(path) => {
+            if path.0.len() == 1 {
+                if let Some(&v) = scope.get(&path.0[0]) {
+                    return Ok(Value::Num(v));
+                }
+            }
+            Err(Diagnostic::new(*span, format!("unknown local `{path}`")))
+        }
+        Expr::Neg(x) => match eval_fn_expr(x, scope, env)? {
+            Value::Num(n) => Ok(Value::Num(-n)),
+            _ => Err(Diagnostic::new(*span, "unary minus requires a numeric operand")),
+        },
+        Expr::Bin(a, op, b) => {
+            let x = eval_fn_expr(a, scope, env)?;
+            let y = eval_fn_expr(b, scope, env)?;
+            apply_binop(*op, x, y, *span)
+        }
+        Expr::If { cond, then, else_ } => match eval_fn_expr(cond, scope, env)? {
+            Value::Bool(c) => {
+                if c { eval_fn_expr(then, scope, env) } else { eval_fn_expr(else_, scope, env) }
+            }
+            _ => Err(Diagnostic::new(*span, "condition in `if` expression must be a bool")),
+        },
+        Expr::Call(name, args) => {
+            let mut nums = Vec::with_capacity(args.len());
+            for a in args {
+                match eval_fn_expr(a, scope, env)? {
+                    Value::Num(n) => nums.push(n),
+                    _ => return Err(Diagnostic::new(
+                        a.1,
+                        format!("argument to `{name}` must be numeric"),
+                    )),
+                }
+            }
+            if BUILTINS.iter().any(|(n, _)| *n == name.as_str()) {
+                call_builtin(name, &nums, *span)
+            } else if let Some(callee) = env.fns.get(name.as_str()).cloned() {
+                eval_fn_body(&callee, &nums, env, *span)
+            } else {
+                Err(Diagnostic::new(*span, format!("unknown function `{name}`")))
+            }
+        }
+        Expr::ParamAgg(..) => Err(Diagnostic::new(
+            *span,
+            "aggregations are not allowed in function bodies",
+        )),
+    }
 }
 
 fn eval_num<'m>(expr: &'m SpannedExpr, env: &Environment<'m>) -> Result<Decimal, Diagnostic> {

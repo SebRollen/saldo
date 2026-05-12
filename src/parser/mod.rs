@@ -2,7 +2,7 @@ mod schedule;
 
 use crate::ast::{
     AggKind, BinOp, Decl, Expr, Interval, ParamBody, Path, Posting, PostingAmount, Program,
-    ScheduleRef, SpannedExpr,
+    ScheduleRef, SpannedExpr, Stmt,
 };
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
@@ -169,7 +169,7 @@ impl<'src> Parser<'src> {
     fn synchronize(&mut self) {
         loop {
             match self.peek() {
-                Token::EOF | Token::Account | Token::Assert | Token::Entry | Token::Param | Token::Schedule => {
+                Token::EOF | Token::Account | Token::Assert | Token::Entry | Token::Fn | Token::Param | Token::Schedule => {
                     return
                 }
                 _ => {
@@ -200,6 +200,10 @@ impl<'src> Parser<'src> {
             Token::Account => {
                 self.advance();
                 return self.parse_account_decl();
+            }
+            Token::Fn => {
+                self.advance();
+                return self.parse_fn_decl();
             }
             Token::EOF => return None,
             _ => {}
@@ -279,6 +283,80 @@ impl<'src> Parser<'src> {
         self.expect(&Token::That)?;
         let asserted = self.parse_expr()?;
         Some(Decl::Assert { schedule, asserted })
+    }
+
+    fn parse_fn_decl(&mut self) -> Option<Decl> {
+        let (name, _) = self.eat_ident()?;
+        let name = name.to_string();
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        while !matches!(self.peek(), Token::RParen | Token::EOF) {
+            let (p, _) = self.eat_ident()?;
+            params.push(p.to_string());
+            if self.eat(&Token::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::LBrace)?;
+        let mut body: Vec<Stmt> = Vec::new();
+        loop {
+            match self.peek() {
+                Token::RBrace | Token::EOF => break,
+                Token::Let => {
+                    self.advance();
+                    if let Some(stmt) = self.parse_let_stmt() {
+                        body.push(stmt);
+                    } else {
+                        break;
+                    }
+                }
+                Token::Return => {
+                    self.advance();
+                    if let Some(stmt) = self.parse_return_stmt() {
+                        body.push(stmt);
+                    }
+                    break;
+                }
+                _ => {
+                    // Implicit return: a bare expression not followed by `;`.
+                    if let Some(expr) = self.parse_expr() {
+                        if matches!(self.peek(), Token::RBrace | Token::EOF) {
+                            body.push(Stmt::Return(expr));
+                        } else {
+                            self.errors.push(Diagnostic::new(
+                                self.peek_span(),
+                                "expected `}` after expression (use `return expr;` for an explicit return, or omit `;` for an implicit one)",
+                            ));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        if !matches!(body.last(), Some(Stmt::Return(_))) {
+            self.errors.push(Diagnostic::new(
+                self.last_span,
+                format!("function `{name}` has no return value"),
+            ));
+            return None;
+        }
+        Some(Decl::Fn { name, params, body })
+    }
+
+    fn parse_let_stmt(&mut self) -> Option<Stmt> {
+        let (name, _) = self.eat_ident()?;
+        self.expect(&Token::Eq)?;
+        let value = self.parse_expr()?;
+        self.expect(&Token::Semicolon)?;
+        Some(Stmt::Let { name: name.to_string(), value })
+    }
+
+    fn parse_return_stmt(&mut self) -> Option<Stmt> {
+        let value = self.parse_expr()?;
+        self.expect(&Token::Semicolon)?;
+        Some(Stmt::Return(value))
     }
 
     fn parse_entry_decl(&mut self) -> Option<Decl> {

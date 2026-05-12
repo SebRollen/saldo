@@ -19,7 +19,10 @@ pub enum Token<'src> {
     Assert,
     That,
     Entry,
+    Fn,
+    Let,
     Param,
+    Return,
     Schedule,
 
     // punctuation
@@ -43,6 +46,7 @@ pub enum Token<'src> {
     RParen,
     LBrace,
     RBrace,
+    Semicolon,
     EOF,
 }
 
@@ -72,7 +76,10 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Assert => write!(f, "assert"),
             Token::That => write!(f, "that"),
             Token::Entry => write!(f, "entry"),
+            Token::Fn => write!(f, "fn"),
+            Token::Let => write!(f, "let"),
             Token::Param => write!(f, "param"),
+            Token::Return => write!(f, "return"),
             Token::Schedule => write!(f, "schedule"),
             Token::Eq => write!(f, "="),
             Token::EqEq => write!(f, "=="),
@@ -94,6 +101,7 @@ impl<'src> fmt::Display for Token<'src> {
             Token::RParen => write!(f, ")"),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
+            Token::Semicolon => write!(f, ";"),
             Token::EOF => write!(f, "EOF"),
         }
     }
@@ -304,7 +312,10 @@ impl<'src> Lexer<'src> {
             "assert" => Token::Assert,
             "that" => Token::That,
             "entry" => Token::Entry,
+            "fn" => Token::Fn,
+            "let" => Token::Let,
             "param" => Token::Param,
+            "return" => Token::Return,
             "schedule" => Token::Schedule,
             _ => Token::Ident(word),
         };
@@ -416,6 +427,7 @@ impl<'src> Lexer<'src> {
                     return self.emit_token(Token::NotEq);
                 }
             }
+            b';' => return self.emit_token(Token::Semicolon),
             b'"' => return self.lex_string(),
             _ => {}
         }

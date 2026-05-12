@@ -9,3 +9,4 @@
   - [Params](./params.md)
   - [Entries](./entries.md)
   - [Asserts](./asserts.md)
+  - [Functions](./fns.md)

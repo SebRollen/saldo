@@ -156,6 +156,12 @@ pub enum ParamBody {
 }
 
 #[derive(Clone, Debug)]
+pub enum Stmt {
+    Let { name: String, value: SpannedExpr },
+    Return(SpannedExpr),
+}
+
+#[derive(Clone, Debug)]
 pub enum Decl {
     Account {
         name: Path,
@@ -180,6 +186,11 @@ pub enum Decl {
     Assert {
         schedule: Option<ScheduleRef>,
         asserted: SpannedExpr,
+    },
+    Fn {
+        name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
     },
 }
 
