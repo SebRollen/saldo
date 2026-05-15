@@ -117,18 +117,17 @@ impl<'src> Parser<'src> {
     }
 
     fn try_parse_day(&mut self) -> Option<Period> {
-        if let Token::Ident(s) = self.peek() {
-            if s.eq_ignore_ascii_case("day") || s.eq_ignore_ascii_case("days") {
+        if let Token::Ident(s) = self.peek()
+            && (s.eq_ignore_ascii_case("day") || s.eq_ignore_ascii_case("days")) {
                 self.advance();
                 return Some(Period::Day);
-            }
         }
         None
     }
 
     fn try_parse_week(&mut self) -> Option<Period> {
-        if let Token::Ident(s) = self.peek() {
-            if s.eq_ignore_ascii_case("week") || s.eq_ignore_ascii_case("weeks") {
+        if let Token::Ident(s) = self.peek()
+            && (s.eq_ignore_ascii_case("week") || s.eq_ignore_ascii_case("weeks")) {
                 self.advance();
                 let on = if self.eat_ident_ci("on").is_some() {
                     self.parse_dow_list()
@@ -137,7 +136,6 @@ impl<'src> Parser<'src> {
                 };
                 return Some(Period::Week { on });
             }
-        }
         None
     }
 
@@ -146,8 +144,8 @@ impl<'src> Parser<'src> {
             let day = self.try_parse_ordinal();
             return Some(Period::NamedMonth { month, day });
         }
-        if let Token::Ident(s) = self.peek() {
-            if s.eq_ignore_ascii_case("month") || s.eq_ignore_ascii_case("months") {
+        if let Token::Ident(s) = self.peek()
+            && (s.eq_ignore_ascii_case("month") || s.eq_ignore_ascii_case("months")) {
                 self.advance();
                 let on = if self.eat_ident_ci("on").is_some() {
                     self.eat_ident_ci("the");
@@ -157,23 +155,21 @@ impl<'src> Parser<'src> {
                 };
                 return Some(Period::Month { on });
             }
-        }
         None
     }
 
     fn try_parse_quarter(&mut self) -> Option<Period> {
-        if let Token::Ident(s) = self.peek() {
-            if s.eq_ignore_ascii_case("quarter") || s.eq_ignore_ascii_case("quarters") {
+        if let Token::Ident(s) = self.peek() 
+            && (s.eq_ignore_ascii_case("quarter") || s.eq_ignore_ascii_case("quarters")) {
                 self.advance();
                 return Some(Period::Quarter);
-            }
         }
         None
     }
 
     fn try_parse_year(&mut self) -> Option<Period> {
-        if let Token::Ident(s) = self.peek() {
-            if s.eq_ignore_ascii_case("year") || s.eq_ignore_ascii_case("years") {
+        if let Token::Ident(s) = self.peek() 
+            && (s.eq_ignore_ascii_case("year") || s.eq_ignore_ascii_case("years")) {
                 self.advance();
                 let on = if self.eat_ident_ci("on").is_some() {
                     self.parse_year_occurrence_list()
@@ -182,7 +178,6 @@ impl<'src> Parser<'src> {
                 };
                 return Some(Period::Year { on });
             }
-        }
         None
     }
 
@@ -230,21 +225,18 @@ impl<'src> Parser<'src> {
     }
 
     fn try_parse_nth(&mut self) -> Option<Nth> {
-        if let Token::Ordinal(n) = self.peek() {
-            if *n >= 2 {
-                let n = *n;
-                self.advance();
-                return Some(Nth::new(n));
-            }
+        if let Token::Ordinal(n) = self.peek() && *n >= 2 {
+            let n = *n;
+            self.advance();
+            return Some(Nth::new(n));
         }
         if let Token::Float(n) = self.peek() {
             let n = *n;
-            if n.fract() == Decimal::ZERO && n >= Decimal::from(2) && n <= Decimal::from(255) {
-                if let Ok(val) = n.to_string().parse::<u8>() {
+            if n.fract() == Decimal::ZERO && n >= Decimal::from(2) && n <= Decimal::from(255)
+                && let Ok(val) = n.to_string().parse::<u8>() {
                     self.advance();
                     return Some(Nth::new(val));
                 }
-            }
         }
         if let Token::Ident(s) = self.peek() {
             let n: u8 = match s.to_lowercase().as_str() {

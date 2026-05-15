@@ -73,7 +73,11 @@ pub fn format_errors(path: &str, src: &str, errors: &[Error]) -> String {
                 writeln!(out, "--from ({from}) is after --to ({to})").ok();
             }
             Error::Diagnostic(d) => {
-                out.push_str(&errors::format_diagnostics(path, src, &[d.clone()]));
+                out.push_str(&errors::format_diagnostics(
+                    path,
+                    src,
+                    std::slice::from_ref(d),
+                ));
             }
         }
     }

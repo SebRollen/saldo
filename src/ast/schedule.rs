@@ -91,7 +91,7 @@ impl MonthOccurrence {
         match self {
             Self::Day(ordinal) => {
                 if ordinal.matches(t) {
-                    return true;
+                    true
                 } else if let Ordinal::Nth(Nth(n)) = ordinal && *n > t.num_days_in_month() && t.is_month_end() {
                     // schedule is something like "every month on 30th", but we're now in february,
                     // which doesn't have 30 days. We should match on the last day of Feb

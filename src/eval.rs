@@ -347,10 +347,7 @@ fn eval_expr((expr, span): &SpannedExpr, env: &Environment) -> Result<Value, Dia
         Expr::ParamAgg(flow_opt, leg, kind) => {
             let key = match flow_opt {
                 Some(flow) => (flow.clone(), leg.clone()),
-                None => (
-                    env.current_entry.clone().unwrap_or_else(String::new),
-                    leg.clone(),
-                ),
+                None => (env.current_entry.clone().unwrap_or_default(), leg.clone()),
             };
             let v = env
                 .accumulators

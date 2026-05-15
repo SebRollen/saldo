@@ -97,11 +97,10 @@ impl<'src> Parser<'src> {
     }
 
     fn eat_ident_ci(&mut self, word: &str) -> Option<Span> {
-        if let Token::Ident(s) = self.peek() {
-            if s.eq_ignore_ascii_case(word) {
+        if let Token::Ident(s) = self.peek()
+            && s.eq_ignore_ascii_case(word) {
                 let (_, span) = self.advance();
                 return Some(span);
-            }
         }
         None
     }
@@ -337,9 +336,7 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_interval(&mut self) -> Option<Interval> {
-        if self.eat_ident_ci("from").is_none() {
-            return None;
-        }
+        self.eat_ident_ci("from")?;
         let from = self.parse_date()?;
         let to = if self.eat_ident_ci("to").is_some() {
             Some(self.parse_date()?)
