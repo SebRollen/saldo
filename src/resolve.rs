@@ -4,7 +4,7 @@ use crate::ast::{
 use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
 use indexmap::IndexMap;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use crate::ast::schedule::{Periodic, Period};
 
 #[derive(Debug, Clone)]
@@ -407,50 +407,48 @@ fn collect_param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> 
     deps
 }
 
+/// Kahn's topological sort on `n` nodes numbered `0..n`.
+/// Returns `(order, had_cycle)`. When `had_cycle` is true, `order.len() < n` and the
+/// unreachable nodes are omitted — callers handle them however they like.
 fn topo_sort_params(mut map: HashMap<String, ParamBody>) -> IndexMap<String, ParamBody> {
     let known: HashSet<String> = map.keys().cloned().collect();
-    let mut in_deg: HashMap<String, usize> = map.keys().map(|n| (n.clone(), 0)).collect();
-    let mut dependents: HashMap<String, Vec<String>> =
-        map.keys().map(|n| (n.clone(), vec![])).collect();
 
+    // Assign stable integer indices in sorted key order for deterministic output.
+    let mut names: Vec<String> = map.keys().cloned().collect();
+    names.sort();
+    let idx: HashMap<&str, usize> =
+        names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+    let n = names.len();
+
+    let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
     for (name, param) in &map {
+        let i = idx[name.as_str()];
         for dep in collect_param_deps(param, &known) {
-            dependents.entry(dep).or_default().push(name.clone());
-            *in_deg.entry(name.clone()).or_insert(0) += 1;
+            let j = idx[dep.as_str()];
+            dependents[j].push(i);
         }
     }
+    // Sort each adjacency list so newly-ready nodes are enqueued in key order.
+    for deps in &mut dependents {
+        deps.sort();
+    }
 
-    let mut queue: Vec<String> = in_deg
-        .iter()
-        .filter(|&(_, &d)| d == 0)
-        .map(|(n, _)| n.clone())
-        .collect();
-    queue.sort();
-    let mut queue: VecDeque<String> = queue.into();
+    let (order, had_cycle) = crate::util::topological_sort(dependents);
 
     let mut result: IndexMap<String, ParamBody> = IndexMap::new();
-    while let Some(name) = queue.pop_front() {
-        if let Some(param) = map.remove(&name) {
+    for i in order {
+        let name = &names[i];
+        if let Some(param) = map.remove(name) {
             result.insert(name.clone(), param);
         }
-        if let Some(deps) = dependents.get(&name) {
-            let mut next: Vec<String> = deps
-                .iter()
-                .filter_map(|d| {
-                    let deg = in_deg.get_mut(d)?;
-                    *deg -= 1;
-                    (*deg == 0).then(|| d.clone())
-                })
-                .collect();
-            next.sort();
-            queue.extend(next);
-        }
     }
-    let mut remaining: Vec<String> = map.keys().cloned().collect();
-    remaining.sort();
-    for name in remaining {
-        if let Some(param) = map.remove(&name) {
-            result.insert(name, param);
+    if had_cycle {
+        let mut remaining: Vec<String> = map.keys().cloned().collect();
+        remaining.sort();
+        for name in remaining {
+            if let Some(param) = map.remove(&name) {
+                result.insert(name, param);
+            }
         }
     }
     result
@@ -481,9 +479,7 @@ fn topo_sort_postings(
         }
     }
 
-    let mut in_deg: Vec<usize> = vec![0; n];
     let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
-
     for (i, p) in explicit.iter().enumerate() {
         if let Some(PostingAmount::Expr(e)) = &p.amount {
             let mut seen: HashSet<usize> = HashSet::new();
@@ -495,25 +491,14 @@ fn topo_sort_postings(
                     && seen.insert(j)
                 {
                     dependents[j].push(i);
-                    in_deg[i] += 1;
                 }
             });
         }
     }
 
-    let mut queue: VecDeque<usize> = (0..n).filter(|&i| in_deg[i] == 0).collect();
-    let mut order: Vec<usize> = Vec::with_capacity(n);
-    while let Some(i) = queue.pop_front() {
-        order.push(i);
-        for &j in &dependents[i] {
-            in_deg[j] -= 1;
-            if in_deg[j] == 0 {
-                queue.push_back(j);
-            }
-        }
-    }
+    let (order, had_cycle) = crate::util::topological_sort(dependents);
 
-    if order.len() != n {
+    if had_cycle {
         diags.push(Diagnostic::new(
             span,
             format!("entry `{entry_name}` has a cycle among named legs"),

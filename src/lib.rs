@@ -4,6 +4,7 @@ mod eval;
 mod lexer;
 mod parser;
 mod resolve;
+mod util;
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
