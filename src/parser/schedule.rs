@@ -236,7 +236,7 @@ impl<'src> Parser<'src> {
                 && let Ok(val) = n.to_string().parse::<u8>() {
                     self.advance();
                     return Some(Nth::new(val));
-                }
+            }
         }
         if let Token::Ident(s) = self.peek() {
             let n: u8 = match s.to_lowercase().as_str() {

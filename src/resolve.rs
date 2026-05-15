@@ -433,7 +433,7 @@ fn topo_sort_params(mut map: HashMap<String, ParamBody>) -> IndexMap<String, Par
         deps.sort();
     }
 
-    let (order, had_cycle) = crate::util::topological_sort(dependents);
+    let (order, had_cycle) = crate::util::topological_sort(&dependents);
 
     let mut result: IndexMap<String, ParamBody> = IndexMap::new();
     for i in order {
@@ -496,7 +496,7 @@ fn topo_sort_postings(
         }
     }
 
-    let (order, had_cycle) = crate::util::topological_sort(dependents);
+    let (order, had_cycle) = crate::util::topological_sort(&dependents);
 
     if had_cycle {
         diags.push(Diagnostic::new(
