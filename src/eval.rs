@@ -321,8 +321,8 @@ fn eval_expr((expr, span): &SpannedExpr, env: &Environment) -> Result<Value, Dia
         }
         Expr::Ref(path) => {
             // Bare leg name: resolves to the current-day value within the same flow (0 if not fired yet).
-            if path.0.len() == 1 && env.current_entry.is_some() {
-                let key = (env.current_entry.clone().unwrap(), path.0[0].clone());
+            if path.0.len() == 1 && let Some(entry) = &env.current_entry {
+                let key = (entry.clone(), path.0[0].clone());
                 if env.leg_set.contains(&key) {
                     return Ok(Value::Num(
                         env.leg_values.get(&key).copied().unwrap_or(Decimal::ZERO),
@@ -345,10 +345,13 @@ fn eval_expr((expr, span): &SpannedExpr, env: &Environment) -> Result<Value, Dia
             }
         }
         Expr::ParamAgg(flow_opt, leg, kind) => {
-            let key = match flow_opt {
-                Some(flow) => (flow.clone(), leg.clone()),
-                None => (env.current_entry.clone().unwrap_or_default(), leg.clone()),
+            let flow_key = match flow_opt {
+                Some(flow) => flow.clone(),
+                None => env.current_entry.clone().ok_or_else(|| {
+                    Diagnostic::new(*span, format!("aggregate `{leg}` used outside of an entry"))
+                })?,
             };
+            let key = (flow_key, leg.clone());
             let v = env
                 .accumulators
                 .get(&(key, *kind))
