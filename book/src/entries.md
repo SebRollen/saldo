@@ -96,7 +96,7 @@ use in scoped aggregations:
 Reference a leg scoped to this flow with `<alias>.<leg>.ytd`:
 
 ```
-assert seb_paycheck.retirement_contribution.ytd <= 24_500
+assert that seb_paycheck.retirement_contribution.ytd <= 24_500
 ```
 
 Without an alias, leg aggregations are unscoped and can be referenced

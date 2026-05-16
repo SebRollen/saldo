@@ -38,7 +38,7 @@ entry monthly on the 17th "Loan payment" {
   Liabilities:Loan            = 2_000
   Assets:Cash
 }
-assert daily Assets:Cash >= 0
+assert daily that Assets:Cash >= 0
 ```
 
 When run through the `saldo` CLI, this file generates transactions:
@@ -150,8 +150,8 @@ can be declared using the `schedule` keyword, or built inline.
 ### Assertions
 
 ```
-assert Assets:Cash >= 0
-assert on 2026-12-31 Assets:Retirement:Beth == 24_500
+assert that Assets:Cash >= 0
+assert on 2026-12-31 that Assets:Retirement:Beth == 24_500
 ```
 
 Assertions are checked after flows run each day. Simulation aborts with an error if any assertion fails.

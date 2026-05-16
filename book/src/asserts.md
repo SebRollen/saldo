@@ -7,7 +7,7 @@ Assertions are how you express financial constraints and goals.
 ## Syntax
 
 ```
-assert [<schedule>] <boolean-expression>
+assert [<schedule>] that <boolean-expression>
 ```
 
 Without a schedule, an assertion is checked every day of the simulation.
@@ -16,8 +16,8 @@ With a schedule, it is checked only on days that match.
 ## Daily assertions
 
 ```
-assert Assets:Cash >= 0
-assert jim_paycheck.retirement_contribution.ytd <= 24_500
+assert that Assets:Cash >= 0
+assert that jim_paycheck.retirement_contribution.ytd <= 24_500
 ```
 
 These fire every day. The first ensures the cash account never goes
@@ -28,9 +28,9 @@ negative. The second ensures a named leg never exceeds a limit.
 Any schedule expression can precede the condition:
 
 ```
-assert quarterly Assets:Retirement >= 0
-assert monthly on the last day Assets:Cash >= 10_000
-assert every friday Liabilities:AccruedInterest >= 0
+assert quarterly that Assets:Retirement >= 0
+assert monthly on the last day that Assets:Cash >= 10_000
+assert every friday that Liabilities:AccruedInterest >= 0
 ```
 
 ## Date-specific assertions
@@ -38,8 +38,8 @@ assert every friday Liabilities:AccruedInterest >= 0
 A single date (or a list of dates) acts as a schedule:
 
 ```
-assert 2026-12-31 Assets:Retirement:Seb  == 24_500
-assert 2026-12-31 Assets:Retirement:Jess == 24_500
+assert 2026-12-31 that Assets:Retirement:Seb  == 24_500
+assert 2026-12-31 that Assets:Retirement:Jess == 24_500
 ```
 
 ## Expressions
@@ -61,14 +61,14 @@ Account references, param names, and aggregation suffixes (`.ytd`, `.qtd`,
 
 ```
 // Cash never goes negative
-assert Assets:Cash >= 0
+assert that Assets:Cash >= 0
 
 // 401(k) contribution limit not breached
-assert jim_paycheck.retirement_contribution.ytd <= max_401k
+assert that jim_paycheck.retirement_contribution.ytd <= max_401k
 
 // Target retirement balance hit by a specific date
-assert 2026-12-31 Assets:Retirement:Beth == 24_500
+assert 2026-12-31 that Assets:Retirement:Beth == 24_500
 
 // Sanity-check every quarter
-assert quarterly Assets:Retirement:Seb >= 0
+assert quarterly that Assets:Retirement:Seb >= 0
 ```

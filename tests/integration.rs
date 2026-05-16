@@ -146,7 +146,7 @@ fn unknown_param_in_expr_is_a_diagnostic() {
 fn failing_assertion_is_a_diagnostic() {
     let src = "
         account Assets:Cash = 100
-        assert Assets:Cash >= 200
+        assert that Assets:Cash >= 200
     ";
     let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
     assert!(errors.iter().any(
@@ -158,7 +158,7 @@ fn failing_assertion_is_a_diagnostic() {
 fn passing_assertion_succeeds() {
     let src = "
         account Assets:Cash = 500
-        assert Assets:Cash >= 0
+        assert that Assets:Cash >= 0
     ";
     run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
 }

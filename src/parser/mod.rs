@@ -267,6 +267,7 @@ impl<'src> Parser<'src> {
 
     fn parse_assert_decl(&mut self) -> Option<Decl> {
         let schedule = self.try_parse_schedule_ref();
+        self.expect(&Token::That)?;
         let asserted = self.parse_expr()?;
         Some(Decl::Assert { schedule, asserted })
     }
@@ -322,17 +323,8 @@ impl<'src> Parser<'src> {
         }
         self.restore(cp);
 
-        if let Token::Ident(s) = self.peek() {
-            let s = *s;
-            if !s.eq_ignore_ascii_case("if") {
-                let next = self.peek_next();
-                if !matches!(next, Token::Colon | Token::LParen | Token::Period) {
-                    let (name, _) = self.eat_ident().unwrap();
-                    return Some(ScheduleRef::Named(name.to_string()));
-                }
-            }
-        }
-        None
+        let (name, _) = self.eat_ident()?;
+        Some(ScheduleRef::Named(name.to_string()))
     }
 
     fn parse_interval(&mut self) -> Option<Interval> {
@@ -768,7 +760,7 @@ mod tests {
 
     #[test]
     fn parses_assert() {
-        let prog = parse_prog("assert Assets:Cash >= 0");
+        let prog = parse_prog("assert that Assets:Cash >= 0");
         assert!(matches!(
             prog.decls[0].0,
             Decl::Assert { schedule: None, .. }
@@ -777,7 +769,7 @@ mod tests {
 
     #[test]
     fn parses_scheduled_assert() {
-        let prog = parse_prog("assert yearly Assets:Retirement >= 0");
+        let prog = parse_prog("assert yearly that Assets:Retirement >= 0");
         assert!(matches!(
             prog.decls[0].0,
             Decl::Assert {
@@ -786,7 +778,7 @@ mod tests {
             }
         ));
 
-        let prog = parse_prog("assert quarterly Assets:Cash >= 0");
+        let prog = parse_prog("assert quarterly that Assets:Cash >= 0");
         assert!(matches!(
             prog.decls[0].0,
             Decl::Assert {
@@ -795,7 +787,7 @@ mod tests {
             }
         ));
 
-        let prog = parse_prog("assert monthly Assets:Cash >= 0");
+        let prog = parse_prog("assert monthly that Assets:Cash >= 0");
         assert!(matches!(
             prog.decls[0].0,
             Decl::Assert {
@@ -823,7 +815,7 @@ mod tests {
 
     #[test]
     fn parses_if_expr() {
-        let prog = parse_prog("assert if Assets:Cash > 0 then 1 else 0");
+        let prog = parse_prog("assert that if Assets:Cash > 0 then 1 else 0");
         if let Decl::Assert {
             asserted: (e, _), ..
         } = &prog.decls[0].0
@@ -843,13 +835,13 @@ mod tests {
 
     #[test]
     fn if_requires_then() {
-        let errs = parse_errs("assert if Assets:Cash > 0 1 else 0");
+        let errs = parse_errs("assert that if Assets:Cash > 0 1 else 0");
         assert!(errs.iter().any(|d| d.message.contains("then")));
     }
 
     #[test]
     fn if_requires_else() {
-        let errs = parse_errs("assert if Assets:Cash > 0 then 1 0");
+        let errs = parse_errs("assert that if Assets:Cash > 0 then 1 0");
         assert!(errs.iter().any(|d| d.message.contains("else")));
     }
 }
