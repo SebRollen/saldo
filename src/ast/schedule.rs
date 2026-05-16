@@ -58,7 +58,7 @@ pub struct Nth(u8);
 
 impl Nth {
     pub fn new(inner: u8) -> Self{
-        debug_assert!(inner > 1);
+        assert!(inner > 1, "Nth must be > 1; use Ordinal::First for 1");
         Self(inner)
     }
 }
