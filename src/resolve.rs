@@ -403,6 +403,7 @@ fn collect_param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> 
             }
         }
     }
+    deps.sort();
     deps.dedup();
     deps
 }
