@@ -169,7 +169,7 @@ impl<'src> Parser<'src> {
     fn synchronize(&mut self) {
         loop {
             match self.peek() {
-                Token::EOF | Token::Assert | Token::Entry | Token::Param | Token::Schedule => {
+                Token::EOF | Token::Account | Token::Assert | Token::Entry | Token::Param | Token::Schedule => {
                     return
                 }
                 _ => {
