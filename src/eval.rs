@@ -32,26 +32,26 @@ pub struct DaySnapshot {
     pub balances: IndexMap<Path, Decimal>,
 }
 
-struct Environment {
+struct Environment<'m> {
     stocks: HashMap<Path, Decimal>,
     params: HashMap<String, Decimal>,
     /// (flow_name, leg_name) → value for the current day (0 on non-firing days).
-    leg_values: HashMap<(String, String), Decimal>,
+    leg_values: HashMap<(&'m str, &'m str), Decimal>,
     /// ((flow_name, leg_name), period) → running total.
-    accumulators: HashMap<((String, String), AggKind), Decimal>,
+    accumulators: HashMap<((&'m str, &'m str), AggKind), Decimal>,
     stock_set: HashSet<Path>,
     param_set: HashSet<String>,
     /// All declared (flow_name, leg_name) pairs.
-    leg_set: HashSet<(String, String)>,
+    leg_set: HashSet<(&'m str, &'m str)>,
     /// Name of the flow currently being evaluated
-    current_entry: Option<String>,
+    current_entry: Option<&'m str>,
 }
 
-impl Environment {
-    fn new(model: &Model) -> Self {
+impl<'m> Environment<'m> {
+    fn new(model: &'m Model) -> Self {
         let stock_set = model.stocks.keys().cloned().collect();
         let param_set = model.params.keys().cloned().collect();
-        let leg_set = model.leg_names.clone();
+        let leg_set = model.leg_names.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
         Self {
             stocks: HashMap::new(),
             params: HashMap::new(),
@@ -84,7 +84,7 @@ impl Environment {
             for kind in [AggKind::Mtd, AggKind::Qtd, AggKind::Ytd] {
                 *self
                     .accumulators
-                    .entry((key.clone(), kind))
+                    .entry((*key, kind))
                     .or_insert(Decimal::ZERO) += value;
             }
         }
@@ -148,7 +148,7 @@ impl Model {
         Ok(log)
     }
 
-    fn initialize_stocks(&self, env: &mut Environment) -> Result<(), Diagnostic> {
+    fn initialize_stocks<'m>(&'m self, env: &mut Environment<'m>) -> Result<(), Diagnostic> {
         for (name, account) in &self.stocks {
             let v = match &account.init {
                 Some(e) => eval_num(e, env)?,
@@ -159,7 +159,11 @@ impl Model {
         Ok(())
     }
 
-    fn evaluate_params(&self, t: NaiveDate, env: &mut Environment) -> Result<(), Diagnostic> {
+    fn evaluate_params<'m>(
+        &'m self,
+        t: NaiveDate,
+        env: &mut Environment<'m>,
+    ) -> Result<(), Diagnostic> {
         for (name, body) in &self.params {
             match body {
                 ParamBody::Const(e) => {
@@ -177,19 +181,19 @@ impl Model {
         Ok(())
     }
 
-    fn apply_flows(
-        &self,
+    fn apply_flows<'m>(
+        &'m self,
         t: NaiveDate,
-        env: &mut Environment,
+        env: &mut Environment<'m>,
     ) -> Result<Vec<Transaction>, Diagnostic> {
         let mut txs = Vec::new();
         for entry in &self.entries {
             if !entry.schedule.matches(t) {
                 continue;
             }
-            env.current_entry = Some(entry.key.to_string());
+            env.current_entry = Some(entry.key.as_str());
             let mut explicit: Vec<(Path, Decimal)> = Vec::new();
-            let mut auto_leg: Option<(Path, Option<String>)> = None;
+            let mut auto_leg: Option<(Path, Option<&'m str>)> = None;
 
             for posting in &entry.postings {
                 match &posting.amount {
@@ -200,7 +204,7 @@ impl Model {
                         let amt = amt.round_dp(2);
                         if let Some(leg) = &posting.leg_name {
                             env.leg_values
-                                .insert((entry.key.to_string(), leg.clone()), amt);
+                                .insert((entry.key.as_str(), leg.as_str()), amt);
                         }
                         explicit.push((posting.account.clone(), amt));
                     }
@@ -210,12 +214,12 @@ impl Model {
                         let amt = -current.round_dp(2);
                         if let Some(leg) = &posting.leg_name {
                             env.leg_values
-                                .insert((entry.key.to_string(), leg.clone()), amt);
+                                .insert((entry.key.as_str(), leg.as_str()), amt);
                         }
                         explicit.push((posting.account.clone(), amt));
                     }
                     None => {
-                        auto_leg = Some((posting.account.clone(), posting.leg_name.clone()));
+                        auto_leg = Some((posting.account.clone(), posting.leg_name.as_deref()));
                     }
                 }
             }
@@ -234,7 +238,7 @@ impl Model {
             if let Some((account, leg_name)) = auto_leg {
                 let auto = -explicit_sum;
                 if let Some(leg) = leg_name {
-                    env.leg_values.insert((entry.key.to_string(), leg), auto);
+                    env.leg_values.insert((entry.key.as_str(), leg), auto);
                 }
                 *env.stocks_mut()
                     .entry(account.clone())
@@ -252,7 +256,7 @@ impl Model {
         Ok(txs)
     }
 
-    fn check_assertions(&self, t: NaiveDate, env: &Environment) -> Result<(), Diagnostic> {
+    fn check_assertions<'m>(&'m self, t: NaiveDate, env: &Environment<'m>) -> Result<(), Diagnostic> {
         for (sched, expr) in &self.asserts {
             if !sched.matches(t) {
                 continue;
@@ -275,7 +279,7 @@ impl Model {
     }
 }
 
-fn eval_expr((expr, span): &SpannedExpr, env: &Environment) -> Result<Value, Diagnostic> {
+fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result<Value, Diagnostic> {
     match expr.as_ref() {
         Expr::Num(n) => Ok(Value::Num(*n)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
@@ -321,8 +325,8 @@ fn eval_expr((expr, span): &SpannedExpr, env: &Environment) -> Result<Value, Dia
         }
         Expr::Ref(path) => {
             // Bare leg name: resolves to the current-day value within the same flow (0 if not fired yet).
-            if path.0.len() == 1 && let Some(entry) = &env.current_entry {
-                let key = (entry.clone(), path.0[0].clone());
+            if path.0.len() == 1 && let Some(entry) = env.current_entry {
+                let key = (entry, path.0[0].as_str());
                 if env.leg_set.contains(&key) {
                     return Ok(Value::Num(
                         env.leg_values.get(&key).copied().unwrap_or(Decimal::ZERO),
@@ -345,13 +349,13 @@ fn eval_expr((expr, span): &SpannedExpr, env: &Environment) -> Result<Value, Dia
             }
         }
         Expr::ParamAgg(flow_opt, leg, kind) => {
-            let flow_key = match flow_opt {
-                Some(flow) => flow.clone(),
-                None => env.current_entry.clone().ok_or_else(|| {
+            let flow_key: &'m str = match flow_opt {
+                Some(flow) => flow.as_str(),
+                None => env.current_entry.ok_or_else(|| {
                     Diagnostic::new(*span, format!("aggregate `{leg}` used outside of an entry"))
                 })?,
             };
-            let key = (flow_key, leg.clone());
+            let key = (flow_key, leg.as_str());
             let v = env
                 .accumulators
                 .get(&(key, *kind))
@@ -384,7 +388,7 @@ fn call_builtin(name: &str, args: &[Decimal], span: Span) -> Result<Value, Diagn
     }
 }
 
-fn eval_num(expr: &SpannedExpr, env: &Environment) -> Result<Decimal, Diagnostic> {
+fn eval_num<'m>(expr: &'m SpannedExpr, env: &Environment<'m>) -> Result<Decimal, Diagnostic> {
     match eval_expr(expr, env)? {
         Value::Num(n) => Ok(n),
         Value::Bool(_) => Err(Diagnostic::new(
