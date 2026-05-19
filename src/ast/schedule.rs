@@ -161,11 +161,13 @@ impl Schedule {
         if periodic.start.is_some_and(|s| t < s) {
             return false;
         }
+
+        let origin = periodic.start.unwrap_or(t);
+
         match &periodic.period {
             Period::Day => match periodic.nth {
                 None => true,
                 Some(Nth(n)) => {
-                    let origin = periodic.start.unwrap();
                     (t - origin).num_days() % n as i64 == 0
                 }
             },
@@ -181,7 +183,6 @@ impl Schedule {
                 match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = periodic.start.unwrap();
                         (t - origin).num_days() / 7 % n as i64 == 0
                     }
                 }
@@ -193,7 +194,6 @@ impl Schedule {
                 match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = periodic.start.unwrap();
                         (t - origin).num_days() / 7 % n as i64 == 0
                     }
                 }
@@ -210,7 +210,6 @@ impl Schedule {
                 match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = periodic.start.unwrap();
                         let months = (t.year() - origin.year()) * 12
                             + t.month() as i32 - origin.month() as i32;
                         months % n as i32 == 0
@@ -231,7 +230,6 @@ impl Schedule {
                 match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = periodic.start.unwrap();
                         (t.year() - origin.year()) % n as i32 == 0
                     }
                 }
@@ -243,7 +241,6 @@ impl Schedule {
                 match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = periodic.start.unwrap();
                         let quarters = (t.year() - origin.year()) * 4
                             + t.quarter() as i32 - origin.quarter() as i32;
                         quarters % n as i32 == 0
@@ -262,7 +259,6 @@ impl Schedule {
                 match periodic.nth {
                     None => true,
                     Some(Nth(n)) => {
-                        let origin = periodic.start.unwrap();
                         (t.year() - origin.year()) % n as i32 == 0
                     }
                 }
