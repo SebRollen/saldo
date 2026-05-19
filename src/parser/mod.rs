@@ -533,7 +533,7 @@ impl<'src> Parser<'src> {
     fn parse_call(&mut self) -> Option<SpannedExpr> {
         let start = self.peek_span();
         let (name, _) = self.eat_ident()?;
-        self.eat(&Token::LParen);
+        self.expect(&Token::LParen);
         let mut args = Vec::new();
         while *self.peek() != Token::RParen && *self.peek() != Token::EOF {
             if let Some(arg) = self.parse_expr() {
@@ -553,7 +553,7 @@ impl<'src> Parser<'src> {
     fn parse_calc(&mut self) -> Option<SpannedExpr> {
         let start = self.peek_span();
         let (first, _) = self.eat_ident()?;
-        self.eat(&Token::Period);
+        self.expect(&Token::Period);
 
         let cp = self.save();
         if let Some((second, _)) = self.eat_ident() {
