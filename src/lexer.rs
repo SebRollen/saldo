@@ -272,7 +272,12 @@ impl<'src> Lexer<'src> {
             int_str
         };
 
-        let val = num_str.parse::<Decimal>().unwrap_or(Decimal::ZERO);
+        let Ok(val) = num_str.parse::<Decimal>() else {
+            return Err(Diagnostic::new(
+                    self.current_span(),
+                    "not a valid decimal"
+            ));
+        };
         self.emit_token(Token::Float(val))
     }
 
