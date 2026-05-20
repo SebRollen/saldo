@@ -1,6 +1,6 @@
 use crate::ast::{AggKind, BinOp, Expr, ParamBody, Path, PostingAmount, Span, SpannedExpr};
 use crate::errors::Diagnostic;
-use crate::resolve::{resolve_ref, Model, RefKind};
+use crate::resolver::{resolve_ref, Model, RefKind};
 use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;

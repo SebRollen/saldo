@@ -344,10 +344,10 @@ impl<'src> Parser<'src> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Lexer, Span};
+    use crate::Span;
 
     fn parse_schedule_str(src: &str) -> Result<Schedule, Vec<Diagnostic>> {
-        let tokens = Lexer::new(src).lex()?;
+        let tokens = crate::lexer::lex(src)?;
         let mut p = Parser::new(tokens);
         let sched = p.parse_schedule_literal();
         if sched.is_none() && p.errors.is_empty() {

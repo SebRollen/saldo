@@ -635,20 +635,19 @@ impl<'src> Parser<'src> {
     }
 }
 
+pub fn parse(tokens: Vec<(Token<'_>, Span)>) -> Result<Program, Vec<Diagnostic>> {
+    Parser::new(tokens).parse()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ast::schedule::Schedule, lexer::Lexer};
+    use crate::ast::schedule::Schedule;
     use chrono::NaiveDate;
 
     fn parse_prog(src: &str) -> Program {
-        let Ok(tokens) = Lexer::new(src).lex() else {
-            panic!("lexer errored")
-        };
-        match Parser::new(tokens).parse() {
-            Ok(prog) => prog,
-            Err(errs) => panic!("parse errs: {errs:?}"),
-        }
+        let tokens = crate::lexer::lex(src).expect("lexer errored");
+        parse(tokens).unwrap_or_else(|errs| panic!("parse errs: {errs:?}"))
     }
 
     #[test]
@@ -680,10 +679,8 @@ mod tests {
 
     #[test]
     fn account_init_without_date_is_error() {
-        let Ok(tokens) = Lexer::new("account Assets:Cash = 5000").lex() else {
-            panic!("lexer errored")
-        };
-        let errs = Parser::new(tokens).parse().unwrap_err();
+        let tokens = crate::lexer::lex("account Assets:Cash = 5000").expect("lexer errored");
+        let errs = parse(tokens).unwrap_err();
         assert!(errs.iter().any(|d| d.message.contains("opening balance requires a date")));
     }
 
@@ -847,10 +844,8 @@ mod tests {
     }
 
     fn parse_errs(src: &str) -> Vec<Diagnostic> {
-        let Ok(tokens) = Lexer::new(src).lex() else {
-            panic!("lexer errored")
-        };
-        Parser::new(tokens).parse().unwrap_err()
+        let tokens = crate::lexer::lex(src).expect("lexer errored");
+        parse(tokens).unwrap_err()
     }
 
     #[test]

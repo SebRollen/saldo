@@ -420,6 +420,9 @@ impl<'src> Lexer<'src> {
     }
 }
 
+pub fn lex(src: &str) -> Result<Vec<Spanned<Token<'_>>>, Vec<Diagnostic>> {
+    Lexer::new(src).lex()
+}
 
 #[cfg(test)]
 mod tests {

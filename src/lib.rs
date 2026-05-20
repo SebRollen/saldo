@@ -3,7 +3,7 @@ mod errors;
 mod eval;
 mod lexer;
 mod parser;
-mod resolve;
+mod resolver;
 mod util;
 
 use chrono::NaiveDate;
@@ -12,8 +12,6 @@ use rust_decimal::Decimal;
 pub use ast::{Path, Span};
 pub use errors::{Diagnostic, Error};
 pub use eval::{DaySnapshot, SimLog, Transaction};
-pub use lexer::Lexer;
-pub use parser::Parser;
 
 pub struct RunOpts {
     pub from: NaiveDate,
@@ -44,15 +42,13 @@ pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
         }]);
     }
 
-    let tokens = Lexer::new(src)
-        .lex()
+    let tokens = lexer::lex(src)
         .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
 
-    let program = Parser::new(tokens)
-        .parse()
+    let program = parser::parse(tokens)
         .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
 
-    let model = resolve::resolve(&program)
+    let model = resolver::resolve(&program)
         .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
 
     let log = model
