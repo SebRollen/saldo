@@ -489,5 +489,6 @@ fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagn
             }))
         }
         BinOp::Eq => Ok(Value::Bool(a == b)),
+        BinOp::NotEq => Ok(Value::Bool(a != b))
     }
 }

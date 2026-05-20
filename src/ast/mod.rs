@@ -78,6 +78,7 @@ pub enum BinOp {
     Gt,
     GtEq,
     Eq,
+    NotEq,
 }
 
 #[derive(Clone, Debug)]

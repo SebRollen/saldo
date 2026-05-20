@@ -431,6 +431,7 @@ impl<'src> Parser<'src> {
                 Token::EqEq => BinOp::Eq,
                 Token::Lt => BinOp::Lt,
                 Token::Gt => BinOp::Gt,
+                Token::NotEq => BinOp::NotEq,
                 _ => break,
             };
             self.advance();

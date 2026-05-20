@@ -27,6 +27,7 @@ pub enum Token<'src> {
     EqEq,
     LtEq,
     GtEq,
+    NotEq,
     Plus,
     Minus,
     Star,
@@ -77,6 +78,7 @@ impl<'src> fmt::Display for Token<'src> {
             Token::EqEq => write!(f, "=="),
             Token::LtEq => write!(f, "<="),
             Token::GtEq => write!(f, ">="),
+            Token::NotEq => write!(f, "!="),
             Token::Plus => write!(f, "+"),
             Token::Minus => write!(f, "-"),
             Token::Star => write!(f, "*"),
@@ -407,6 +409,11 @@ impl<'src> Lexer<'src> {
                     return self.emit_token(Token::GtEq);
                 } else {
                     return self.emit_token(Token::Gt);
+                }
+            }
+            b'!' => {
+                if self.matches(b'=') {
+                    return self.emit_token(Token::NotEq);
                 }
             }
             b'"' => return self.lex_string(),
