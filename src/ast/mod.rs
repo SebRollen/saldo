@@ -141,7 +141,7 @@ pub enum ParamBody {
 pub enum Decl {
     Account {
         name: Path,
-        init: Option<SpannedExpr>,
+        opening: Option<(SpannedExpr, NaiveDate)>,
     },
     Schedule {
         name: String,

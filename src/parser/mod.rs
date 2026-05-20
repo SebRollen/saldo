@@ -212,12 +212,21 @@ impl<'src> Parser<'src> {
 
     fn parse_account_decl(&mut self) -> Option<Decl> {
         let name = self.parse_colon_path()?;
-        let init = if self.eat(&Token::Eq).is_some() {
-            Some(self.parse_expr()?)
+        let opening = if self.eat(&Token::Eq).is_some() {
+            let expr = self.parse_expr()?;
+            if self.eat(&Token::At).is_none() {
+                self.errors.push(Diagnostic::new(
+                    self.peek_span(),
+                    "opening balance requires a date: `= <value> @ <date>`",
+                ));
+                return None;
+            }
+            let date = self.parse_date()?;
+            Some((expr, date))
         } else {
             None
         };
-        Some(Decl::Account { name, init })
+        Some(Decl::Account { name, opening })
     }
 
     fn parse_schedule_decl(&mut self) -> Option<Decl> {
@@ -643,28 +652,39 @@ mod tests {
     }
 
     #[test]
-    fn parses_account_with_init() {
-        let prog = parse_prog("account Liabilities:Loan = -3_000_000");
+    fn parses_account_with_opening() {
+        let prog = parse_prog("account Liabilities:Loan = -3_000_000 @ 2024-01-01");
         assert_eq!(prog.decls.len(), 1);
         match &prog.decls[0].0 {
-            Decl::Account { name, init } => {
+            Decl::Account { name, opening } => {
                 assert_eq!(name.join(), "Liabilities:Loan");
-                assert!(matches!(init, Some((e, _)) if matches!(e.as_ref(), Expr::Neg(_))));
+                assert!(matches!(opening, Some(((e, _), _)) if matches!(e.as_ref(), Expr::Neg(_))));
+                let date = opening.as_ref().unwrap().1;
+                assert_eq!(date, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
             }
             _ => panic!("expected account"),
         }
     }
 
     #[test]
-    fn parses_account_no_init() {
+    fn parses_account_no_opening() {
         let prog = parse_prog("account Assets:Cash");
         match &prog.decls[0].0 {
-            Decl::Account { name, init } => {
+            Decl::Account { name, opening } => {
                 assert_eq!(name.join(), "Assets:Cash");
-                assert!(init.is_none());
+                assert!(opening.is_none());
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn account_init_without_date_is_error() {
+        let Ok(tokens) = Lexer::new("account Assets:Cash = 5000").lex() else {
+            panic!("lexer errored")
+        };
+        let errs = Parser::new(tokens).parse().unwrap_err();
+        assert!(errs.iter().any(|d| d.message.contains("opening balance requires a date")));
     }
 
     #[test]

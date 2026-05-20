@@ -45,6 +45,10 @@ struct Environment<'m> {
     leg_set: HashSet<(&'m str, &'m str)>,
     /// Name of the flow currently being evaluated
     current_entry: Option<&'m str>,
+    /// Opening dates for accounts that have them (used for pre-opening error checks).
+    opening_dates: HashMap<Path, NaiveDate>,
+    /// The current simulation date (set at the top of each day's loop iteration).
+    current_date: NaiveDate,
 }
 
 impl<'m> Environment<'m> {
@@ -52,6 +56,9 @@ impl<'m> Environment<'m> {
         let stock_set = model.stocks.keys().cloned().collect();
         let param_set = model.params.keys().cloned().collect();
         let leg_set = model.leg_names.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let opening_dates = model.stocks.iter()
+            .filter_map(|(p, a)| a.opening.as_ref().map(|(_, d)| (p.clone(), *d)))
+            .collect();
         Self {
             stocks: HashMap::new(),
             params: HashMap::new(),
@@ -61,6 +68,8 @@ impl<'m> Environment<'m> {
             param_set,
             leg_set,
             current_entry: None,
+            opening_dates,
+            current_date: NaiveDate::MIN,
         }
     }
 
@@ -107,36 +116,66 @@ impl Model {
     pub fn simulate(&self, start: NaiveDate, end: NaiveDate) -> Result<SimLog, Diagnostic> {
         let mut env = Environment::new(self);
 
-        self.initialize_stocks(&mut env)?;
+        // Accounts with no opening date are always available, starting at zero.
+        for (name, account) in &self.stocks {
+            if account.opening.is_none() {
+                env.add_stock(name.clone(), Decimal::ZERO);
+            }
+        }
 
-        let opening: IndexMap<Path, Decimal> = self
-            .stocks
-            .keys()
-            .map(|p| (p.clone(), *env.stocks.get(p).unwrap_or(&Decimal::ZERO)))
-            .collect();
+        // Simulate from the earliest opening date (if before start) so the
+        // warmup period accumulates the right balances before reporting starts.
+        let effective_start = self.stocks.values()
+            .filter_map(|a| a.opening.as_ref().map(|(_, d)| *d))
+            .min()
+            .map(|earliest| earliest.min(start))
+            .unwrap_or(start);
 
         let mut log = SimLog {
             transactions: Vec::new(),
             snapshots: Vec::new(),
-            opening,
+            opening: IndexMap::new(),
         };
 
-        let mut t = start;
+        let mut t = effective_start;
+        let mut opening_captured = false;
         while t <= end {
+            env.current_date = t;
+
+            // Initialize accounts whose opening date is today.
+            for (name, account) in &self.stocks {
+                if let Some((expr, date)) = &account.opening {
+                    if *date == t {
+                        let v = eval_num(expr, &env)?;
+                        env.add_stock(name.clone(), v);
+                    }
+                }
+            }
+
+            // Capture opening balances at the start of the user's simulation range,
+            // after any accounts that open today are initialized but before entries fire.
+            if t == start && !opening_captured {
+                log.opening = self.stocks.keys()
+                    .map(|p| (p.clone(), *env.stocks.get(p).unwrap_or(&Decimal::ZERO)))
+                    .collect();
+                opening_captured = true;
+            }
+
             env.leg_values.clear();
             env.reset_periods(t);
             self.evaluate_params(t, &mut env)?;
             let txs = self.apply_flows(t, &mut env)?;
-            log.transactions.extend(txs);
             self.check_assertions(t, &env)?;
 
-            // Snapshot current balances.
-            let balances: IndexMap<Path, Decimal> = self
-                .stocks
-                .keys()
-                .map(|p| (p.clone(), *env.stocks.get(p).unwrap_or(&Decimal::ZERO)))
-                .collect();
-            log.snapshots.push(DaySnapshot { date: t, balances });
+            if t >= start {
+                log.transactions.extend(txs);
+                let balances: IndexMap<Path, Decimal> = self
+                    .stocks
+                    .keys()
+                    .map(|p| (p.clone(), *env.stocks.get(p).unwrap_or(&Decimal::ZERO)))
+                    .collect();
+                log.snapshots.push(DaySnapshot { date: t, balances });
+            }
 
             env.advance_period();
 
@@ -145,18 +184,13 @@ impl Model {
                 .ok_or_else(|| Diagnostic::new((0..0).into(), "date overflow"))?;
         }
 
-        Ok(log)
-    }
-
-    fn initialize_stocks<'m>(&'m self, env: &mut Environment<'m>) -> Result<(), Diagnostic> {
-        for (name, account) in &self.stocks {
-            let v = match &account.init {
-                Some(e) => eval_num(e, env)?,
-                None => Decimal::ZERO,
-            };
-            env.add_stock(name.clone(), v);
+        if !opening_captured {
+            log.opening = self.stocks.keys()
+                .map(|p| (p.clone(), *env.stocks.get(p).unwrap_or(&Decimal::ZERO)))
+                .collect();
         }
-        Ok(())
+
+        Ok(log)
     }
 
     fn evaluate_params<'m>(
@@ -196,6 +230,7 @@ impl Model {
             let mut auto_leg: Option<(Path, Option<&'m str>)> = None;
 
             for posting in &entry.postings {
+                check_account_open(env, &posting.account, entry.span)?;
                 match &posting.amount {
                     Some(PostingAmount::Expr(e)) => {
                         let amt = eval_num(e, env).map_err(|d| {
@@ -335,6 +370,14 @@ fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result
             }
             match resolve_ref(path, &env.stock_set, &env.param_set) {
                 Some(RefKind::Stock(p)) => {
+                    if let Some(&open_date) = env.opening_dates.get(&p) {
+                        if env.current_date < open_date {
+                            return Err(Diagnostic::new(
+                                *span,
+                                format!("account `{p}` opens on {open_date}, but referenced on {}", env.current_date),
+                            ));
+                        }
+                    }
                     Ok(Value::Num(*env.stocks.get(&p).unwrap_or(&Decimal::ZERO)))
                 }
                 Some(RefKind::Param(n)) => {
@@ -386,6 +429,18 @@ fn call_builtin(name: &str, args: &[Decimal], span: Span) -> Result<Value, Diagn
         "round" => Ok(Value::Num(args[0].round())),
         other => Err(Diagnostic::new(span, format!("unknown function `{other}`"))),
     }
+}
+
+fn check_account_open(env: &Environment<'_>, account: &Path, span: Span) -> Result<(), Diagnostic> {
+    if let Some(&open_date) = env.opening_dates.get(account) {
+        if env.current_date < open_date {
+            return Err(Diagnostic::new(
+                span,
+                format!("account `{account}` opens on {open_date}, but referenced on {}", env.current_date),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn eval_num<'m>(expr: &'m SpannedExpr, env: &Environment<'m>) -> Result<Decimal, Diagnostic> {

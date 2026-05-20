@@ -17,7 +17,7 @@ fn opts(from: &str, to: &str) -> RunOpts {
 #[test]
 fn ledger_output_contains_transactions() {
     let src = "
-        account Assets:Cash = 1000
+        account Assets:Cash = 1000 @ 2025-01-01
         account Income:Salary
 
         entry monthly \"Paycheck\" {
@@ -35,8 +35,8 @@ fn ledger_output_contains_transactions() {
 #[test]
 fn csv_output_has_header_and_rows() {
     let src = "
-        account Assets:Cash = 200
-        account Liabilities:Loan = -500
+        account Assets:Cash = 200 @ 2025-01-01
+        account Liabilities:Loan = -500 @ 2025-01-01
     ";
     let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
     let csv = output.to_csv();
@@ -48,7 +48,7 @@ fn csv_output_has_header_and_rows() {
 #[test]
 fn single_day_range_is_accepted() {
     let output = run(
-        "account Assets:Cash = 100",
+        "account Assets:Cash = 100 @ 2025-06-01",
         &opts("2025-06-01", "2025-06-01"),
     )
     .unwrap();
@@ -58,7 +58,7 @@ fn single_day_range_is_accepted() {
 #[test]
 fn log_is_accessible_directly() {
     let src = "
-        account Assets:Cash = 1000
+        account Assets:Cash = 1000 @ 2025-01-01
         account Income:Salary
 
         entry monthly \"Paycheck\" {
@@ -76,7 +76,7 @@ fn log_is_accessible_directly() {
 
 #[test]
 fn from_after_to_returns_error() {
-    let errors = run("account Assets:Cash = 0", &opts("2025-12-31", "2025-01-01")).unwrap_err();
+    let errors = run("account Assets:Cash", &opts("2025-12-31", "2025-01-01")).unwrap_err();
     assert!(matches!(errors[0], saldo::Error::InvalidDateRange { .. }));
 }
 
@@ -85,7 +85,7 @@ fn from_after_to_returns_error() {
 #[test]
 fn lexer_error_is_a_diagnostic() {
     let errors = run(
-        "account Assets:Cash = 1_000\n@@@@",
+        "account Assets:Cash\n####",
         &opts("2025-01-01", "2025-01-31"),
     )
     .unwrap_err();
@@ -145,7 +145,7 @@ fn unknown_param_in_expr_is_a_diagnostic() {
 #[test]
 fn failing_assertion_is_a_diagnostic() {
     let src = "
-        account Assets:Cash = 100
+        account Assets:Cash = 100 @ 2025-01-01
         assert that Assets:Cash >= 200
     ";
     let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
@@ -157,8 +157,61 @@ fn failing_assertion_is_a_diagnostic() {
 #[test]
 fn passing_assertion_succeeds() {
     let src = "
-        account Assets:Cash = 500
+        account Assets:Cash = 500 @ 2025-01-01
         assert that Assets:Cash >= 0
     ";
     run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+}
+
+#[test]
+fn opening_balance_before_sim_start_warms_up() {
+    let src = "
+        account Assets:Cash = 1000 @ 2024-01-01
+        account Income:Salary
+
+        entry monthly \"Paycheck\" {
+          Assets:Cash = 500
+          Income:Salary
+        }
+    ";
+    // Simulate from 2025-01-01, with opening on 2024-01-01.
+    // The warm-up should apply 12 monthly entries, so opening at 2025-01-01 is 1000 + 12*500 = 7000.
+    let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
+    let opening_cash = output.log.opening.get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()])).copied().unwrap_or_default();
+    assert_eq!(opening_cash, rust_decimal::Decimal::new(7000, 0));
+}
+
+#[test]
+fn reference_before_opening_date_is_error() {
+    let src = "
+        account Assets:Cash = 1000 @ 2025-06-01
+        account Income:Salary
+
+        entry monthly \"Paycheck\" {
+          Assets:Cash = 500
+          Income:Salary
+        }
+    ";
+    // Simulation starts 2025-01-01, before Assets:Cash opens on 2025-06-01.
+    // The entry fires in January and references Assets:Cash before it opens.
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(errors.iter().any(
+        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("opens on"))
+    ));
+}
+
+#[test]
+fn opening_balance_date_equals_sim_start() {
+    let src = "
+        account Assets:Cash = 500 @ 2025-03-01
+        account Income:Salary
+
+        entry monthly \"Paycheck\" {
+          Assets:Cash = 100
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2025-03-01", "2025-03-31")).unwrap();
+    let opening_cash = output.log.opening.get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()])).copied().unwrap_or_default();
+    assert_eq!(opening_cash, rust_decimal::Decimal::new(500, 0));
 }

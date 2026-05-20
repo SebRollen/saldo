@@ -3,13 +3,14 @@ use crate::ast::{
 };
 use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
+use chrono::NaiveDate;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 use crate::ast::schedule::{Periodic, Period};
 
 #[derive(Debug, Clone)]
 pub struct Account {
-    pub init: Option<SpannedExpr>,
+    pub opening: Option<(SpannedExpr, NaiveDate)>,
 }
 
 #[derive(Debug)]
@@ -108,7 +109,7 @@ fn collect_declarations(
 
     for (decl, span) in &program.decls {
         match decl {
-            Decl::Account { name, init } => {
+            Decl::Account { name, opening } => {
                 if let Some(prev) = stock_spans.get(name) {
                     diags.push(
                         Diagnostic::new(*span, format!("duplicate account `{name}`"))
@@ -116,7 +117,7 @@ fn collect_declarations(
                     );
                 } else {
                     stock_spans.insert(name.clone(), *span);
-                    stocks.insert(name.clone(), Account { init: init.clone() });
+                    stocks.insert(name.clone(), Account { opening: opening.clone() });
                 }
             }
             Decl::Schedule { .. } => {
@@ -339,7 +340,7 @@ fn validate_references(
 
     for (decl, _span) in &program.decls {
         match decl {
-            Decl::Account { init: Some(e), .. } => check_expr(e, diags, None, &no_extra),
+            Decl::Account { opening: Some((e, _)), .. } => check_expr(e, diags, None, &no_extra),
             Decl::Param { body, .. } => match body {
                 ParamBody::Const(e) => check_expr(e, diags, None, &no_extra),
                 ParamBody::Schedule(intervals) => {
