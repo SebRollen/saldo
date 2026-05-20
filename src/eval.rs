@@ -5,11 +5,21 @@ use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, PartialOrd)]
 pub enum Value {
     Num(Decimal),
     Bool(bool),
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Num(n) => write!(f, "{n}"),
+            Value::Bool(b) => write!(f, "{b}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -300,7 +310,16 @@ impl Model {
             match eval_expr(expr, env)? {
                 Value::Bool(true) => {}
                 Value::Bool(false) => {
-                    return Err(Diagnostic::new(span, format!("assertion failed on {t}")));
+                    let msg = if let Expr::Bin(lhs, op, rhs) = expr.0.as_ref() {
+                        if let (Ok(lv), Ok(rv)) = (eval_expr(lhs, env), eval_expr(rhs, env)) {
+                            format!("assertion failed on {t}: {lv} {op} {rv}")
+                        } else {
+                            format!("assertion failed on {t}")
+                        }
+                    } else {
+                        format!("assertion failed on {t}")
+                    };
+                    return Err(Diagnostic::new(span, msg));
                 }
                 Value::Num(_) => {
                     return Err(Diagnostic::new(

@@ -81,6 +81,23 @@ pub enum BinOp {
     NotEq,
 }
 
+impl std::fmt::Display for BinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Lt => "<",
+            BinOp::LtEq => "<=",
+            BinOp::Gt => ">",
+            BinOp::GtEq => ">=",
+            BinOp::Eq => "==",
+            BinOp::NotEq => "!=",
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Expr {
     Num(Decimal),
