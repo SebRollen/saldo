@@ -6,7 +6,7 @@ account that appears in an entry or assertion must be declared.
 ## Syntax
 
 ```
-account <path> [= <expression>]
+account <path> [= <expression> @ <date>]
 ```
 
 The path is one or more identifiers joined by colons:
@@ -21,17 +21,63 @@ account Expenses:Rent
 
 ## Opening balance
 
-Without `=`, an account starts at zero. Supply an expression to give it an
-opening balance:
+Without `= … @ …`, an account starts at zero and is available for the entire
+simulation. Supply an initial value and a date to give the account a known
+opening balance on a specific day:
 
 ```
-account Assets:Cash             = 12_500
-account Liabilities:Loan        = -450_000
-account Assets:Retirement:Seb   = 87_340.22
+account Assets:Cash             = 12_500    @ 2025-01-01
+account Liabilities:Loan        = -450_000  @ 2025-01-01
+account Assets:Retirement:Seb   = 87_340.22 @ 2024-07-01
 ```
 
-The expression is evaluated once, before the simulation begins. It can
-reference params but not other accounts or leg aggregations.
+The `= value` and `@ date` must always appear together — one without the other
+is a parse error.
+
+The expression is evaluated on the opening date. It can reference params and
+accounts that are already open, but not accounts that open later or leg
+aggregations.
+
+### Referencing accounts before their opening date
+
+Referencing an account (in an entry posting or an expression) before its
+`@ date` is a runtime error:
+
+```
+account Assets:Cash = 1000 @ 2025-06-01
+
+// This entry fires in January — before Assets:Cash opens — and will error:
+entry monthly "Paycheck" {
+  Assets:Cash = 500
+  Income:Salary
+}
+```
+
+To avoid the error, ensure entry schedules start no earlier than the latest
+opening date of any account they reference, or set the opening date early
+enough to cover the simulation range.
+
+### Simulation start after opening date
+
+If your simulation start is later than an account's opening date, saldo
+automatically warms up the simulation from the opening date. All entries that
+fire during the warm-up period are processed normally — only their output
+(ledger transactions, CSV rows) is suppressed. The opening-balances entry in
+ledger output reflects the actual balance at your simulation start, after the
+warm-up.
+
+```
+account Assets:Cash = 1000 @ 2024-01-01
+
+entry monthly "Paycheck" {
+  Assets:Cash = 500
+  Income:Salary
+}
+
+// Running from 2025-01-01: Assets:Cash opens at 1000 on 2024-01-01, then
+// 12 monthly paycheck entries fire during warm-up, so the opening balance
+// shown in the ledger output is 7000 (1000 + 12 × 500).
+```
 
 ## Naming conventions
 
@@ -80,9 +126,9 @@ Declare them in the order you want to read them.
 ## Complete example
 
 ```
-account Assets:Cash             = 12_500
-account Assets:Retirement:Jim   = 45_000
-account Liabilities:Loan        = -320_000
+account Assets:Cash             = 12_500   @ 2025-01-01
+account Assets:Retirement:Jim   = 45_000   @ 2025-01-01
+account Liabilities:Loan        = -320_000 @ 2025-01-01
 account Income:Gross:Salary:Jim
 account Expenses:Rent
 
