@@ -54,8 +54,10 @@ param beth_salary : usd/year {
 
 ## Units
 
-The optional `: <unit>` annotation is documentation — it is not enforced
-by the simulator. Units help readers understand what a number represents.
+The optional `: <unit>` annotation is documentation — it is not yet
+enforced by the simulator. Units help readers understand what a number
+represents. In future versions of saldo, units will be used to verify
+type-safe calculations within the model.
 
 ```
 param max_401k   : usd/year = 24_500
