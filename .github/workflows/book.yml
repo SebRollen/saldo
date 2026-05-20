@@ -3,6 +3,7 @@ name: Deploy book
 on:
   push:
     branches: [main]
+    paths: ["book/**"]
 
 permissions:
   contents: read

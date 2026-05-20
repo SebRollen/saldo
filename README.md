@@ -96,7 +96,11 @@ saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]
 - `--format ledger` (default) — outputs double-entry ledger transactions
 - `--format csv` — outputs a daily balance sheet as CSV
 
-## Language reference
+## Documentation
+
+The full language reference is available at https://sebrollen.github.io/saldo/
+
+## Language summary
 
 ### Accounts
 
