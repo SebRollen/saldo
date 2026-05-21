@@ -1,22 +1,24 @@
 use crate::ast::{AggKind, BinOp, Expr, ParamBody, Path, PostingAmount, Span, SpannedExpr, Stmt};
 use crate::errors::Diagnostic;
 use crate::resolver::{resolve_ref, FnDef, Model, RefKind};
+use crate::unit::Unit;
 use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
-    Num(Decimal),
+    Num(Decimal, Unit),
     Bool(bool),
 }
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Num(n) => write!(f, "{n}"),
+            Value::Num(n, unit) if unit.is_scalar() => write!(f, "{n}"),
+            Value::Num(n, unit) => write!(f, "{n} {unit}"),
             Value::Bool(b) => write!(f, "{b}"),
         }
     }
@@ -325,7 +327,7 @@ impl Model {
                     };
                     return Err(Diagnostic::new(span, msg));
                 }
-                Value::Num(_) => {
+                Value::Num(_, _) => {
                     return Err(Diagnostic::new(
                         span,
                         "assertion expression must evaluate to a bool",
@@ -339,10 +341,10 @@ impl Model {
 
 fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result<Value, Diagnostic> {
     match expr.as_ref() {
-        Expr::Num(n) => Ok(Value::Num(*n)),
+        Expr::Num(n, unit) => Ok(Value::Num(*n, unit.clone().unwrap_or_default())),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Neg(x) => match eval_expr(x, env)? {
-            Value::Num(n) => Ok(Value::Num(-n)),
+            Value::Num(n, unit) => Ok(Value::Num(-n, unit)),
             _ => Err(Diagnostic::new(
                 *span,
                 "unary minus requires a numeric operand",
@@ -370,7 +372,7 @@ fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result
             let mut nums = Vec::with_capacity(args.len());
             for a in args {
                 match eval_expr(a, env)? {
-                    Value::Num(n) => nums.push(n),
+                    Value::Num(n, _) => nums.push(n),
                     _ => {
                         return Err(Diagnostic::new(
                             a.1,
@@ -394,6 +396,7 @@ fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result
                 if env.leg_set.contains(&key) {
                     return Ok(Value::Num(
                         env.leg_values.get(&key).copied().unwrap_or(Decimal::ZERO),
+                        Unit::scalar(),
                     ));
                 }
             }
@@ -407,12 +410,12 @@ fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result
                             ));
                         }
                     }
-                    Ok(Value::Num(*env.stocks.get(&p).unwrap_or(&Decimal::ZERO)))
+                    Ok(Value::Num(*env.stocks.get(&p).unwrap_or(&Decimal::ZERO), Unit::scalar()))
                 }
                 Some(RefKind::Param(n)) => {
                     Ok(Value::Num(*env.params.get(&n).ok_or_else(|| {
                         Diagnostic::new(*span, format!("param `{n}` has no active interval"))
-                    })?))
+                    })?, Unit::scalar()))
                 }
                 None => Err(Diagnostic::new(
                     *span,
@@ -433,7 +436,7 @@ fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result
                 .get(&(key, *kind))
                 .copied()
                 .unwrap_or(Decimal::ZERO);
-            Ok(Value::Num(v))
+            Ok(Value::Num(v, Unit::scalar()))
         }
     }
 }
@@ -450,12 +453,12 @@ pub const BUILTINS: &[(&str, usize)] = &[
 
 fn call_builtin(name: &str, args: &[Decimal], span: Span) -> Result<Value, Diagnostic> {
     match name {
-        "min" => Ok(Value::Num(args[0].min(args[1]))),
-        "max" => Ok(Value::Num(args[0].max(args[1]))),
-        "abs" => Ok(Value::Num(args[0].abs())),
-        "floor" => Ok(Value::Num(args[0].floor())),
-        "ceil" => Ok(Value::Num(args[0].ceil())),
-        "round" => Ok(Value::Num(args[0].round())),
+        "min" => Ok(Value::Num(args[0].min(args[1]), Unit::scalar())),
+        "max" => Ok(Value::Num(args[0].max(args[1]), Unit::scalar())),
+        "abs" => Ok(Value::Num(args[0].abs(), Unit::scalar())),
+        "floor" => Ok(Value::Num(args[0].floor(), Unit::scalar())),
+        "ceil" => Ok(Value::Num(args[0].ceil(), Unit::scalar())),
+        "round" => Ok(Value::Num(args[0].round(), Unit::scalar())),
         other => Err(Diagnostic::new(span, format!("unknown function `{other}`"))),
     }
 }
@@ -490,7 +493,7 @@ fn eval_fn_body(
             Stmt::Let { name, value } => {
                 let v = eval_fn_expr(value, &scope, env)?;
                 match v {
-                    Value::Num(n) => { scope.insert(name.clone(), n); }
+                    Value::Num(n, _) => { scope.insert(name.clone(), n); }
                     Value::Bool(_) => return Err(Diagnostic::new(
                         value.1,
                         format!("let binding `{name}` must evaluate to a number"),
@@ -511,18 +514,18 @@ fn eval_fn_expr(
     env: &Environment<'_>,
 ) -> Result<Value, Diagnostic> {
     match expr.as_ref() {
-        Expr::Num(n) => Ok(Value::Num(*n)),
+        Expr::Num(n, unit) => Ok(Value::Num(*n, unit.clone().unwrap_or_default())),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Ref(path) => {
             if path.0.len() == 1 {
                 if let Some(&v) = scope.get(&path.0[0]) {
-                    return Ok(Value::Num(v));
+                    return Ok(Value::Num(v, Unit::scalar()));
                 }
             }
             Err(Diagnostic::new(*span, format!("unknown local `{path}`")))
         }
         Expr::Neg(x) => match eval_fn_expr(x, scope, env)? {
-            Value::Num(n) => Ok(Value::Num(-n)),
+            Value::Num(n, unit) => Ok(Value::Num(-n, unit)),
             _ => Err(Diagnostic::new(*span, "unary minus requires a numeric operand")),
         },
         Expr::Bin(a, op, b) => {
@@ -540,7 +543,7 @@ fn eval_fn_expr(
             let mut nums = Vec::with_capacity(args.len());
             for a in args {
                 match eval_fn_expr(a, scope, env)? {
-                    Value::Num(n) => nums.push(n),
+                    Value::Num(n, _) => nums.push(n),
                     _ => return Err(Diagnostic::new(
                         a.1,
                         format!("argument to `{name}` must be numeric"),
@@ -564,7 +567,7 @@ fn eval_fn_expr(
 
 fn eval_num<'m>(expr: &'m SpannedExpr, env: &Environment<'m>) -> Result<Decimal, Diagnostic> {
     match eval_expr(expr, env)? {
-        Value::Num(n) => Ok(n),
+        Value::Num(n, _) => Ok(n),
         Value::Bool(_) => Err(Diagnostic::new(
             expr.1,
             "expected a numeric value, got bool",
@@ -574,31 +577,43 @@ fn eval_num<'m>(expr: &'m SpannedExpr, env: &Environment<'m>) -> Result<Decimal,
 
 fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagnostic> {
     match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
-            let (Value::Num(x), Value::Num(y)) = (a, b) else {
+        BinOp::Add | BinOp::Sub => {
+            let (Value::Num(x, xu), Value::Num(y, yu)) = (a, b) else {
+                return Err(Diagnostic::new(span, "arithmetic operations require numeric operands"));
+            };
+            if !xu.is_compatible_with(&yu) {
                 return Err(Diagnostic::new(
                     span,
-                    "arithmetic operations require numeric operands",
+                    format!("cannot add/subtract `{xu}` and `{yu}`: incompatible units"),
                 ));
+            }
+            Ok(Value::Num(if op == BinOp::Add { x + y } else { x - y }, xu))
+        }
+        BinOp::Mul => {
+            let (Value::Num(x, xu), Value::Num(y, yu)) = (a, b) else {
+                return Err(Diagnostic::new(span, "arithmetic operations require numeric operands"));
             };
-            if op == BinOp::Div && y.is_zero() {
+            Ok(Value::Num(x * y, xu * yu))
+        }
+        BinOp::Div => {
+            let (Value::Num(x, xu), Value::Num(y, yu)) = (a, b) else {
+                return Err(Diagnostic::new(span, "arithmetic operations require numeric operands"));
+            };
+            if y.is_zero() {
                 return Err(Diagnostic::new(span, "division by zero"));
             }
-            Ok(Value::Num(match op {
-                BinOp::Add => x + y,
-                BinOp::Sub => x - y,
-                BinOp::Mul => x * y,
-                BinOp::Div => x / y,
-                _ => unreachable!(),
-            }))
+            Ok(Value::Num(x / y, xu / yu))
         }
         BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
-            let (Value::Num(x), Value::Num(y)) = (a, b) else {
+            let (Value::Num(x, xu), Value::Num(y, yu)) = (a, b) else {
+                return Err(Diagnostic::new(span, "comparison operations require numeric operands"));
+            };
+            if !xu.is_compatible_with(&yu) {
                 return Err(Diagnostic::new(
                     span,
-                    "comparison operations require numeric operands",
+                    format!("cannot compare `{xu}` and `{yu}`: incompatible units"),
                 ));
-            };
+            }
             Ok(Value::Bool(match op {
                 BinOp::Lt => x < y,
                 BinOp::LtEq => x <= y,
@@ -607,7 +622,91 @@ fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagn
                 _ => unreachable!(),
             }))
         }
-        BinOp::Eq => Ok(Value::Bool(a == b)),
-        BinOp::NotEq => Ok(Value::Bool(a != b))
+        BinOp::Eq | BinOp::NotEq => match (a, b) {
+            (Value::Num(x, xu), Value::Num(y, yu)) => {
+                if !xu.is_compatible_with(&yu) {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("cannot compare `{xu}` and `{yu}`: incompatible units"),
+                    ));
+                }
+                Ok(Value::Bool(if op == BinOp::Eq { x == y } else { x != y }))
+            }
+            (Value::Bool(x), Value::Bool(y)) => {
+                Ok(Value::Bool(if op == BinOp::Eq { x == y } else { x != y }))
+            }
+            _ => Err(Diagnostic::new(span, "cannot compare values of different types")),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Span;
+
+    fn span() -> Span { Span::new(0, 0) }
+    fn num(n: i64) -> Value { Value::Num(Decimal::new(n, 0), Unit::scalar()) }
+    fn usd(n: i64) -> Value { Value::Num(Decimal::new(n, 0), Unit::single("usd")) }
+    fn usd_per_year(n: i64) -> Value {
+        Value::Num(Decimal::new(n, 0), Unit::parse("usd/year").unwrap())
+    }
+
+    #[test]
+    fn add_same_unit() {
+        let r = apply_binop(BinOp::Add, usd(100), usd(200), span()).unwrap();
+        assert_eq!(r, usd(300));
+    }
+
+    #[test]
+    fn add_incompatible_units_errors() {
+        let sek = Value::Num(Decimal::new(100, 0), Unit::single("sek"));
+        assert!(apply_binop(BinOp::Add, usd(100), sek, span()).is_err());
+    }
+
+    #[test]
+    fn sub_same_unit() {
+        let r = apply_binop(BinOp::Sub, usd(300), usd(100), span()).unwrap();
+        assert_eq!(r, usd(200));
+    }
+
+    #[test]
+    fn mul_produces_combined_unit() {
+        let rate = Value::Num(Decimal::new(2, 0), Unit::parse("usd/year").unwrap());
+        let years = Value::Num(Decimal::new(3, 0), Unit::single("year"));
+        let r = apply_binop(BinOp::Mul, rate, years, span()).unwrap();
+        assert_eq!(r, usd(6));
+    }
+
+    #[test]
+    fn div_produces_combined_unit() {
+        let r = apply_binop(BinOp::Div, usd_per_year(120_000), num(12), span()).unwrap();
+        assert_eq!(r, usd_per_year(10_000));
+    }
+
+    #[test]
+    fn div_cancels_unit() {
+        let r = apply_binop(BinOp::Div, usd(300), usd(100), span()).unwrap();
+        assert_eq!(r, num(3));
+    }
+
+    #[test]
+    fn cmp_incompatible_units_errors() {
+        let sek = Value::Num(Decimal::new(100, 0), Unit::single("sek"));
+        assert!(apply_binop(BinOp::Lt, usd(100), sek, span()).is_err());
+    }
+
+    #[test]
+    fn eq_same_unit() {
+        assert_eq!(
+            apply_binop(BinOp::Eq, usd(100), usd(100), span()).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn eq_incompatible_units_errors() {
+        let sek = Value::Num(Decimal::new(100, 0), Unit::single("sek"));
+        assert!(apply_binop(BinOp::Eq, usd(100), sek, span()).is_err());
     }
 }

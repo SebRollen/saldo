@@ -1,5 +1,6 @@
 pub mod schedule;
 
+use crate::unit::Unit;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 pub use schedule::Schedule;
@@ -100,7 +101,7 @@ impl std::fmt::Display for BinOp {
 
 #[derive(Clone, Debug)]
 pub enum Expr {
-    Num(Decimal),
+    Num(Decimal, Option<Unit>),
     Bool(bool),
     Ref(Path),
     Neg(SpannedExpr),
@@ -173,8 +174,7 @@ pub enum Decl {
     },
     Param {
         name: String,
-        #[allow(dead_code)]
-        unit: Option<String>,
+        unit: Option<Unit>,
         body: ParamBody,
     },
     Entry {

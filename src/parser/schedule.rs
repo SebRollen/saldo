@@ -30,7 +30,7 @@ impl<'src> Parser<'src> {
         self.eat_ident_ci("every")?;
         let nth = self.try_parse_nth();
         let period = self.parse_period()?;
-        let start = if self.eat_ident_ci("from").is_some() {
+        let start = if self.eat(&Token::From).is_some() {
             Some(self.parse_date()?)
         } else {
             None

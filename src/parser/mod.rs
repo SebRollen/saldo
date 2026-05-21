@@ -6,6 +6,7 @@ use crate::ast::{
 };
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
+use crate::unit::Unit;
 use crate::Span;
 
 pub struct Parser<'src> {
@@ -125,13 +126,13 @@ impl<'src> Parser<'src> {
         let mut items = vec![first];
         loop {
             if self.eat(&Token::Comma).is_some() {
-                let _ = self.eat_ident_ci("and");
+                let _ = self.eat(&Token::And);
                 if let Some(item) = parse_item(self) {
                     items.push(item);
                 } else {
                     break;
                 }
-            } else if self.eat_ident_ci("and").is_some() {
+            } else if self.eat(&Token::And).is_some() {
                 if let Some(item) = parse_item(self) {
                     items.push(item);
                 }
@@ -381,7 +382,7 @@ impl<'src> Parser<'src> {
             }
         }
         self.expect(&Token::RBrace)?;
-        let alias = if self.eat_ident_ci("as").is_some() {
+        let alias = if self.eat(&Token::As).is_some() {
             self.eat_ident().map(|(s, _)| s.to_string())
         } else {
             None
@@ -415,9 +416,9 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_interval(&mut self) -> Option<Interval> {
-        self.eat_ident_ci("from")?;
+        self.eat(&Token::From)?;
         let from = self.parse_date()?;
-        let to = if self.eat_ident_ci("to").is_some() {
+        let to = if self.eat(&Token::To).is_some() {
             Some(self.parse_date()?)
         } else {
             None
@@ -427,7 +428,7 @@ impl<'src> Parser<'src> {
         Some(Interval { from, to, value })
     }
 
-    fn parse_unit(&mut self) -> Option<String> {
+    fn parse_unit(&mut self) -> Option<Unit> {
         let first = match self.peek() {
             Token::Ident(s) => {
                 let s = s.to_string();
@@ -462,10 +463,37 @@ impl<'src> Parser<'src> {
                     return None;
                 }
             };
-            Some(format!("{first}/{second}"))
+            Some(Unit::single(first) / Unit::single(second))
         } else {
-            Some(first)
+            Some(Unit::single(first))
         }
+    }
+
+    /// Try to parse an inline unit suffix after a numeric literal: `ident [/ ident]`.
+    /// Since `Float Ident` is otherwise invalid syntax, any identifier immediately
+    /// following a float is unambiguously a unit numerator. The `/` is consumed only
+    /// when it is immediately followed by another identifier (i.e. another unit dim);
+    /// otherwise it is left for the expression parser to handle as division.
+    fn try_parse_inline_unit(&mut self) -> Option<Unit> {
+        let Token::Ident(s) = self.peek() else { return None; };
+        // If the ident is followed by `:` it's the start of an account path (e.g. `Income:Gross`),
+        // not a unit suffix.
+        if *self.peek_next() == Token::Colon {
+            return None;
+        }
+        let num_dim = s.to_string();
+        self.advance();
+
+        let cp = self.save();
+        if self.eat(&Token::Slash).is_some() {
+            if let Token::Ident(s2) = self.peek() {
+                let den_dim = s2.to_string();
+                self.advance();
+                return Some(Unit::single(num_dim) / Unit::single(den_dim));
+            }
+            self.restore(cp);
+        }
+        Some(Unit::single(num_dim))
     }
 
     fn parse_posting(&mut self) -> Option<Posting> {
@@ -474,7 +502,7 @@ impl<'src> Parser<'src> {
         }
         let account = self.parse_colon_path()?;
         let amount = if self.eat(&Token::Eq).is_some() {
-            if self.eat_ident_ci("all").is_some() {
+            if self.eat(&Token::All).is_some() {
                 Some(PostingAmount::All)
             } else {
                 Some(PostingAmount::Expr(self.parse_expr()?))
@@ -482,7 +510,7 @@ impl<'src> Parser<'src> {
         } else {
             None
         };
-        let leg_name = if self.eat_ident_ci("as").is_some() {
+        let leg_name = if self.eat(&Token::As).is_some() {
             self.eat_ident().map(|(s, _)| s.to_string())
         } else {
             None
@@ -565,15 +593,15 @@ impl<'src> Parser<'src> {
     fn parse_atom(&mut self) -> Option<SpannedExpr> {
         let start = self.peek_span();
 
-        if self.eat_ident_ci("if").is_some() {
+        if self.eat(&Token::If).is_some() {
             let cond = self.parse_expr()?;
-            if self.eat_ident_ci("then").is_none() {
+            if self.eat(&Token::Then).is_none() {
                 self.errors
                     .push(Diagnostic::new(self.peek_span(), "expected `then`"));
                 return None;
             }
             let then = self.parse_expr()?;
-            if self.eat_ident_ci("else").is_none() {
+            if self.eat(&Token::Else).is_none() {
                 self.errors
                     .push(Diagnostic::new(self.peek_span(), "expected `else`"));
                 return None;
@@ -592,8 +620,14 @@ impl<'src> Parser<'src> {
 
         if let Token::Float(f) = self.peek() {
             let f = *f;
-            let (_, s) = self.advance();
-            return Some((Box::new(Expr::Num(f)), s));
+            let (_, num_span) = self.advance();
+            let unit = self.try_parse_inline_unit();
+            let span = if unit.is_some() {
+                Span::new(num_span.start, self.last_span.end)
+            } else {
+                num_span
+            };
+            return Some((Box::new(Expr::Num(f, unit)), span));
         }
 
         if matches!(self.peek(), Token::Ident(_)) {
@@ -784,7 +818,7 @@ mod tests {
         match &prog.decls[0].0 {
             Decl::Param { name, unit, body } => {
                 assert_eq!(name, "salary_rate");
-                assert_eq!(unit.as_deref(), Some("usd/year"));
+                assert_eq!(unit, &Some(Unit::parse("usd/year").unwrap()));
                 let ParamBody::Schedule(intervals) = body else {
                     panic!("Not a schedule body")
                 };

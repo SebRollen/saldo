@@ -620,7 +620,7 @@ pub enum RefKind {
 fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
     f(e);
     match e.0.as_ref() {
-        Expr::Num(_) | Expr::Bool(_) | Expr::Ref(_) | Expr::ParamAgg(..) => {}
+        Expr::Num(_, _) | Expr::Bool(_) | Expr::Ref(_) | Expr::ParamAgg(..) => {}
         Expr::Neg(x) => walk_expr(x, f),
         Expr::Bin(a, _, b) => {
             walk_expr(a, f);
