@@ -4,7 +4,10 @@ mod eval;
 mod lexer;
 mod parser;
 mod resolver;
+mod unit;
 mod util;
+
+pub use unit::Unit;
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
