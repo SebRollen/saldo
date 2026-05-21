@@ -3,6 +3,7 @@ use crate::ast::{
 };
 use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
+use crate::unit::Unit;
 use chrono::NaiveDate;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
@@ -26,6 +27,12 @@ pub struct EntryDef {
 
 
 #[derive(Debug, Clone)]
+pub struct ParamDef {
+    pub body: ParamBody,
+    pub unit: Unit,
+}
+
+#[derive(Debug, Clone)]
 pub struct FnDef {
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
@@ -36,7 +43,7 @@ pub struct FnDef {
 pub struct Model {
     /// Accounts in declaration order (used as column order in CSV output).
     pub stocks: IndexMap<Path, Account>,
-    pub params: IndexMap<String, ParamBody>,
+    pub params: IndexMap<String, ParamDef>,
     pub fns: IndexMap<String, FnDef>,
     pub entries: Vec<EntryDef>,
     pub asserts: Vec<(Schedule, SpannedExpr)>,
@@ -49,7 +56,7 @@ struct Resolver<'a> {
 
     schedules: IndexMap<String, Schedule>,
     stocks: IndexMap<Path, Account>,
-    params: HashMap<String, ParamBody>,
+    params: HashMap<String, ParamDef>,
     fns: HashMap<String, FnDef>,
     entries: Vec<EntryDef>,
     asserts: Vec<(Schedule, SpannedExpr)>,
@@ -130,7 +137,7 @@ impl<'a> Resolver<'a> {
                 Decl::Schedule { .. } => {
                     // already processed in collect_schedules
                 }
-                Decl::Param { name, body, .. } => {
+                Decl::Param { name, unit, body } => {
                     if let Some(prev) = self.param_spans.get(name) {
                         self.diags.push(
                             Diagnostic::new(*span, format!("duplicate param `{name}`"))
@@ -138,10 +145,8 @@ impl<'a> Resolver<'a> {
                         );
                         continue;
                     }
-                    match body {
-                        ParamBody::Const(e) => {
-                            self.params.insert(name.clone(), ParamBody::Const(e.clone()));
-                        }
+                    let resolved_body = match body {
+                        ParamBody::Const(e) => ParamBody::Const(e.clone()),
                         ParamBody::Schedule(intervals) => {
                             let mut sorted = intervals.clone();
                             sorted.sort_by_key(|i| i.from);
@@ -167,9 +172,13 @@ impl<'a> Resolver<'a> {
                                     ));
                                 }
                             }
-                            self.params.insert(name.clone(), ParamBody::Schedule(sorted));
+                            ParamBody::Schedule(sorted)
                         }
-                    }
+                    };
+                    self.params.insert(name.clone(), ParamDef {
+                        body: resolved_body,
+                        unit: unit.clone().unwrap_or_default(),
+                    });
                     self.param_spans.insert(name.clone(), *span);
                 }
                 Decl::Entry {
@@ -463,7 +472,7 @@ fn check_periodic_schedule(schedule: &Schedule, span: Span, diags: &mut Vec<Diag
     }
 }
 
-fn collect_param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> {
+fn collect_param_deps(def: &ParamDef, known: &HashSet<String>) -> Vec<String> {
     let mut deps: Vec<String> = Vec::new();
     let mut visitor = |e: &SpannedExpr| {
         if let Expr::Ref(path) = e.0.as_ref() && path.0.len() == 1 && known.contains(&path.0[0]) {
@@ -473,7 +482,7 @@ fn collect_param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> 
             deps.push(name.clone());
         }
     };
-    match &body {
+    match &def.body {
         ParamBody::Const(e) => walk_expr(e, &mut visitor),
         ParamBody::Schedule(intervals) => {
             for iv in intervals {
@@ -489,7 +498,7 @@ fn collect_param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> 
 /// Kahn's topological sort on `n` nodes numbered `0..n`.
 /// Returns `(order, had_cycle)`. When `had_cycle` is true, `order.len() < n` and the
 /// unreachable nodes are omitted — callers handle them however they like.
-fn topo_sort_params(mut map: HashMap<String, ParamBody>) -> IndexMap<String, ParamBody> {
+fn topo_sort_params(mut map: HashMap<String, ParamDef>) -> IndexMap<String, ParamDef> {
     let known: HashSet<String> = map.keys().cloned().collect();
 
     // Assign stable integer indices in sorted key order for deterministic output.
@@ -514,7 +523,7 @@ fn topo_sort_params(mut map: HashMap<String, ParamBody>) -> IndexMap<String, Par
 
     let (order, had_cycle) = crate::util::topological_sort(&dependents);
 
-    let mut result: IndexMap<String, ParamBody> = IndexMap::new();
+    let mut result: IndexMap<String, ParamDef> = IndexMap::new();
     for i in order {
         let name = &names[i];
         if let Some(param) = map.remove(name) {

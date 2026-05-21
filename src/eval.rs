@@ -46,7 +46,7 @@ pub struct DaySnapshot {
 
 struct Environment<'m> {
     stocks: HashMap<Path, Decimal>,
-    params: HashMap<String, Decimal>,
+    params: HashMap<String, Value>,
     /// (flow_name, leg_name) → value for the current day (0 on non-firing days).
     leg_values: HashMap<(&'m str, &'m str), Decimal>,
     /// ((flow_name, leg_name), period) → running total.
@@ -93,7 +93,7 @@ impl<'m> Environment<'m> {
         self.stocks.insert(name, value);
     }
 
-    fn add_param(&mut self, name: String, value: Decimal) {
+    fn add_param(&mut self, name: String, value: Value) {
         self.params.insert(name, value);
     }
 
@@ -214,16 +214,16 @@ impl Model {
         t: NaiveDate,
         env: &mut Environment<'m>,
     ) -> Result<(), Diagnostic> {
-        for (name, body) in &self.params {
-            match body {
+        for (name, def) in &self.params {
+            match &def.body {
                 ParamBody::Const(e) => {
-                    let v = eval_num(e, env)?;
-                    env.add_param(name.clone(), v);
+                    let n = eval_num(e, env)?;
+                    env.add_param(name.clone(), Value::Num(n, def.unit.clone()));
                 }
                 ParamBody::Schedule(intervals) => {
                     if let Some(iv) = intervals.iter().find(|iv| iv.contains(t)) {
-                        let v = eval_num(&iv.value, env)?;
-                        env.add_param(name.clone(), v);
+                        let n = eval_num(&iv.value, env)?;
+                        env.add_param(name.clone(), Value::Num(n, def.unit.clone()));
                     }
                 }
             }
@@ -413,9 +413,9 @@ fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result
                     Ok(Value::Num(*env.stocks.get(&p).unwrap_or(&Decimal::ZERO), Unit::scalar()))
                 }
                 Some(RefKind::Param(n)) => {
-                    Ok(Value::Num(*env.params.get(&n).ok_or_else(|| {
+                    env.params.get(&n).cloned().ok_or_else(|| {
                         Diagnostic::new(*span, format!("param `{n}` has no active interval"))
-                    })?, Unit::scalar()))
+                    })
                 }
                 None => Err(Diagnostic::new(
                     *span,
@@ -708,5 +708,30 @@ mod tests {
     fn eq_incompatible_units_errors() {
         let sek = Value::Num(Decimal::new(100, 0), Unit::single("sek"));
         assert!(apply_binop(BinOp::Eq, usd(100), sek, span()).is_err());
+    }
+
+    #[test]
+    fn param_unit_annotation_propagates_through_eval() {
+        let src = r#"
+            account Assets:Cash
+            account Liabilities:Loan
+            param salary_rate : usd/year = 120_000 usd/year
+            entry monthly "paycheck" {
+                Assets:Cash = salary_rate / 12
+                Liabilities:Loan
+            }
+        "#;
+        let tokens = crate::lexer::lex(src).unwrap();
+        let prog = crate::parser::parse(tokens).unwrap();
+        let model = crate::resolver::resolve(&prog).unwrap();
+
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let log = model.simulate(start, end).unwrap();
+
+        // The monthly paycheck should be 120_000 / 12 = 10_000
+        let tx = log.transactions.iter().find(|t| t.label == "paycheck").unwrap();
+        let (_, amt) = tx.postings.iter().find(|(p, _)| p.0.last().unwrap() == "Cash").unwrap();
+        assert_eq!(*amt, Decimal::new(10_000, 0));
     }
 }
