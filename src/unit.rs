@@ -55,9 +55,9 @@ impl Unit {
         self.0.iter().map(|(k, &v)| (k.as_str(), v))
     }
 
-    /// Parse a simple unit annotation: `"dim"`, `"dim/dim"`, or `"1"`/`""` for scalar.
+    /// Parse a simple unit annotation: `"dim"`, `"dim/dim"`, or `""` for scalar.
     pub fn parse(s: &str) -> Result<Self, String> {
-        if s.is_empty() || s == "1" {
+        if s.is_empty() {
             return Ok(Self::scalar());
         }
         if let Some((num, den)) = s.split_once('/') {
@@ -125,7 +125,7 @@ impl Mul<i32> for Unit {
 impl fmt::Display for Unit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0.is_empty() {
-            return write!(f, "1");
+            return write!(f, "");
         }
 
         let fmt_term = |name: &str, abs_exp: i32| -> String {
@@ -150,7 +150,9 @@ impl fmt::Display for Unit {
             .collect();
 
         if pos.is_empty() {
-            write!(f, "1")?;
+            if !neg.is_empty() {
+                write!(f, "1")?;
+            }
         } else {
             write!(f, "{}", pos.join("*"))?;
         }
@@ -404,18 +406,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_one_and_empty_are_scalar() {
-        assert_eq!(Unit::parse("1").unwrap(), Unit::scalar());
+    fn parse_empty_is_scalar() {
         assert_eq!(Unit::parse("").unwrap(), Unit::scalar());
     }
 
     // ---- Display ----
-
-    #[test]
-    fn display_scalar_is_one() {
-        assert_eq!(Unit::scalar().to_string(), "1");
-    }
-
     #[test]
     fn display_single_dim() {
         assert_eq!(Unit::single("usd").to_string(), "usd");

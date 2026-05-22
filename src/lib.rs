@@ -95,20 +95,27 @@ fn emit_ledger(accounts: &[Path], log: &eval::SimLog) -> String {
 
     writeln!(out, "{start} opening-balances").ok();
     let mut equity = Decimal::ZERO;
+    // Find the first non-scalar currency used across opening accounts — used for the
+    // Equity:OpeningBalances leg which auto-balances to the opposite of everything else.
+    let mut equity_unit = crate::Unit::scalar();
     for path in accounts {
         let init = log.opening.get(path).copied().unwrap_or(Decimal::ZERO);
         equity -= init;
         if init != Decimal::ZERO {
-            writeln!(out, "  {path}  {}", init).ok();
+            let unit = log.account_currencies.get(path).cloned().unwrap_or_default();
+            if equity_unit.is_scalar() && !unit.is_scalar() {
+                equity_unit = unit.clone();
+            }
+            writeln!(out, "  {path}  {init} {unit}").ok();
         }
     }
-    writeln!(out, "  Equity:OpeningBalances  {}", equity).ok();
+    writeln!(out, "  Equity:OpeningBalances  {equity} {equity_unit}").ok();
     writeln!(out).ok();
 
     for tx in &log.transactions {
         writeln!(out, "{} {}", tx.date, tx.label).ok();
-        for (account, amt) in &tx.postings {
-            writeln!(out, "  {account}  {}", amt).ok();
+        for (account, amt, unit) in &tx.postings {
+            writeln!(out, "  {account}  {amt} {unit}").ok();
         }
         writeln!(out).ok();
     }

@@ -166,6 +166,7 @@ pub enum Stmt {
 pub enum Decl {
     Account {
         name: Path,
+        currency: Unit,
         opening: Option<(SpannedExpr, NaiveDate)>,
     },
     Schedule {

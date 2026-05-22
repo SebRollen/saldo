@@ -217,6 +217,7 @@ impl<'src> Parser<'src> {
 
     fn parse_account_decl(&mut self) -> Option<Decl> {
         let name = self.parse_colon_path()?;
+        let currency = self.try_parse_inline_unit().unwrap_or_default();
         let opening = if self.eat(&Token::Eq).is_some() {
             let expr = self.parse_expr()?;
             if self.eat(&Token::At).is_none() {
@@ -231,7 +232,7 @@ impl<'src> Parser<'src> {
         } else {
             None
         };
-        Some(Decl::Account { name, opening })
+        Some(Decl::Account { name, currency, opening })
     }
 
     fn parse_schedule_decl(&mut self) -> Option<Decl> {
@@ -768,8 +769,9 @@ mod tests {
         let prog = parse_prog("account Liabilities:Loan = -3_000_000 @ 2024-01-01");
         assert_eq!(prog.decls.len(), 1);
         match &prog.decls[0].0 {
-            Decl::Account { name, opening } => {
+            Decl::Account { name, currency, opening } => {
                 assert_eq!(name.join(), "Liabilities:Loan");
+                assert!(currency.is_scalar());
                 assert!(matches!(opening, Some(((e, _), _)) if matches!(e.as_ref(), Expr::Neg(_))));
                 let date = opening.as_ref().unwrap().1;
                 assert_eq!(date, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
@@ -782,8 +784,9 @@ mod tests {
     fn parses_account_no_opening() {
         let prog = parse_prog("account Assets:Cash");
         match &prog.decls[0].0 {
-            Decl::Account { name, opening } => {
+            Decl::Account { name, currency, opening } => {
                 assert_eq!(name.join(), "Assets:Cash");
+                assert!(currency.is_scalar());
                 assert!(opening.is_none());
             }
             _ => panic!(),

@@ -223,7 +223,7 @@ fn fn_doubles_a_constant_param() {
     let posting = output.log.transactions[0]
         .postings
         .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .find(|(p, _, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
     // gross = 200, gross/12 ≈ 16.67
     assert_eq!(posting.1.round_dp(2), Decimal::new(1667, 2));
@@ -249,7 +249,7 @@ fn fn_with_let_binding() {
     let posting = output.log.transactions[0]
         .postings
         .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .find(|(p, _, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
     // net(6000, 0.3) = 6000 - 1800 = 4200
     assert_eq!(posting.1, Decimal::new(4200, 0));
@@ -279,13 +279,13 @@ fn fn_with_time_varying_param() {
     // January: doubled = 200
     let jan = &output.log.transactions[0];
     let jan_cash = jan.postings.iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .find(|(p, _, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
     assert_eq!(jan_cash.1, Decimal::new(200, 0));
     // July: doubled = 400
     let jul = &output.log.transactions[6];
     let jul_cash = jul.postings.iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .find(|(p, _, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
     assert_eq!(jul_cash.1, Decimal::new(400, 0));
 }
@@ -308,7 +308,7 @@ fn fn_calling_another_fn() {
     let posting = output.log.transactions[0]
         .postings
         .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .find(|(p, _, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
     assert_eq!(posting.1, Decimal::new(40, 0));
 }
@@ -330,7 +330,7 @@ fn fn_calling_builtin() {
     let posting = output.log.transactions[0]
         .postings
         .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .find(|(p, _, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
     assert_eq!(posting.1, Decimal::ZERO);
 }
@@ -354,7 +354,7 @@ fn fn_with_if_expr() {
     let posting = output.log.transactions[0]
         .postings
         .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .find(|(p, _, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
     assert_eq!(posting.1, Decimal::new(1000, 0));
 }
@@ -426,7 +426,7 @@ fn fn_implicit_return() {
     let posting = output.log.transactions[0]
         .postings
         .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
+        .find(|(p, _, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
     // double(50) = 100; net(100, 0.2) = 100 - 20 = 80
     assert_eq!(posting.1, Decimal::new(80, 0));

@@ -11,6 +11,7 @@ use crate::ast::schedule::{Periodic, Period};
 
 #[derive(Debug, Clone)]
 pub struct Account {
+    pub currency: Unit,
     pub opening: Option<(SpannedExpr, NaiveDate)>,
 }
 
@@ -123,7 +124,7 @@ impl<'a> Resolver<'a> {
         let program = self.program;
         for (decl, span) in &program.decls {
             match decl {
-                Decl::Account { name, opening } => {
+                Decl::Account { name, currency, opening } => {
                     if let Some(prev) = self.stock_spans.get(name) {
                         self.diags.push(
                             Diagnostic::new(*span, format!("duplicate account `{name}`"))
@@ -131,7 +132,7 @@ impl<'a> Resolver<'a> {
                         );
                     } else {
                         self.stock_spans.insert(name.clone(), *span);
-                        self.stocks.insert(name.clone(), Account { opening: opening.clone() });
+                        self.stocks.insert(name.clone(), Account { currency: currency.clone(), opening: opening.clone() });
                     }
                 }
                 Decl::Schedule { .. } => {
