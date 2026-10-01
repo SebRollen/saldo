@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
 use saldo::{RunOpts, format_errors, run};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]";
@@ -50,12 +50,21 @@ fn main() -> ExitCode {
     let opts = RunOpts { from, to };
     match run(&src, &opts) {
         Ok(output) => {
-            let rendered = match format {
-                OutputFormat::Ledger => output.to_ledger(),
-                OutputFormat::Csv => output.to_csv(),
-            };
-            print!("{rendered}");
-            ExitCode::SUCCESS
+            let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+            let written = match format {
+                OutputFormat::Ledger => output.write_ledger(&mut out),
+                OutputFormat::Csv => output.write_csv(&mut out),
+            }
+            .and_then(|()| out.flush());
+            match written {
+                Ok(()) => ExitCode::SUCCESS,
+                // The reader went away (e.g. `saldo … | head`); that's not an error.
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("could not write output: {e}");
+                    ExitCode::from(1)
+                }
+            }
         }
         Err(errors) => {
             let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();

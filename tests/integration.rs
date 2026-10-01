@@ -947,3 +947,42 @@ fn ledger_postings_reproduce_the_daily_balances() {
         assert_eq!(balances, snap.balances, "balances differ on {}", snap.date);
     }
 }
+
+// --- CLI ---
+
+#[test]
+fn cli_exits_cleanly_when_the_reader_stops_early() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let dir = std::env::temp_dir().join(format!("saldo-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("model.saldo");
+    std::fs::write(
+        &path,
+        "account A\naccount B\nentry daily \"x\" { A = 1\n B }\n",
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_saldo"))
+        .arg(&path)
+        .args(["--from", "2000-01-01", "--to", "2049-12-31"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first_line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut first_line)
+        .unwrap();
+    // Dropping stdout closes the pipe while saldo is still writing.
+    let output = child.wait_with_output().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(first_line, "2000-01-01 opening-balances\n");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

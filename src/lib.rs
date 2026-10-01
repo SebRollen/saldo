@@ -8,6 +8,7 @@ mod util;
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use std::io;
 
 pub use ast::{Path, Span};
 pub use errors::{Diagnostic, Error};
@@ -26,11 +27,27 @@ pub struct Output {
 
 impl Output {
     pub fn to_ledger(&self) -> String {
-        emit_ledger(&self.accounts, &self.log)
+        let mut out = Vec::new();
+        self.write_ledger(&mut out)
+            .expect("writing to a Vec can't fail");
+        String::from_utf8(out).expect("ledger output is UTF-8")
     }
 
     pub fn to_csv(&self) -> String {
-        emit_csv(&self.accounts, &self.log)
+        let mut out = Vec::new();
+        self.write_csv(&mut out)
+            .expect("writing to a Vec can't fail");
+        String::from_utf8(out).expect("CSV output is UTF-8")
+    }
+
+    /// Writes double-entry transactions in ledger format.
+    pub fn write_ledger(&self, out: &mut impl io::Write) -> io::Result<()> {
+        emit_ledger(out, &self.accounts, &self.log)
+    }
+
+    /// Writes the daily balance of every account as CSV.
+    pub fn write_csv(&self, out: &mut impl io::Write) -> io::Result<()> {
+        emit_csv(out, &self.accounts, &self.log)
     }
 }
 
@@ -82,9 +99,7 @@ pub fn format_errors(path: &str, src: &str, errors: &[Error], color: bool) -> St
     out
 }
 
-fn emit_ledger(accounts: &[Path], log: &eval::SimLog) -> String {
-    let mut out = String::new();
-
+fn emit_ledger(out: &mut impl io::Write, accounts: &[Path], log: &eval::SimLog) -> io::Result<()> {
     let start = log
         .snapshots
         .first()
@@ -101,7 +116,7 @@ fn emit_ledger(accounts: &[Path], log: &eval::SimLog) -> String {
         }
     }
     opening.push(("Equity:OpeningBalances".to_string(), equity));
-    write_transaction(&mut out, &format!("{start} opening-balances"), &opening);
+    write_transaction(out, &format!("{start} opening-balances"), &opening)?;
 
     for tx in &log.transactions {
         let postings: Vec<(String, Decimal)> = tx
@@ -109,46 +124,44 @@ fn emit_ledger(accounts: &[Path], log: &eval::SimLog) -> String {
             .iter()
             .map(|(account, amt)| (account.to_string(), *amt))
             .collect();
-        write_transaction(&mut out, &format!("{} {}", tx.date, tx.label), &postings);
+        write_transaction(out, &format!("{} {}", tx.date, tx.label), &postings)?;
     }
-
-    out
+    Ok(())
 }
 
 /// Writes a ledger transaction with account names padded and amounts
 /// right-aligned into columns.
-fn write_transaction(out: &mut String, header: &str, postings: &[(String, Decimal)]) {
-    use std::fmt::Write;
+fn write_transaction(
+    out: &mut impl io::Write,
+    header: &str,
+    postings: &[(String, Decimal)],
+) -> io::Result<()> {
     let amounts: Vec<String> = postings.iter().map(|(_, amt)| amt.to_string()).collect();
     let account_width = postings.iter().map(|(a, _)| a.len()).max().unwrap_or(0);
     let amount_width = amounts.iter().map(String::len).max().unwrap_or(0);
-    writeln!(out, "{header}").ok();
+    writeln!(out, "{header}")?;
     for ((account, _), amount) in postings.iter().zip(&amounts) {
-        writeln!(out, "  {account:<account_width$}  {amount:>amount_width$}").ok();
+        writeln!(out, "  {account:<account_width$}  {amount:>amount_width$}")?;
     }
-    writeln!(out).ok();
+    writeln!(out)
 }
 
-fn emit_csv(accounts: &[Path], log: &eval::SimLog) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-
-    write!(out, "\"date\"").ok();
+fn emit_csv(out: &mut impl io::Write, accounts: &[Path], log: &eval::SimLog) -> io::Result<()> {
+    write!(out, "\"date\"")?;
     for name in accounts {
-        write!(out, ",\"{name}\"").ok();
+        write!(out, ",\"{name}\"")?;
     }
-    writeln!(out).ok();
+    writeln!(out)?;
 
     for snap in &log.snapshots {
-        write!(out, "{}", snap.date).ok();
+        write!(out, "{}", snap.date)?;
         for name in accounts {
             let v = snap.balances.get(name).copied().unwrap_or(Decimal::ZERO);
-            write!(out, ",{v:.2}").ok();
+            write!(out, ",{v:.2}")?;
         }
-        writeln!(out).ok();
+        writeln!(out)?;
     }
-
-    out
+    Ok(())
 }
 
 #[cfg(test)]
