@@ -128,6 +128,11 @@ every 2 years from 2026-01-01          # biennially
 Ordinal words (`second`, `third`, `fourth`, …, `tenth`) and numeric suffixes
 (`2nd`, `3rd`, `4th`, …) are both accepted.
 
+`every <n> weeks on <days>` counts calendar weeks (Monday to Sunday) from the
+week containing the `from` date, so all the listed days of a week fire
+together. `every <n> <weekday>` counts occurrences of that day instead,
+starting with the first one on or after the `from` date.
+
 ## Literal date lists
 
 A comma- or `and`-separated list of ISO dates fires on exactly those days:

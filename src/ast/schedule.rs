@@ -225,7 +225,11 @@ impl Schedule {
                 }
                 match periodic.nth {
                     None => true,
-                    Some(Nth(n)) => (t - origin).num_days() / 7 % n as i64 == 0,
+                    // Count calendar weeks (Monday to Sunday), so days listed
+                    // in `on` that share a week always fire together.
+                    Some(Nth(n)) => {
+                        (week_start(t) - week_start(origin)).num_days() / 7 % n as i64 == 0
+                    }
                 }
             }
             Period::Weekday(dow) => {
@@ -301,6 +305,11 @@ impl Schedule {
             }
         }
     }
+}
+
+/// The Monday starting `t`'s week.
+fn week_start(t: NaiveDate) -> NaiveDate {
+    t - chrono::Duration::days(t.weekday().num_days_from_monday().into())
 }
 
 trait PeriodEnd: Datelike {
@@ -966,6 +975,23 @@ mod tests {
                     assert!(!sched.matches(date(2025, 1, 15))); // week 1 — Wed, skip
                     assert!(sched.matches(date(2025, 1, 22))); // week 2 — Wed
                     assert!(!sched.matches(date(2025, 1, 29))); // week 3 — Wed, skip
+                }
+
+                #[test]
+                fn counts_calendar_weeks_from_a_midweek_start() {
+                    // start = Wed 2025-01-08; Mon 13th is in the next calendar week.
+                    let sched = schedule(
+                        2,
+                        Period::Week {
+                            on: vec![Dow::Monday, Dow::Friday],
+                        },
+                        date(2025, 1, 8),
+                    );
+                    assert!(sched.matches(date(2025, 1, 10))); // week 0 — Fri
+                    assert!(!sched.matches(date(2025, 1, 13))); // week 1 — Mon
+                    assert!(!sched.matches(date(2025, 1, 17))); // week 1 — Fri
+                    assert!(sched.matches(date(2025, 1, 20))); // week 2 — Mon
+                    assert!(sched.matches(date(2025, 1, 24))); // week 2 — Fri
                 }
 
                 #[test]
