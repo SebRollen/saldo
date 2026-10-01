@@ -667,10 +667,10 @@ fn eval_fn_expr(
         Expr::Num(n) => Ok(Value::Num(*n)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Ref(path) => {
-            if path.0.len() == 1 {
-                if let Some(&v) = scope.get(&path.0[0]) {
-                    return Ok(Value::Num(v));
-                }
+            if path.0.len() == 1
+                && let Some(&v) = scope.get(&path.0[0])
+            {
+                return Ok(Value::Num(v));
             }
             Err(Diagnostic::new(*span, format!("unknown local `{path}`")))
         }

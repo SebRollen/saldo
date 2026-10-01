@@ -189,14 +189,14 @@ impl<'a> Resolver<'a> {
                     schedule,
                     postings,
                 } => {
-                    if let Some(a) = alias {
-                        if let Some(prev) = self.entry_aliases.get(a) {
-                            self.diags.push(
-                                Diagnostic::new(*span, format!("duplicate entry alias `{a}`"))
-                                    .with_note(*prev, "previously declared here"),
-                            );
-                            continue;
-                        }
+                    if let Some(a) = alias
+                        && let Some(prev) = self.entry_aliases.get(a)
+                    {
+                        self.diags.push(
+                            Diagnostic::new(*span, format!("duplicate entry alias `{a}`"))
+                                .with_note(*prev, "previously declared here"),
+                        );
+                        continue;
                     }
                     if postings.len() < 2 {
                         self.diags.push(Diagnostic::new(
@@ -808,10 +808,10 @@ fn validate_fn_bodies(fns: &HashMap<String, FnDef>, diags: &mut Vec<Diagnostic>)
                 ));
                 break;
             }
-            if visited.insert(callee.clone()) {
-                if let Some(callee_def) = fns.get(&callee) {
-                    stack.extend(collect_fn_call_deps(&callee_def.body, &fn_names));
-                }
+            if visited.insert(callee.clone())
+                && let Some(callee_def) = fns.get(&callee)
+            {
+                stack.extend(collect_fn_call_deps(&callee_def.body, &fn_names));
             }
         }
     }

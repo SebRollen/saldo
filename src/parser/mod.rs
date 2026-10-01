@@ -47,7 +47,7 @@ impl<'src> Parser<'src> {
         self.tokens
             .get(self.current)
             .map(|(t, _)| t)
-            .unwrap_or(&Token::EOF)
+            .unwrap_or(&Token::Eof)
     }
 
     fn peek_span(&self) -> Span {
@@ -61,7 +61,7 @@ impl<'src> Parser<'src> {
         self.tokens
             .get(self.current + 1)
             .map(|(t, _)| t)
-            .unwrap_or(&Token::EOF)
+            .unwrap_or(&Token::Eof)
     }
 
     fn advance(&mut self) -> (Token<'src>, Span) {
@@ -71,7 +71,7 @@ impl<'src> Parser<'src> {
             self.current += 1;
             (t, s)
         } else {
-            (Token::EOF, self.last_span)
+            (Token::Eof, self.last_span)
         }
     }
 
@@ -165,7 +165,7 @@ impl<'src> Parser<'src> {
 
     fn parse_program(&mut self) -> Program {
         let mut decls = Vec::new();
-        while *self.peek() != Token::EOF {
+        while *self.peek() != Token::Eof {
             let start = self.peek_span();
             let err_count = self.errors.len();
             if let Some(decl) = self.parse_decl() {
@@ -194,7 +194,7 @@ impl<'src> Parser<'src> {
     fn synchronize(&mut self) {
         loop {
             match self.peek() {
-                Token::EOF
+                Token::Eof
                 | Token::Account
                 | Token::Assert
                 | Token::Entry
@@ -234,7 +234,7 @@ impl<'src> Parser<'src> {
                 self.advance();
                 return self.parse_fn_decl();
             }
-            Token::EOF => return None,
+            Token::Eof => return None,
             _ => {}
         }
         let span = self.peek_span();
@@ -283,7 +283,7 @@ impl<'src> Parser<'src> {
             ParamBody::Const(self.parse_expr()?)
         } else if self.eat(&Token::LBrace).is_some() {
             let mut intervals = Vec::new();
-            while *self.peek() != Token::RBrace && *self.peek() != Token::EOF {
+            while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
                 if let Some(iv) = self.parse_interval() {
                     intervals.push(iv);
                 } else {
@@ -319,7 +319,7 @@ impl<'src> Parser<'src> {
         let name = name.to_string();
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
-        while !matches!(self.peek(), Token::RParen | Token::EOF) {
+        while !matches!(self.peek(), Token::RParen | Token::Eof) {
             let (p, span) = self.expect_ident("parameter name")?;
             params.push((p.to_string(), span));
             if self.eat(&Token::Comma).is_none() {
@@ -331,7 +331,7 @@ impl<'src> Parser<'src> {
         let mut body: Vec<Stmt> = Vec::new();
         loop {
             match self.peek() {
-                Token::RBrace | Token::EOF => break,
+                Token::RBrace | Token::Eof => break,
                 Token::Let => {
                     self.advance();
                     if let Some(stmt) = self.parse_let_stmt() {
@@ -350,7 +350,7 @@ impl<'src> Parser<'src> {
                 _ => {
                     // Implicit return: a bare expression not followed by `;`.
                     if let Some(expr) = self.parse_expr() {
-                        if matches!(self.peek(), Token::RBrace | Token::EOF) {
+                        if matches!(self.peek(), Token::RBrace | Token::Eof) {
                             body.push(Stmt::Return(expr));
                         } else {
                             self.errors.push(Diagnostic::new(
@@ -405,7 +405,7 @@ impl<'src> Parser<'src> {
         };
         self.expect(&Token::LBrace)?;
         let mut postings = Vec::new();
-        while *self.peek() != Token::RBrace && *self.peek() != Token::EOF {
+        while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
             if let Some(p) = self.parse_posting() {
                 postings.push(p);
             } else {
@@ -692,7 +692,7 @@ impl<'src> Parser<'src> {
         let (name, _) = self.eat_ident()?;
         self.expect(&Token::LParen);
         let mut args = Vec::new();
-        while *self.peek() != Token::RParen && *self.peek() != Token::EOF {
+        while *self.peek() != Token::RParen && *self.peek() != Token::Eof {
             if let Some(arg) = self.parse_expr() {
                 args.push(arg);
             } else {
@@ -713,20 +713,19 @@ impl<'src> Parser<'src> {
         self.expect(&Token::Period);
 
         let cp = self.save();
-        if let Some((second, _)) = self.eat_ident() {
-            if self.eat(&Token::Period).is_some() {
-                if let Some(kind) = self.try_eat_agg_kind() {
-                    let span = Span::new(start.start, self.last_span.end);
-                    return Some((
-                        Box::new(Expr::ParamAgg(
-                            Some(first.to_string()),
-                            second.to_string(),
-                            kind,
-                        )),
-                        span,
-                    ));
-                }
-            }
+        if let Some((second, _)) = self.eat_ident()
+            && self.eat(&Token::Period).is_some()
+            && let Some(kind) = self.try_eat_agg_kind()
+        {
+            let span = Span::new(start.start, self.last_span.end);
+            return Some((
+                Box::new(Expr::ParamAgg(
+                    Some(first.to_string()),
+                    second.to_string(),
+                    kind,
+                )),
+                span,
+            ));
         }
         self.restore(cp);
 

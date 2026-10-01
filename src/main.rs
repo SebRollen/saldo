@@ -5,6 +5,17 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]";
 
+const HELP: &str = "\
+Simulate a saldo model and print the resulting transactions or balances.
+
+Options:
+  --from YYYY-MM-DD   first day to report (inclusive)
+  --to YYYY-MM-DD     last day to report (inclusive)
+  --format FORMAT     `ledger` (default): double-entry transactions
+                      `csv`: daily balance of every account
+  -h, --help          print this help
+  -V, --version       print the version";
+
 enum OutputFormat {
     Ledger,
     Csv,
@@ -12,6 +23,14 @@ enum OutputFormat {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{USAGE}\n\n{HELP}");
+        return ExitCode::SUCCESS;
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("saldo {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     let (path, from, to, format) = match parse_args(&args) {
         Ok(x) => x,
         Err(msg) => {

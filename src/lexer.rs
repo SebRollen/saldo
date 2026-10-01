@@ -48,7 +48,7 @@ pub enum Token<'src> {
     LBrace,
     RBrace,
     Semicolon,
-    EOF,
+    Eof,
 }
 
 impl<'src> fmt::Display for Token<'src> {
@@ -91,7 +91,7 @@ impl<'src> fmt::Display for Token<'src> {
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
             Token::Semicolon => write!(f, ";"),
-            Token::EOF => write!(f, "EOF"),
+            Token::Eof => write!(f, "EOF"),
         }
     }
 }
@@ -118,7 +118,7 @@ impl<'src> Lexer<'src> {
         let mut errors = Vec::new();
         loop {
             match self.lex_token() {
-                Ok((Token::EOF, _)) => {
+                Ok((Token::Eof, _)) => {
                     if errors.is_empty() {
                         return Ok(tokens);
                     } else {
@@ -169,17 +169,13 @@ impl<'src> Lexer<'src> {
                 Some(b' ') | Some(b'\r') | Some(b'\t') | Some(b'\n') => {
                     self.advance();
                 }
-                Some(b'/') => {
-                    if self.peek_next() == Some(b'/') {
-                        // entering a comment, skip to end of line
-                        while let Some(s) = self.peek()
-                            && *s != b'\n'
-                            && !self.at_end()
-                        {
-                            self.advance();
-                        }
-                    } else {
-                        return;
+                Some(b'/') if self.peek_next() == Some(b'/') => {
+                    // entering a comment, skip to end of line
+                    while let Some(s) = self.peek()
+                        && *s != b'\n'
+                        && !self.at_end()
+                    {
+                        self.advance();
                     }
                 }
                 _ => return,
@@ -357,7 +353,7 @@ impl<'src> Lexer<'src> {
         self.start = self.current;
 
         if self.at_end() {
-            return self.emit_token(Token::EOF);
+            return self.emit_token(Token::Eof);
         }
 
         let c = self.advance();

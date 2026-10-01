@@ -29,7 +29,11 @@ fn ledger_output_contains_transactions() {
     let output = run(src, &opts("2025-01-01", "2025-03-31")).unwrap();
     let ledger = output.to_ledger();
     assert!(ledger.contains("opening-balances"));
-    assert!(ledger.contains("Assets:Cash  1000"));
+    assert!(
+        ledger
+            .lines()
+            .any(|line| line.split_whitespace().eq(["Assets:Cash", "1000"]))
+    );
     assert!(ledger.contains("Paycheck"));
 }
 
@@ -862,4 +866,84 @@ fn errors_render_without_color_when_asked() {
     let plain = saldo::format_errors("test.saldo", src, &errors, false);
     assert!(!plain.contains('\x1b'), "{plain}");
     assert!(saldo::format_errors("test.saldo", src, &errors, true).contains('\x1b'));
+}
+
+// --- invariants ---
+
+/// A model exercising most features: warm-up, late openings, params with
+/// intervals, named legs and aggregates, `all`, functions and schedules.
+const KITCHEN_SINK: &str = "
+    account Assets:Cash                 =   5_000 @ 2025-01-01
+    account Assets:Retirement           =  10_000 @ 2025-01-01
+    account Assets:Savings              =   2_500 @ 2026-03-01
+    account Liabilities:Loan            = -30_000 @ 2025-01-01
+    account Liabilities:AccruedInterest
+    account Income:Salary
+    account Expenses:Interest
+    account Expenses:Rent
+
+    schedule payday = monthly on the 15th and last day
+    param interest_rate = 0.05
+    param max_401k = 23_000
+    param salary {
+        from 2025-01-01 to 2026-04-16 = 80_000
+        from 2026-04-16               = 95_000
+    }
+
+    fn per_paycheck(annual) { annual / 24 }
+
+    entry payday \"Paycheck\" {
+      Assets:Retirement = min(max_401k - k401.ytd, per_paycheck(salary) * 0.15) as k401
+      Assets:Cash       = per_paycheck(salary) - k401
+      Income:Salary
+    } as paycheck
+
+    entry daily \"Interest accrual\" {
+      Liabilities:AccruedInterest = Liabilities:Loan * interest_rate / 365
+      Expenses:Interest
+    }
+
+    entry monthly on the 17th \"Loan payment\" {
+      Liabilities:AccruedInterest = all
+      Liabilities:Loan            = 1_000
+      Assets:Cash
+    }
+
+    entry every 2 weeks on friday from 2025-01-03 \"Rent\" {
+      Expenses:Rent = 1_200
+      Assets:Cash
+    }
+
+    assert that paycheck.k401.ytd <= max_401k
+";
+
+#[test]
+fn every_transaction_balances() {
+    let output = run(KITCHEN_SINK, &opts("2026-01-01", "2026-12-31")).unwrap();
+    assert!(output.log.transactions.len() > 300);
+    for tx in &output.log.transactions {
+        let sum: Decimal = tx.postings.iter().map(|(_, amt)| amt).sum();
+        assert!(sum.is_zero(), "{} {} sums to {sum}", tx.date, tx.label);
+    }
+}
+
+#[test]
+fn ledger_postings_reproduce_the_daily_balances() {
+    let output = run(KITCHEN_SINK, &opts("2026-01-01", "2026-12-31")).unwrap();
+    let mut balances = output.log.opening.clone();
+    let mut snapshots = output.log.snapshots.iter().peekable();
+    for tx in &output.log.transactions {
+        // Before applying a day's transactions, every earlier day must match.
+        while let Some(snap) = snapshots.next_if(|s| s.date < tx.date) {
+            assert_eq!(balances, snap.balances, "balances differ on {}", snap.date);
+        }
+        for (account, amt) in &tx.postings {
+            if let Some(balance) = balances.get_mut(account) {
+                *balance += amt;
+            }
+        }
+    }
+    for snap in snapshots {
+        assert_eq!(balances, snap.balances, "balances differ on {}", snap.date);
+    }
 }

@@ -45,9 +45,9 @@ When run through the `saldo` CLI, this file generates transactions:
 ```
 ❯ saldo budget.saldo --from 2026-01-01 --to 2027-01-01
 2026-01-01 opening-balances
-  Assets:Cash              5000
-  Liabilities:Loan       -30000
-  Equity:OpeningBalances  25000
+  Assets:Cash               5000
+  Liabilities:Loan        -30000
+  Equity:OpeningBalances   25000
 
 2026-01-01 Interest accrual
   Liabilities:AccruedInterest  -4.11
@@ -62,9 +62,9 @@ When run through the `saldo` CLI, this file generates transactions:
   Income:Salary  -3958.33
 …
 2026-01-17 Loan payment
-  Liabilities:AccruedInterest  69.87
-  Liabilities:Loan           2000
-  Assets:Cash               -2069.87
+  Liabilities:AccruedInterest     69.87
+  Liabilities:Loan                 2000
+  Assets:Cash                  -2069.87
 
 2026-01-18 Interest accrual
   Liabilities:AccruedInterest  -3.84
