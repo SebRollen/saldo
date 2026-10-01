@@ -1373,7 +1373,7 @@ fn entries_firing_less_often_than_the_rate_collect_the_periods_between() {
           Expenses:Rent = rent
           Assets:Cash
         }
-        entry every second friday from 2026-01-09 \"Stipend\" {
+        entry every second friday from 2025-12-26 \"Stipend\" {
           Expenses:Stipend = stipend
           Assets:Cash
         }
@@ -1512,6 +1512,31 @@ fn dividing_by_a_per_points_at_its_precedence() {
         d.extra[0].1.contains("`per` binds tighter than `/`"),
         "{d:?}"
     );
+}
+
+#[test]
+fn per_day_interest_matches_an_amortization_schedule() {
+    // Actual/365 interest on each period's days, rounded once: the first
+    // period runs from Jan 10 to Jan 31.
+    let src = "
+        account Assets:Cash
+        account Liabilities:Loan = -10_000 @ 2026-01-10
+        account Expenses:Interest
+        entry every month from 2026-01-11 \"Loan payment\" {
+          Expenses:Interest = (-Liabilities:Loan * 6% / 365) per day as interest
+          Liabilities:Loan  = min(300, interest - Liabilities:Loan) - interest
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2029-12-31")).unwrap();
+    let expected = "34.52 44.81 48.31 45.51 45.73 43.00 43.12 41.81 39.19 39.17 36.62 36.50 \
+                    35.15 30.53 32.43 30.06 29.69 27.40 26.92 25.53 23.36 22.72 20.62 19.89 \
+                    18.46 15.93 15.58 13.67 12.67 10.84 9.73 8.25 6.55 5.27 3.65 2.26 0.74";
+    let expected: Vec<Decimal> = expected.split_whitespace().map(usd).collect();
+    assert_eq!(postings_to(&output, "Expenses:Interest"), expected);
+    let payments = postings_to(&output, "Assets:Cash");
+    assert_eq!(payments.last(), Some(&usd("-146.19")));
+    assert_eq!(posted_in(&output, "Liabilities:Loan", 2029), usd("145.45"));
 }
 
 // --- fill ---

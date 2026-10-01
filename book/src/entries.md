@@ -160,17 +160,35 @@ In detail:
   too, so you see the same paychecks whatever `--from` you choose. To post
   the whole amount over the firings that are left, use
   [`fill`](#filling-a-target).
-- **A period without a firing rolls into the next one.** A `quarterly` entry
-  posts three months of a rate per month, and an `every second friday`
-  entry posts two weeks of a rate per week.
+- **A period without a firing rolls into the next one,** back to the
+  schedule's `from` date. A `quarterly` entry posts three months of a rate
+  per month, an `every second friday` entry posts two weeks of a rate per
+  week, and an entry `every month from 2026-03-17` first posts March 17 to
+  31 of a rate per day.
 
 The last rule gives you the other common way of paying a yearly salary
 biweekly: the same amount every payday, so that a year with 27 paydays pays
-more. Declare the salary per week:
+more. Declare the salary per week, and start the schedule on an earlier
+payday so that the first one in your simulation covers two weeks:
 
 ```
 param salary = (130_000 / 52) per week
 ```
+
+It also charges interest by the actual days in each period. This loan
+starts on January 10 and is paid at the end of each month, with interest on
+each period's days at 1/365 of the yearly rate:
+
+```
+entry every month from 2026-01-11 "Loan payment" {
+  Expenses:Interest = (-Liabilities:Loan * 6% / 365) per day as interest
+  Liabilities:Loan  = min(300, interest - Liabilities:Loan) - interest
+  Assets:Cash
+}
+```
+
+The first payment covers January 11 to 31, and `min` makes the last one
+smaller, paying off what's left.
 
 ### Filling a target
 

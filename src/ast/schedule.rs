@@ -323,8 +323,9 @@ impl Schedule {
     /// The days in `t`'s period that fit the schedule's pattern split the
     /// period's amount equally, including days before the schedule's `from`
     /// date, so a schedule that starts partway through a period gets only part
-    /// of it. A period with no such days adds its whole amount to the next day
-    /// that fits.
+    /// of it. Periods with no such days add their whole amount to the next day
+    /// that fits, back to the period containing `from`, before which the
+    /// schedule doesn't cover anything.
     pub fn share(&self, unit: TimeUnit, t: NaiveDate) -> Share {
         let start = unit.period_start(t);
         let mut share = Share {
@@ -344,12 +345,16 @@ impl Schedule {
             }
             day = d.succ_opt();
         }
-        if share.index == 1
-            && let Some(previous) = self.previous_match(start)
-        {
-            let gap = unit.period_number(start) - unit.period_number(previous) - 1;
-            share.carried = gap.try_into().unwrap_or(u32::MAX);
-        }
+        let own = unit.period_number(start);
+        let after_previous = self
+            .previous_match(start)
+            .map(|d| unit.period_number(d) + 1);
+        let from = match self {
+            Self::Periodic(periodic) => periodic.start.map(|d| unit.period_number(d)),
+            Self::Dates(_) => None,
+        };
+        let first = after_previous.into_iter().chain(from).max().unwrap_or(own);
+        share.carried = (own - first).max(0).try_into().unwrap_or(u32::MAX);
         share
     }
 
@@ -379,8 +384,9 @@ impl Schedule {
     }
 }
 
-/// A firing's part of an amount per period: the amounts of `carried` whole
-/// earlier periods, plus the `index`th of `count` equal parts of its own.
+/// A firing's part of an amount per period: the `index`th of `count` equal
+/// parts of its own period, plus, for the period's first firing, the whole
+/// amounts of the `carried` periods before it that have no firing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Share {
     pub carried: u32,
@@ -1202,6 +1208,26 @@ mod tests {
                     "{src} per {unit}: {found:?}"
                 );
             }
+        }
+
+        #[test]
+        fn carrying_starts_at_from() {
+            let found = shares(
+                "every month from 2026-03-17",
+                TimeUnit::Day,
+                date(2026, 3, 1),
+                date(2026, 4, 30),
+            );
+            // Mar 17 to 31, then all of April.
+            assert_eq!(found, [share(14, 1, 1), share(29, 1, 1)]);
+            // Without `from`, the first firing covers the whole month.
+            let found = shares(
+                "monthly",
+                TimeUnit::Day,
+                date(2026, 3, 1),
+                date(2026, 3, 31),
+            );
+            assert_eq!(found, [share(30, 1, 1)]);
         }
 
         #[test]

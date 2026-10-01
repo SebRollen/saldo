@@ -800,21 +800,23 @@ fn to_amount(value: Decimal) -> Decimal {
     }
 }
 
-/// A firing's part of `amount` per period, in cents. Each firing in a period
-/// gets the difference between two rounded running totals, so a period's
-/// firings add up to exactly its amount.
+/// A firing's part of `amount` per period, in cents: the difference between
+/// two running totals rounded to cents, counted from the start of the periods
+/// that roll into its own. Each firing is rounded once, and a period's firings
+/// add up to exactly its amount.
 fn spread(amount: Decimal, share: Share) -> Option<Decimal> {
     debug_assert!(share.index >= 1 && share.index <= share.count);
-    let running = |firings: u32| {
+    // Positions in `count`ths of a period. The first firing starts from the
+    // carried periods; the others start where the previous one ended.
+    let end = u64::from(share.carried) * u64::from(share.count) + u64::from(share.index);
+    let start = if share.index == 1 { 0 } else { end - 1 };
+    let running = |parts: u64| {
         let total = amount
-            .checked_mul(firings.into())?
+            .checked_mul(parts.into())?
             .checked_div(share.count.into())?;
         Some(total.round_dp(2))
     };
-    let carried = amount.checked_mul(share.carried.into())?.round_dp(2);
-    carried
-        .checked_add(running(share.index)?)?
-        .checked_sub(running(share.index - 1)?)
+    running(end)?.checked_sub(running(start)?)
 }
 
 fn checked_sum<'a>(values: impl IntoIterator<Item = &'a Decimal>) -> Option<Decimal> {
