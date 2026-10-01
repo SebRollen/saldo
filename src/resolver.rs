@@ -736,7 +736,7 @@ pub enum RefKind {
     Param(String),
 }
 
-fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
+pub(crate) fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
     f(e);
     match e.0.as_ref() {
         Expr::Num(_) | Expr::Bool(_) | Expr::Ref(_) | Expr::ParamAgg(..) => {}

@@ -24,6 +24,8 @@ pub struct RunOpts {
 pub struct Output {
     pub accounts: Vec<Path>,
     pub log: SimLog,
+    /// Problems that don't stop the simulation but may make results wrong.
+    pub warnings: Vec<Diagnostic>,
 }
 
 impl Output {
@@ -74,8 +76,13 @@ pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
         .map_err(|d| vec![Error::Diagnostic(d)])?;
 
     let accounts = model.stocks.keys().cloned().collect();
+    let warnings = model.missed_aggregate_warnings(model.first_day(opts.from));
 
-    Ok(Output { accounts, log })
+    Ok(Output {
+        accounts,
+        log,
+        warnings,
+    })
 }
 
 /// Renders errors for display. `color` enables ANSI colors.
@@ -92,12 +99,18 @@ pub fn format_errors(path: &str, src: &str, errors: &[Error], color: bool) -> St
                     path,
                     src,
                     std::slice::from_ref(d),
+                    errors::Severity::Error,
                     color,
                 ));
             }
         }
     }
     out
+}
+
+/// Renders warnings for display. `color` enables ANSI colors.
+pub fn format_warnings(path: &str, src: &str, warnings: &[Diagnostic], color: bool) -> String {
+    errors::format_diagnostics(path, src, warnings, errors::Severity::Warning, color)
 }
 
 fn emit_ledger(out: &mut impl io::Write, accounts: &[Path], log: &eval::SimLog) -> io::Result<()> {

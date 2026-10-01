@@ -67,6 +67,29 @@ pub enum AggKind {
     Mtd,
 }
 
+impl AggKind {
+    /// The first day of the period containing `t`.
+    pub fn period_start(self, t: chrono::NaiveDate) -> chrono::NaiveDate {
+        use chrono::Datelike;
+        let month = match self {
+            AggKind::Ytd => 1,
+            AggKind::Qtd => (t.month() - 1) / 3 * 3 + 1,
+            AggKind::Mtd => t.month(),
+        };
+        chrono::NaiveDate::from_ymd_opt(t.year(), month, 1).expect("valid first of month")
+    }
+}
+
+impl std::fmt::Display for AggKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AggKind::Ytd => "ytd",
+            AggKind::Qtd => "qtd",
+            AggKind::Mtd => "mtd",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
     Add,

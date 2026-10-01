@@ -1111,3 +1111,55 @@ fn functions_can_return_bools() {
     ";
     run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
 }
+
+// --- missed aggregate warnings ---
+
+const CAPPED_CONTRIBUTIONS: &str = "
+    account Assets:Retirement
+    account Income:Salary
+    entry monthly on the 15th \"Paycheck\" {
+      Assets:Retirement = min(1_000 - k401.ytd, 300) + k401.qtd * 0 as k401
+      Income:Salary
+    } as paycheck
+    assert that paycheck.k401.ytd <= 1_000
+";
+
+fn warnings(src: &str, from: &str) -> Vec<String> {
+    let output = run(src, &opts(from, "2025-12-31")).unwrap();
+    output.warnings.iter().map(|w| w.message.clone()).collect()
+}
+
+#[test]
+fn warns_when_an_aggregate_misses_earlier_firings() {
+    let output = run(CAPPED_CONTRIBUTIONS, &opts("2025-05-20", "2025-12-31")).unwrap();
+    let messages: Vec<&str> = output.warnings.iter().map(|w| w.message.as_str()).collect();
+    // One warning per aggregate, even though `paycheck.k401.ytd` repeats it.
+    assert_eq!(
+        messages,
+        [
+            "`k401.ytd` is missing amounts from before 2025-05-20",
+            "`k401.qtd` is missing amounts from before 2025-05-20",
+        ]
+    );
+    let span = output.warnings[0].span;
+    assert_eq!(&CAPPED_CONTRIBUTIONS[span.start..span.end], "k401.ytd");
+    assert!(
+        output.warnings[1].extra[0]
+            .1
+            .contains("would have fired on 2025-04-15")
+    );
+}
+
+#[test]
+fn no_warning_when_nothing_was_missed() {
+    // Starting on the first day of the year.
+    assert!(warnings(CAPPED_CONTRIBUTIONS, "2025-01-01").is_empty());
+    // Starting mid-period, but before the entry first fires.
+    assert!(warnings(CAPPED_CONTRIBUTIONS, "2025-01-10").is_empty());
+    // Starting mid-year, but an account opening on Jan 1 warms up from there.
+    let warmed_up = CAPPED_CONTRIBUTIONS.replace(
+        "account Assets:Retirement",
+        "account Assets:Retirement = 0 @ 2025-01-01",
+    );
+    assert!(warnings(&warmed_up, "2025-06-01").is_empty());
+}

@@ -1,6 +1,6 @@
 use crate::ast::{AggKind, BinOp, Expr, ParamBody, Path, PostingAmount, Span, SpannedExpr, Stmt};
 use crate::errors::Diagnostic;
-use crate::resolver::{FnDef, Model, RefKind, resolve_ref};
+use crate::resolver::{FnDef, Model, RefKind, resolve_ref, walk_expr};
 use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
@@ -160,15 +160,7 @@ impl Model {
             }
         }
 
-        // Simulate from the earliest opening date (if before start) so the
-        // warmup period accumulates the right balances before reporting starts.
-        let effective_start = self
-            .stocks
-            .values()
-            .filter_map(|a| a.opening.as_ref().map(|(_, d)| *d))
-            .min()
-            .map(|earliest| earliest.min(start))
-            .unwrap_or(start);
+        let effective_start = self.first_day(start);
 
         let mut log = SimLog {
             transactions: Vec::new(),
@@ -253,6 +245,108 @@ impl Model {
         }
 
         Ok(log)
+    }
+
+    /// The first simulated day when reporting from `start`: the earliest
+    /// opening date if that's before `start`, so the warm-up period accumulates
+    /// the right balances before reporting starts.
+    pub fn first_day(&self, start: NaiveDate) -> NaiveDate {
+        self.stocks
+            .values()
+            .filter_map(|a| a.opening.as_ref().map(|(_, d)| *d))
+            .min()
+            .map_or(start, |earliest| earliest.min(start))
+    }
+
+    /// Warns about `.ytd`/`.qtd`/`.mtd` totals that are missing amounts because
+    /// the simulation starts partway through their period, after their entry
+    /// would already have fired.
+    pub fn missed_aggregate_warnings(&self, first_day: NaiveDate) -> Vec<Diagnostic> {
+        struct Aggregate {
+            entry_key: String,
+            leg: String,
+            kind: AggKind,
+            /// How it's written, e.g. `paycheck.k401.ytd`.
+            display: String,
+            span: Span,
+        }
+        let mut aggregates: Vec<Aggregate> = Vec::new();
+        let mut collect = |e: &SpannedExpr, entry_key: Option<&str>| {
+            walk_expr(e, &mut |sub| {
+                if let Expr::ParamAgg(qualifier, leg, kind) = sub.0.as_ref()
+                    && let Some(key) = qualifier.as_deref().or(entry_key)
+                {
+                    let display = match qualifier {
+                        Some(q) => format!("{q}.{leg}.{kind}"),
+                        None => format!("{leg}.{kind}"),
+                    };
+                    aggregates.push(Aggregate {
+                        entry_key: key.to_string(),
+                        leg: leg.clone(),
+                        kind: *kind,
+                        display,
+                        span: sub.1,
+                    });
+                }
+            });
+        };
+        for body in self.params.values() {
+            match body {
+                ParamBody::Const(e) => collect(e, None),
+                ParamBody::Schedule(intervals) => {
+                    for iv in intervals {
+                        collect(&iv.value, None);
+                    }
+                }
+            }
+        }
+        for entry in &self.entries {
+            for posting in &entry.postings {
+                if let Some(PostingAmount::Expr(e)) = &posting.amount {
+                    collect(e, Some(&entry.key));
+                }
+            }
+        }
+        for (_, e) in &self.asserts {
+            collect(e, None);
+        }
+        aggregates.sort_by_key(|a| a.span.start);
+
+        let mut warned = HashSet::new();
+        let mut warnings = Vec::new();
+        for agg in aggregates {
+            if !warned.insert((agg.entry_key.clone(), agg.leg.clone(), agg.kind)) {
+                continue;
+            }
+            let Some(entry) = self.entries.iter().find(|e| e.key == agg.entry_key) else {
+                continue;
+            };
+            let period_start = agg.kind.period_start(first_day);
+            let missed = period_start
+                .iter_days()
+                .take_while(|d| *d < first_day)
+                .find(|d| entry.schedule.matches(*d));
+            if let Some(missed) = missed {
+                warnings.push(
+                    Diagnostic::new(
+                        agg.span,
+                        format!(
+                            "`{}` is missing amounts from before {first_day}",
+                            agg.display
+                        ),
+                    )
+                    .with_note(
+                        agg.span,
+                        format!(
+                            "`{}` would have fired on {missed}; simulate from {period_start} \
+                             (or open an account by then) to include it",
+                            entry.label
+                        ),
+                    ),
+                );
+            }
+        }
+        warnings
     }
 
     /// Evaluates every param for day `t`. Failures are recorded rather than

@@ -24,7 +24,23 @@ impl Diagnostic {
     }
 }
 
-pub fn format_diagnostics(path: &str, source: &str, diags: &[Diagnostic], color: bool) -> String {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+pub fn format_diagnostics(
+    path: &str,
+    source: &str,
+    diags: &[Diagnostic],
+    severity: Severity,
+    color: bool,
+) -> String {
+    let (kind, label_color) = match severity {
+        Severity::Error => (ReportKind::Error, Color::Red),
+        Severity::Warning => (ReportKind::Warning, Color::Yellow),
+    };
     let mut output = Vec::new();
     for d in diags {
         let range = d.span.into_range();
@@ -33,13 +49,13 @@ pub fn format_diagnostics(path: &str, source: &str, diags: &[Diagnostic], color:
             .with_color(color);
         // ariadne only underlines labels that carry a message, so the primary
         // label repeats the header.
-        let mut builder = Report::build(ReportKind::Error, (path, range.clone()))
+        let mut builder = Report::build(kind, (path, range.clone()))
             .with_config(config)
             .with_message(&d.message)
             .with_label(
                 Label::new((path, range))
                     .with_message(&d.message)
-                    .with_color(Color::Red),
+                    .with_color(label_color),
             );
         for (span, msg) in &d.extra {
             builder = builder.with_label(

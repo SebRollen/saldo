@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use saldo::{RunOpts, format_errors, run};
+use saldo::{RunOpts, format_errors, format_warnings, run};
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
@@ -48,8 +48,10 @@ fn main() -> ExitCode {
     };
 
     let opts = RunOpts { from, to };
+    let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     match run(&src, &opts) {
         Ok(output) => {
+            eprint!("{}", format_warnings(&path, &src, &output.warnings, color));
             let mut out = std::io::BufWriter::new(std::io::stdout().lock());
             let written = match format {
                 OutputFormat::Ledger => output.write_ledger(&mut out),
@@ -67,7 +69,6 @@ fn main() -> ExitCode {
             }
         }
         Err(errors) => {
-            let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
             eprint!("{}", format_errors(&path, &src, &errors, color));
             ExitCode::from(1)
         }

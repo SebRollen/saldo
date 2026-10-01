@@ -16,8 +16,10 @@ transactions aren't printed. The opening balances you see are the balances on
 
 Accounts without an opening balance start at zero on the first simulated day.
 Period totals (`.ytd`, `.qtd`, `.mtd`) also start at zero on the first
-simulated day, so a model that caps year-to-date amounts should open its
-accounts no later than the start of the year.
+simulated day. If that day falls partway through a period and the leg's entry
+would already have fired earlier in it, saldo warns that the total is missing
+amounts. To fix it, simulate from the start of the period, or open an account
+by then so the warm-up covers it.
 
 ## Each day
 
