@@ -4,6 +4,7 @@ mod eval;
 mod lexer;
 mod parser;
 mod resolver;
+mod typecheck;
 mod util;
 
 use chrono::NaiveDate;

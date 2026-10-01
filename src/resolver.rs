@@ -89,6 +89,10 @@ impl<'a> Resolver<'a> {
         self.validate_references();
         self.check_param_cycles();
         if self.diags.is_empty() {
+            // Types are only meaningful once every name and call resolves.
+            self.diags = crate::typecheck::check(self.program, &self.fns);
+        }
+        if self.diags.is_empty() {
             Ok(self.into_model())
         } else {
             Err(self.diags)

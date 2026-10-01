@@ -1045,5 +1045,69 @@ fn chained_comparisons_are_rejected() {
 #[test]
 fn logical_operators_require_bools() {
     let errors = run("assert that 1 and true", &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(has_error(&errors, "operands of `and` must be bools"));
+    assert!(has_error(
+        &errors,
+        "an operand of `and` must be a bool, but this is a number"
+    ));
+}
+
+// --- type checking ---
+
+#[test]
+fn type_errors_are_reported_before_simulating() {
+    let cases = [
+        // Only evaluated from 2040 on, but reported up front.
+        (
+            "account A\naccount B\nentry daily \"x\" {\n A = if Assets > 0 then true else 1\n B\n}\naccount Assets",
+            "`if` branches must have the same type, but are a bool and a number",
+        ),
+        (
+            "param p = 1 > 0",
+            "a param must be a number, but this is a bool",
+        ),
+        (
+            "assert that 1 + 1",
+            "an assertion must be a bool, but this is a number",
+        ),
+        (
+            "assert that 1 == true",
+            "`==` compares a number with a bool",
+        ),
+        ("assert that not 1", "the operand of `not` must be a bool"),
+        ("param p = -(1 > 0)", "the operand of `-` must be a number"),
+        (
+            "param p = if 1 then 2 else 3",
+            "an `if` condition must be a bool",
+        ),
+        (
+            "param p = max(1 > 0, 2)",
+            "an argument to `max` must be a number",
+        ),
+        (
+            "fn positive(x) { x > 0 }\nparam p = positive(1)",
+            "a param must be a number, but this is a bool",
+        ),
+        (
+            "fn f(x) { let y = x > 0; x }",
+            "a `let` binding must be a number",
+        ),
+        (
+            "account A = 1 > 0 @ 2025-01-01",
+            "an opening balance must be a number",
+        ),
+    ];
+    for (src, expected) in cases {
+        let errors = run(src, &opts("2040-01-01", "2040-01-01")).unwrap_err();
+        assert!(has_error(&errors, expected), "`{src}`: {errors:?}");
+    }
+}
+
+#[test]
+fn functions_can_return_bools() {
+    let src = "
+        fn positive(x) { x > 0 }
+        param p = 5
+        assert that positive(p) and not positive(-p)
+    ";
+    run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
 }

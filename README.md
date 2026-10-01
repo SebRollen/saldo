@@ -178,6 +178,10 @@ Assertions are checked after flows run each day. Simulation aborts with an error
 | `abs(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Built-in functions |
 | `net(gross, 0.3)` | User-defined function call |
 
+Values are numbers or bools. saldo checks that each is used where it's
+expected (amounts and params are numbers, assertions and `if` conditions are
+bools) before it simulates anything.
+
 Posting amounts and opening balances are rounded to cents, and `round(x)`
 rounds to a whole number. Both use round-half-to-even (`round(2.5) == 2`),
 as hledger and beancount do. Entries whose postings all come to zero are left
