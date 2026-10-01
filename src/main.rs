@@ -1,5 +1,6 @@
 use chrono::NaiveDate;
 use saldo::{RunOpts, format_errors, run};
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]";
@@ -38,7 +39,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(errors) => {
-            eprint!("{}", format_errors(&path, &src, &errors));
+            let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+            eprint!("{}", format_errors(&path, &src, &errors, color));
             ExitCode::from(1)
         }
     }

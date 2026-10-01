@@ -133,29 +133,28 @@ impl<'src> Parser<'src> {
         self.errors.truncate(err_len);
     }
 
-    // item (, item)* [,? and item]
-    fn parse_comma_list<T, F>(&mut self, mut parse_item: F) -> Vec<T>
+    // item ((, | , and | and) item)*
+    // Reports "expected {what}" if the list is empty or ends with a separator.
+    fn parse_comma_list<T, F>(&mut self, what: &str, mut parse_item: F) -> Vec<T>
     where
         F: FnMut(&mut Self) -> Option<T>,
     {
-        let Some(first) = parse_item(self) else {
-            return Vec::new();
-        };
-        let mut items = vec![first];
+        let mut items = Vec::new();
         loop {
-            if self.eat(&Token::Comma).is_some() {
-                let _ = self.eat_ident_ci("and");
-                if let Some(item) = parse_item(self) {
-                    items.push(item);
-                } else {
-                    break;
-                }
-            } else if self.eat_ident_ci("and").is_some() {
-                if let Some(item) = parse_item(self) {
-                    items.push(item);
+            let err_count = self.errors.len();
+            let Some(item) = parse_item(self) else {
+                if self.errors.len() == err_count {
+                    self.errors.push(Diagnostic::new(
+                        self.peek_span(),
+                        format!("expected {what}"),
+                    ));
                 }
                 break;
-            } else {
+            };
+            items.push(item);
+            let comma = self.eat(&Token::Comma).is_some();
+            let and = self.eat_ident_ci("and").is_some();
+            if !comma && !and {
                 break;
             }
         }
@@ -321,8 +320,8 @@ impl<'src> Parser<'src> {
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
         while !matches!(self.peek(), Token::RParen | Token::EOF) {
-            let (p, _) = self.expect_ident("parameter name")?;
-            params.push(p.to_string());
+            let (p, span) = self.expect_ident("parameter name")?;
+            params.push((p.to_string(), span));
             if self.eat(&Token::Comma).is_none() {
                 break;
             }
@@ -437,18 +436,22 @@ impl<'src> Parser<'src> {
     }
 
     fn try_parse_schedule_ref(&mut self) -> Option<ScheduleRef> {
-        let cp = self.save();
+        let err_count = self.errors.len();
         if let Some(sched) = self.parse_schedule_literal() {
             return Some(ScheduleRef::Literal(sched));
         }
-        self.restore(cp);
+        if self.errors.len() > err_count {
+            // It started like a schedule literal but was malformed; don't retry
+            // it as a schedule name, which would hide the real error.
+            return None;
+        }
 
-        let (name, _) = self.eat_ident()?;
-        Some(ScheduleRef::Named(name.to_string()))
+        let (name, span) = self.eat_ident()?;
+        Some(ScheduleRef::Named(name.to_string(), span))
     }
 
     fn parse_interval(&mut self) -> Option<Interval> {
-        self.eat_ident_ci("from")?;
+        let start = self.eat_ident_ci("from")?;
         let from = self.parse_date()?;
         let to = if self.eat_ident_ci("to").is_some() {
             Some(self.parse_date()?)
@@ -457,7 +460,13 @@ impl<'src> Parser<'src> {
         };
         self.expect(&Token::Eq)?;
         let value = self.parse_expr()?;
-        Some(Interval { from, to, value })
+        let span = Span::new(start.start, self.last_span.end);
+        Some(Interval {
+            from,
+            to,
+            value,
+            span,
+        })
     }
 
     fn parse_unit(&mut self) -> Option<String> {
@@ -505,7 +514,9 @@ impl<'src> Parser<'src> {
         if !matches!(self.peek(), Token::Ident(_)) {
             return None;
         }
+        let start = self.peek_span();
         let account = self.parse_colon_path()?;
+        let account_span = Span::new(start.start, self.last_span.end);
         let amount = if self.eat(&Token::Eq).is_some() {
             if self.eat_ident_ci("all").is_some() {
                 Some(PostingAmount::All)
@@ -515,15 +526,19 @@ impl<'src> Parser<'src> {
         } else {
             None
         };
-        let leg_name = if self.eat_ident_ci("as").is_some() {
-            Some(self.expect_ident("leg name after `as`")?.0.to_string())
+        let (leg_name, leg_span) = if self.eat_ident_ci("as").is_some() {
+            let (leg, span) = self.expect_ident("leg name after `as`")?;
+            (Some(leg.to_string()), Some(span))
         } else {
-            None
+            (None, None)
         };
         Some(Posting {
             account,
             amount,
             leg_name,
+            span: Span::new(start.start, self.last_span.end),
+            account_span,
+            leg_span,
         })
     }
 
@@ -994,6 +1009,13 @@ mod tests {
     fn if_requires_else() {
         let errs = parse_errs("assert that if Assets:Cash > 0 then 1 0");
         assert!(errs.iter().any(|d| d.message.contains("else")));
+    }
+
+    #[test]
+    fn malformed_inline_schedule_reports_the_schedule_error() {
+        let errs = parse_errs("entry every fortnight \"x\" { A = 1\nB }");
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].message.starts_with("expected period"), "{errs:?}");
     }
 
     #[test]

@@ -60,7 +60,8 @@ pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
     Ok(Output { accounts, log })
 }
 
-pub fn format_errors(path: &str, src: &str, errors: &[Error]) -> String {
+/// Renders errors for display. `color` enables ANSI colors.
+pub fn format_errors(path: &str, src: &str, errors: &[Error], color: bool) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     for e in errors {
@@ -73,6 +74,7 @@ pub fn format_errors(path: &str, src: &str, errors: &[Error]) -> String {
                     path,
                     src,
                     std::slice::from_ref(d),
+                    color,
                 ));
             }
         }

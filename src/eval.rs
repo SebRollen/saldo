@@ -317,7 +317,7 @@ impl Model {
             let mut auto_leg: Option<(Path, Option<&'m str>)> = None;
 
             for posting in &entry.postings {
-                check_account_open(env, &posting.account, entry.span)?;
+                check_account_open(env, &posting.account, posting.account_span)?;
                 match &posting.amount {
                     Some(PostingAmount::Expr(e)) => {
                         let amt = eval_num(e, env).map_err(|d| {

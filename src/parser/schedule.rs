@@ -300,11 +300,13 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_dow_list(&mut self) -> Vec<Dow> {
-        self.parse_comma_list(|p| p.try_parse_dow())
+        self.parse_comma_list("day of the week", |p| p.try_parse_dow())
     }
 
     fn parse_month_occurrence_list(&mut self) -> Vec<MonthOccurrence> {
-        self.parse_comma_list(|p| p.try_parse_month_occurrence())
+        self.parse_comma_list("day of the month (like `15th` or `last friday`)", |p| {
+            p.try_parse_month_occurrence()
+        })
     }
 
     fn try_parse_month_occurrence(&mut self) -> Option<MonthOccurrence> {
@@ -350,7 +352,9 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_year_occurrence_list(&mut self) -> Vec<(Month, Ordinal)> {
-        self.parse_comma_list(|p| p.try_parse_year_occurrence())
+        self.parse_comma_list("month and day (like `jan 1st`)", |p| {
+            p.try_parse_year_occurrence()
+        })
     }
 
     fn try_parse_year_occurrence(&mut self) -> Option<(Month, Ordinal)> {
@@ -365,7 +369,7 @@ impl<'src> Parser<'src> {
         if !matches!(self.peek(), Token::Date(_)) {
             return None;
         }
-        Some(self.parse_comma_list(|p| {
+        Some(self.parse_comma_list("date", |p| {
             if let Token::Date(d) = p.peek() {
                 let d = *d;
                 p.advance();
@@ -700,6 +704,37 @@ mod tests {
                 assert_eq!(MonthOccurrence::Day(Ordinal::First), on[0]);
                 assert_eq!(MonthOccurrence::Day(Ordinal::Last), on[1]);
             }
+        }
+
+        #[test]
+        fn rejects_incomplete_lists() {
+            let cases = [
+                ("weekly on", "expected day of the week"),
+                ("weekly on monday and", "expected day of the week"),
+                ("monthly on the", "expected day of the month"),
+                ("yearly on", "expected month and day"),
+                ("2025-01-01,", "expected date"),
+            ];
+            for (src, expected) in cases {
+                let errs = parse_schedule_str(src).unwrap_err();
+                assert!(
+                    errs.iter().any(|d| d.message.starts_with(expected)),
+                    "`{src}`: expected {expected:?}, got {errs:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn lists_can_chain_and() {
+            let Schedule::Periodic(periodic) = parse("weekly on mon and wed and fri") else {
+                panic!("not periodic")
+            };
+            assert_eq!(
+                Period::Week {
+                    on: vec![Dow::Monday, Dow::Wednesday, Dow::Friday]
+                },
+                periodic.period
+            );
         }
 
         #[test]

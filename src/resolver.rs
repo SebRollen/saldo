@@ -157,10 +157,13 @@ impl<'a> Resolver<'a> {
                                 let b = &win[1];
                                 let a_end = a.to.unwrap_or(chrono::NaiveDate::MAX);
                                 if a_end > b.from {
-                                    self.diags.push(Diagnostic::new(
-                                        *span,
-                                        format!("param `{name}` has overlapping intervals"),
-                                    ));
+                                    self.diags.push(
+                                        Diagnostic::new(
+                                            b.span,
+                                            format!("param `{name}` has overlapping intervals"),
+                                        )
+                                        .with_note(a.span, "overlaps this interval"),
+                                    );
                                     break;
                                 }
                             }
@@ -169,8 +172,8 @@ impl<'a> Resolver<'a> {
                                     && to <= i.from
                                 {
                                     self.diags.push(Diagnostic::new(
-                                        *span,
-                                        format!("param `{name}` interval ends before it starts"),
+                                        i.span,
+                                        "interval must end after it starts",
                                     ));
                                 }
                             }
@@ -201,12 +204,17 @@ impl<'a> Resolver<'a> {
                             format!("entry `{label}` needs at least two postings"),
                         ));
                     }
-                    let auto_count = postings.iter().filter(|p| p.amount.is_none()).count();
-                    if auto_count > 1 {
-                        self.diags.push(Diagnostic::new(
-                            *span,
-                            format!("entry `{label}` has more than one auto-balance posting"),
-                        ));
+                    let mut auto_postings = postings.iter().filter(|p| p.amount.is_none());
+                    if let (Some(first), Some(second)) =
+                        (auto_postings.next(), auto_postings.next())
+                    {
+                        self.diags.push(
+                            Diagnostic::new(
+                                second.span,
+                                "only one posting per entry can omit its amount",
+                            )
+                            .with_note(first.span, "this posting is already auto-balanced"),
+                        );
                     }
 
                     let key = alias
@@ -220,7 +228,7 @@ impl<'a> Resolver<'a> {
                         };
                         if !entry_leg_names.insert(leg.clone()) {
                             self.diags.push(Diagnostic::new(
-                                *span,
+                                posting.leg_span.unwrap_or(posting.span),
                                 format!("duplicate leg name `{leg}` in entry `{label}`"),
                             ));
                         } else {
@@ -231,22 +239,9 @@ impl<'a> Resolver<'a> {
                     if let Some(a) = alias {
                         self.entry_aliases.insert(a.clone(), *span);
                     }
-                    // Clone early to release the borrow on self.schedules before
-                    // accessing self.diags below.
-                    let schedule: Schedule = match schedule {
-                        ScheduleRef::Literal(s) => s.clone(),
-                        ScheduleRef::Named(n) => match self.schedules.get(n).cloned() {
-                            Some(s) => s,
-                            None => {
-                                self.diags.push(Diagnostic::new(
-                                    *span,
-                                    format!("schedule `{n}` is not defined"),
-                                ));
-                                continue;
-                            }
-                        },
+                    let Some(schedule) = self.resolve_schedule_ref(schedule, *span) else {
+                        continue;
                     };
-                    check_periodic_schedule(&schedule, *span, &mut self.diags);
                     let sorted_postings = topo_sort_postings(
                         postings.clone(),
                         &entry_leg_names,
@@ -275,10 +270,10 @@ impl<'a> Resolver<'a> {
                         ));
                     } else {
                         let mut seen_params: HashSet<&str> = HashSet::new();
-                        for p in params {
+                        for (p, p_span) in params {
                             if !seen_params.insert(p.as_str()) {
                                 self.diags.push(Diagnostic::new(
-                                    *span,
+                                    *p_span,
                                     format!("duplicate parameter `{p}` in function `{name}`"),
                                 ));
                             }
@@ -287,7 +282,7 @@ impl<'a> Resolver<'a> {
                         self.fns.insert(
                             name.clone(),
                             FnDef {
-                                params: params.clone(),
+                                params: params.iter().map(|(p, _)| p.clone()).collect(),
                                 body: body.clone(),
                                 span: *span,
                             },
@@ -295,27 +290,40 @@ impl<'a> Resolver<'a> {
                     }
                 }
                 Decl::Assert { schedule, asserted } => {
-                    let schedule: Schedule = match schedule {
+                    let schedule = match schedule {
                         None => Schedule::Periodic(Periodic {
                             period: Period::Day,
                             nth: None,
                             start: None,
                         }),
-                        Some(ScheduleRef::Literal(s)) => s.clone(),
-                        Some(ScheduleRef::Named(n)) => match self.schedules.get(n).cloned() {
+                        Some(r) => match self.resolve_schedule_ref(r, *span) {
                             Some(s) => s,
-                            None => {
-                                self.diags.push(Diagnostic::new(
-                                    *span,
-                                    format!("schedule `{n}` is not defined"),
-                                ));
-                                continue;
-                            }
+                            None => continue,
                         },
                     };
-                    check_periodic_schedule(&schedule, *span, &mut self.diags);
                     self.asserts.push((schedule, asserted.clone()));
                 }
+            }
+        }
+    }
+
+    /// Looks up a named schedule, or validates a literal one. Named schedules
+    /// were already validated where they were declared.
+    fn resolve_schedule_ref(&mut self, r: &ScheduleRef, decl_span: Span) -> Option<Schedule> {
+        match r {
+            ScheduleRef::Literal(s) => {
+                check_periodic_schedule(s, decl_span, &mut self.diags);
+                Some(s.clone())
+            }
+            ScheduleRef::Named(n, span) => {
+                let schedule = self.schedules.get(n).cloned();
+                if schedule.is_none() {
+                    self.diags.push(Diagnostic::new(
+                        *span,
+                        format!("schedule `{n}` is not defined"),
+                    ));
+                }
+                schedule
             }
         }
     }
@@ -363,20 +371,21 @@ impl<'a> Resolver<'a> {
                 .cloned()
                 .collect();
             for posting in &entry.postings {
-                self.check_path_is_stock(&posting.account, entry.span, &stock_set);
+                self.check_path_is_stock(&posting.account, posting.account_span, &stock_set);
                 if let Some(PostingAmount::Expr(e)) = &posting.amount {
                     self.check_expr(e, Some(&entry.key), &entry_legs, &stock_set, &param_set);
                 }
                 if let Some(leg) = &posting.leg_name {
+                    let leg_span = posting.leg_span.unwrap_or(posting.span);
                     if param_set.contains(leg) {
                         self.diags.push(Diagnostic::new(
-                            entry.span,
+                            leg_span,
                             format!("leg name `{leg}` conflicts with a param of the same name"),
                         ));
                     }
                     if stock_set.contains(&Path(vec![leg.clone()])) {
                         self.diags.push(Diagnostic::new(
-                            entry.span,
+                            leg_span,
                             format!("leg name `{leg}` conflicts with an account of the same name"),
                         ));
                     }
@@ -815,11 +824,11 @@ fn validate_fn_bodies(fns: &HashMap<String, FnDef>, diags: &mut Vec<Diagnostic>)
                     name: let_name,
                     value,
                 } => {
-                    validate_fn_expr(value, &scope, fns, fn_name, def.span, diags);
+                    validate_fn_expr(value, &scope, fns, fn_name, diags);
                     scope.insert(let_name.clone());
                 }
                 Stmt::Return(expr) => {
-                    validate_fn_expr(expr, &scope, fns, fn_name, def.span, diags);
+                    validate_fn_expr(expr, &scope, fns, fn_name, diags);
                 }
             }
         }
@@ -831,7 +840,6 @@ fn validate_fn_expr(
     scope: &HashSet<String>,
     user_fns: &HashMap<String, FnDef>,
     fn_name: &str,
-    fn_span: Span,
     diags: &mut Vec<Diagnostic>,
 ) {
     walk_expr(expr, &mut |sub: &SpannedExpr| match sub.0.as_ref() {
@@ -875,7 +883,7 @@ fn validate_fn_expr(
         }
         Expr::ParamAgg(..) => {
             diags.push(Diagnostic::new(
-                fn_span,
+                sub.1,
                 format!("function `{fn_name}` cannot use `.ytd`/`.qtd`/`.mtd` aggregations"),
             ));
         }

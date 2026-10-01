@@ -24,12 +24,17 @@ impl Diagnostic {
     }
 }
 
-pub fn format_diagnostics(path: &str, source: &str, diags: &[Diagnostic]) -> String {
+pub fn format_diagnostics(path: &str, source: &str, diags: &[Diagnostic], color: bool) -> String {
     let mut output = Vec::new();
     for d in diags {
         let range = d.span.into_range();
+        let config = Config::default()
+            .with_index_type(IndexType::Byte)
+            .with_color(color);
+        // ariadne only underlines labels that carry a message, so the primary
+        // label repeats the header.
         let mut builder = Report::build(ReportKind::Error, (path, range.clone()))
-            .with_config(Config::default().with_index_type(IndexType::Byte))
+            .with_config(config)
             .with_message(&d.message)
             .with_label(
                 Label::new((path, range))

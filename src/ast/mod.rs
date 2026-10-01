@@ -120,7 +120,7 @@ pub enum Expr {
 #[derive(Clone, Debug)]
 pub enum ScheduleRef {
     Literal(Schedule),
-    Named(String),
+    Named(String, Span),
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +128,7 @@ pub struct Interval {
     pub from: NaiveDate,
     pub to: Option<NaiveDate>,
     pub value: SpannedExpr,
+    pub span: Span,
 }
 
 impl Interval {
@@ -147,6 +148,10 @@ pub struct Posting {
     pub account: Path,
     pub amount: Option<PostingAmount>,
     pub leg_name: Option<String>,
+    /// The whole posting line.
+    pub span: Span,
+    pub account_span: Span,
+    pub leg_span: Option<Span>,
 }
 
 #[derive(Clone, Debug)]
@@ -189,7 +194,7 @@ pub enum Decl {
     },
     Fn {
         name: String,
-        params: Vec<String>,
+        params: Vec<Spanned<String>>,
         body: Vec<Stmt>,
     },
 }

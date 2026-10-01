@@ -624,7 +624,7 @@ fn non_ascii_outside_a_string_is_a_diagnostic() {
         let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
         assert!(has_error(&errors, "unexpected character `é`"), "{src}");
         // Rendering must not split the multi-byte character.
-        saldo::format_errors("test.saldo", src, &errors);
+        saldo::format_errors("test.saldo", src, &errors, true);
     }
 }
 
@@ -783,4 +783,83 @@ fn opening_balances_are_rounded_like_postings() {
         posting(&output, 0, "Liabilities:Accrued"),
         Decimal::new(-3333, 2)
     );
+}
+
+// --- diagnostic spans ---
+
+/// The source text highlighted by the error whose message contains `needle`.
+fn highlighted<'a>(src: &'a str, errors: &[saldo::Error], needle: &str) -> &'a str {
+    let span = errors
+        .iter()
+        .find_map(|e| match e {
+            saldo::Error::Diagnostic(d) if d.message.contains(needle) => Some(d.span),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no error containing {needle:?} in {errors:?}"));
+    &src[span.start..span.end]
+}
+
+#[test]
+fn resolver_errors_point_at_the_offending_text() {
+    let cases = [
+        (
+            "account A\nentry daily \"x\" {\n A = 1\n Nowhere:Else\n}",
+            "unknown account",
+            "Nowhere:Else",
+        ),
+        (
+            "account A\naccount B\nentry daily \"x\" {\n A = 1 as leg\n B as leg\n}",
+            "duplicate leg name",
+            "leg",
+        ),
+        (
+            "account A\naccount B\naccount C\nentry daily \"x\" {\n A = 1\n B\n C\n}",
+            "only one posting",
+            "C",
+        ),
+        (
+            "param p {\n from 2025-01-01 = 1\n from 2025-06-01 = 2\n}",
+            "overlapping intervals",
+            "from 2025-06-01 = 2",
+        ),
+        (
+            "param p {\n from 2025-06-01 to 2025-01-01 = 1\n}",
+            "must end after it starts",
+            "from 2025-06-01 to 2025-01-01 = 1",
+        ),
+        (
+            "account A\naccount B\nentry payday \"x\" {\n A = 1\n B\n}",
+            "not defined",
+            "payday",
+        ),
+        ("fn f(x, y, x) { x }", "duplicate parameter", "x"),
+        ("fn f(x) { x.ytd }", "cannot use", "x.ytd"),
+    ];
+    for (src, needle, expected) in cases {
+        let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+        assert_eq!(highlighted(src, &errors, needle), expected, "{src}");
+    }
+}
+
+#[test]
+fn named_schedule_missing_from_is_reported_once() {
+    let src = "
+        schedule biweekly = every 2 weeks
+        account A
+        account B
+        entry biweekly \"x\" { A = 1
+          B }
+        assert biweekly that A >= 0
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+}
+
+#[test]
+fn errors_render_without_color_when_asked() {
+    let src = "param p = ghost";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    let plain = saldo::format_errors("test.saldo", src, &errors, false);
+    assert!(!plain.contains('\x1b'), "{plain}");
+    assert!(saldo::format_errors("test.saldo", src, &errors, true).contains('\x1b'));
 }
