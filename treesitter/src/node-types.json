@@ -3,6 +3,16 @@
     "type": "account_decl",
     "named": true,
     "fields": {
+      "date": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "date",
+            "named": true
+          }
+        ]
+      },
       "init": {
         "multiple": false,
         "required": false,
@@ -108,6 +118,10 @@
         {
           "type": "on_clause",
           "named": true
+        },
+        {
+          "type": "weekday_on_clause",
+          "named": true
         }
       ]
     }
@@ -208,7 +222,7 @@
         "required": false,
         "types": [
           {
-            "type": "schedule_literal",
+            "type": "schedule_ref",
             "named": true
           }
         ]
@@ -514,6 +528,10 @@
           "named": true
         },
         {
+          "type": "fn_decl",
+          "named": true
+        },
+        {
           "type": "param_decl",
           "named": true
         },
@@ -645,6 +663,10 @@
             "named": false
           },
           {
+            "type": "weekday_on_clause",
+            "named": true
+          },
+          {
             "type": "weeks",
             "named": false
           },
@@ -668,6 +690,92 @@
           }
         ]
       }
+    }
+  },
+  {
+    "type": "fn_decl",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "parameter": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "agg_expr",
+            "named": true
+          },
+          {
+            "type": "binary_expr",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expr",
+            "named": true
+          },
+          {
+            "type": "colon_path",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "if_expr",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "unary_minus",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "let_stmt",
+          "named": true
+        },
+        {
+          "type": "return_stmt",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -834,6 +942,68 @@
         "types": [
           {
             "type": "date",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "agg_expr",
+            "named": true
+          },
+          {
+            "type": "binary_expr",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expr",
+            "named": true
+          },
+          {
+            "type": "colon_path",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "if_expr",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "unary_minus",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "let_stmt",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
             "named": true
           }
         ]
@@ -1115,6 +1285,58 @@
     }
   },
   {
+    "type": "return_stmt",
+    "named": true,
+    "fields": {
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "agg_expr",
+            "named": true
+          },
+          {
+            "type": "binary_expr",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expr",
+            "named": true
+          },
+          {
+            "type": "colon_path",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "if_expr",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "unary_minus",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "schedule_body",
     "named": true,
     "fields": {},
@@ -1281,6 +1503,25 @@
     }
   },
   {
+    "type": "weekday_on_clause",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "day_of_week",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "!=",
+    "named": false
+  },
+  {
     "type": "%",
     "named": false
   },
@@ -1321,6 +1562,10 @@
     "named": false
   },
   {
+    "type": ";",
+    "named": false
+  },
+  {
     "type": "<",
     "named": false
   },
@@ -1342,6 +1587,10 @@
   },
   {
     "type": ">=",
+    "named": false
+  },
+  {
+    "type": "@",
     "named": false
   },
   {
@@ -1454,6 +1703,10 @@
     "named": true
   },
   {
+    "type": "fn",
+    "named": false
+  },
+  {
     "type": "fourth",
     "named": false
   },
@@ -1511,6 +1764,10 @@
   },
   {
     "type": "last",
+    "named": false
+  },
+  {
+    "type": "let",
     "named": false
   },
   {
@@ -1602,6 +1859,10 @@
     "named": false
   },
   {
+    "type": "return",
+    "named": false
+  },
+  {
     "type": "sat",
     "named": false
   },
@@ -1655,6 +1916,10 @@
   },
   {
     "type": "tenth",
+    "named": false
+  },
+  {
+    "type": "that",
     "named": false
   },
   {

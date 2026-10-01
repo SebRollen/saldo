@@ -22,11 +22,12 @@ module.exports = grammar({
         $.schedule_decl,
         $.entry_decl,
         $.assert_decl,
+        $.fn_decl,
       ),
 
     // -----------------------------------------------------------------------
     // Account declaration
-    //   account Assets:Cash = 5_000
+    //   account Assets:Cash = 5_000 @ 2026-01-01
     //   account Assets:Retirement:Jim
     // -----------------------------------------------------------------------
 
@@ -34,7 +35,9 @@ module.exports = grammar({
       seq(
         "account",
         field("name", $.colon_path),
-        optional(seq("=", field("init", $._expr))),
+        optional(
+          seq("=", field("init", $._expr), "@", field("date", $.date)),
+        ),
       ),
 
     // -----------------------------------------------------------------------
@@ -105,17 +108,51 @@ module.exports = grammar({
 
     // -----------------------------------------------------------------------
     // Assert declaration
-    //   assert Assets:Cash >= 0
-    //   assert 2026-12-31 Assets:Retirement:Seb == 24_500
-    //   assert yearly Assets:Cash >= 0
+    //   assert that Assets:Cash >= 0
+    //   assert 2026-12-31 that Assets:Retirement:Seb == 24_500
+    //   assert yearly that Assets:Cash >= 0
+    //   assert payday that Assets:Cash >= 0
     // -----------------------------------------------------------------------
 
     assert_decl: ($) =>
       seq(
         "assert",
-        optional(field("schedule", $.schedule_literal)),
+        optional(field("schedule", $.schedule_ref)),
+        "that",
         field("condition", $._expr),
       ),
+
+    // -----------------------------------------------------------------------
+    // Function declaration
+    //   fn net(gross, rate) {
+    //     let tax = gross * rate;
+    //     gross - tax
+    //   }
+    // -----------------------------------------------------------------------
+
+    fn_decl: ($) =>
+      seq(
+        "fn",
+        field("name", $.identifier),
+        "(",
+        optional(
+          seq(
+            field("parameter", $.identifier),
+            repeat(seq(",", field("parameter", $.identifier))),
+            optional(","),
+          ),
+        ),
+        ")",
+        "{",
+        repeat($.let_stmt),
+        choice($.return_stmt, field("value", $._expr)),
+        "}",
+      ),
+
+    let_stmt: ($) =>
+      seq("let", field("name", $.identifier), "=", field("value", $._expr), ";"),
+
+    return_stmt: ($) => seq("return", field("value", $._expr), ";"),
 
     // -----------------------------------------------------------------------
     // Schedule reference — literal schedule or a named schedule identifier
@@ -142,12 +179,13 @@ module.exports = grammar({
       ),
 
     adverbial_schedule: ($) =>
-      seq(
-        field(
-          "kind",
-          choice("daily", "weekly", "monthly", "quarterly", "yearly", "annually"),
+      choice(
+        field("kind", choice("daily", "quarterly")),
+        seq(field("kind", "weekly"), optional($.weekday_on_clause)),
+        seq(
+          field("kind", choice("monthly", "yearly", "annually")),
+          optional($.on_clause),
         ),
-        optional($.on_clause),
       ),
 
     every_schedule: ($) =>
@@ -161,7 +199,7 @@ module.exports = grammar({
     _period_spec: ($) =>
       choice(
         choice("day", "days"),
-        seq(choice("week", "weeks"), optional($.on_clause)),
+        seq(choice("week", "weeks"), optional($.weekday_on_clause)),
         seq(choice("month", "months"), optional($.on_clause)),
         choice("quarter", "quarters"),
         seq(choice("year", "years"), optional($.on_clause)),
@@ -189,8 +227,18 @@ module.exports = grammar({
     _occurrence_list: ($) =>
       seq(
         $._occurrence_item,
-        repeat(seq(choice(",", "and"), optional("the"), $._occurrence_item)),
+        repeat(seq($._list_separator, optional("the"), $._occurrence_item)),
       ),
+
+    // on monday, wednesday and friday
+    weekday_on_clause: ($) =>
+      seq(
+        "on",
+        $.day_of_week,
+        repeat(seq($._list_separator, $.day_of_week)),
+      ),
+
+    _list_separator: (_) => choice(",", "and", seq(",", "and")),
 
     // An item in an on-clause can be:
     //   15th day / last monday / first  (ordinal with optional day/dow)
@@ -225,7 +273,7 @@ module.exports = grammar({
     date_schedule: ($) =>
       seq(
         $.date,
-        repeat(seq(choice(",", "and"), $.date)),
+        repeat(seq($._list_separator, $.date)),
       ),
 
     // -----------------------------------------------------------------------
@@ -322,7 +370,7 @@ module.exports = grammar({
         ),
       ),
 
-    comparison_operator: (_) => choice("==", "<", ">", "<=", ">="),
+    comparison_operator: (_) => choice("==", "!=", "<", ">", "<=", ">="),
     additive_operator: (_) => choice("+", "-"),
     multiplicative_operator: (_) => choice("*", "/"),
 
@@ -418,7 +466,7 @@ module.exports = grammar({
 
     boolean: (_) => choice("true", "false"),
 
-    string: (_) => token(seq('"', /[^"]*/, '"')),
+    string: (_) => token(seq('"', /[^"\n]*/, '"')),
 
     comment: (_) => token(seq("//", /.*/)),
   },

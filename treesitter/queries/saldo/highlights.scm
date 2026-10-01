@@ -5,7 +5,12 @@
   "schedule"
   "entry"
   "assert"
+  "that"
+  "fn"
+  "let"
 ] @keyword
+
+"return" @keyword.return
 
 ; Temporal / interval keywords
 [
@@ -57,8 +62,9 @@
 ; Operators
 [
   "="
-  "=="
+  "==" "!="
   "<" ">" "<=" ">="
+  "@"
   "+" "-" "*" "/"
 ] @operator
 
@@ -77,6 +83,9 @@
 (param_decl    name: (identifier)  @variable)
 (schedule_decl name: (identifier)  @function)
 (entry_decl    alias: (identifier) @function)
+(fn_decl       name: (identifier)  @function)
+(fn_decl       parameter: (identifier) @variable.parameter)
+(let_stmt      name: (identifier)  @variable)
 
 ; Entry label string highlighted as a function name (it names the entry)
 (entry_decl label: (string) @function)
@@ -100,4 +109,4 @@
 
 ; Brackets and delimiters
 [ "{" "}" "(" ")" ] @punctuation.bracket
-[ ":" "," "."     ] @punctuation.delimiter
+[ ":" "," "." ";" ] @punctuation.delimiter
