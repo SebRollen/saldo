@@ -61,10 +61,12 @@
   "else"
 ] @keyword.control
 
-; Logical operators
+; Logical operators. "and" also matches the one in schedule lists like
+; `on the 15th and last`, so `and_operator` keeps it as a child; `or` appears
+; nowhere else, so it's only the named node.
 [
   "and"
-  "or"
+  (or_operator)
   "not"
   "per"
 ] @keyword.operator
