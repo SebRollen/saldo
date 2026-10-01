@@ -11,10 +11,10 @@ impl<'src> Parser<'src> {
         match self.peek() {
             Token::Ident(s) => {
                 let s = *s;
-                if s.eq_ignore_ascii_case("every") {
+                if s == "every" {
                     self.parse_periodic()
                 } else if matches!(
-                    s.to_lowercase().as_str(),
+                    s,
                     "daily" | "weekly" | "monthly" | "quarterly" | "yearly" | "annually"
                 ) {
                     self.parse_adverbial()
@@ -28,10 +28,10 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_periodic(&mut self) -> Option<Schedule> {
-        self.eat_ident_ci("every")?;
+        self.eat_keyword("every")?;
         let nth = self.try_parse_nth();
         let period = self.parse_period()?;
-        let start = if self.eat_ident_ci("from").is_some() {
+        let start = if self.eat_keyword("from").is_some() {
             Some(self.parse_date()?)
         } else {
             None
@@ -43,15 +43,14 @@ impl<'src> Parser<'src> {
         let Token::Ident(s) = self.peek() else {
             return None;
         };
-        let s = s.to_lowercase();
-        let period = match s.as_str() {
+        let period = match *s {
             "daily" => {
                 self.advance();
                 Period::Day
             }
             "weekly" => {
                 self.advance();
-                let on = if self.eat_ident_ci("on").is_some() {
+                let on = if self.eat_keyword("on").is_some() {
                     self.parse_dow_list()
                 } else {
                     Vec::new()
@@ -60,8 +59,8 @@ impl<'src> Parser<'src> {
             }
             "monthly" => {
                 self.advance();
-                let on = if self.eat_ident_ci("on").is_some() {
-                    self.eat_ident_ci("the");
+                let on = if self.eat_keyword("on").is_some() {
+                    self.eat_keyword("the");
                     self.parse_month_occurrence_list()
                 } else {
                     Vec::new()
@@ -74,7 +73,7 @@ impl<'src> Parser<'src> {
             }
             "yearly" | "annually" => {
                 self.advance();
-                let on = if self.eat_ident_ci("on").is_some() {
+                let on = if self.eat_keyword("on").is_some() {
                     self.parse_year_occurrence_list()
                 } else {
                     Vec::new()
@@ -119,7 +118,7 @@ impl<'src> Parser<'src> {
 
     fn try_parse_day(&mut self) -> Option<Period> {
         if let Token::Ident(s) = self.peek()
-            && (s.eq_ignore_ascii_case("day") || s.eq_ignore_ascii_case("days"))
+            && (*s == "day" || *s == "days")
         {
             self.advance();
             return Some(Period::Day);
@@ -129,10 +128,10 @@ impl<'src> Parser<'src> {
 
     fn try_parse_week(&mut self) -> Option<Period> {
         if let Token::Ident(s) = self.peek()
-            && (s.eq_ignore_ascii_case("week") || s.eq_ignore_ascii_case("weeks"))
+            && (*s == "week" || *s == "weeks")
         {
             self.advance();
-            let on = if self.eat_ident_ci("on").is_some() {
+            let on = if self.eat_keyword("on").is_some() {
                 self.parse_dow_list()
             } else {
                 Vec::new()
@@ -152,11 +151,11 @@ impl<'src> Parser<'src> {
             return Some(Period::NamedMonth { month, day });
         }
         if let Token::Ident(s) = self.peek()
-            && (s.eq_ignore_ascii_case("month") || s.eq_ignore_ascii_case("months"))
+            && (*s == "month" || *s == "months")
         {
             self.advance();
-            let on = if self.eat_ident_ci("on").is_some() {
-                self.eat_ident_ci("the");
+            let on = if self.eat_keyword("on").is_some() {
+                self.eat_keyword("the");
                 self.parse_month_occurrence_list()
             } else {
                 Vec::new()
@@ -168,7 +167,7 @@ impl<'src> Parser<'src> {
 
     fn try_parse_quarter(&mut self) -> Option<Period> {
         if let Token::Ident(s) = self.peek()
-            && (s.eq_ignore_ascii_case("quarter") || s.eq_ignore_ascii_case("quarters"))
+            && (*s == "quarter" || *s == "quarters")
         {
             self.advance();
             return Some(Period::Quarter);
@@ -178,10 +177,10 @@ impl<'src> Parser<'src> {
 
     fn try_parse_year(&mut self) -> Option<Period> {
         if let Token::Ident(s) = self.peek()
-            && (s.eq_ignore_ascii_case("year") || s.eq_ignore_ascii_case("years"))
+            && (*s == "year" || *s == "years")
         {
             self.advance();
-            let on = if self.eat_ident_ci("on").is_some() {
+            let on = if self.eat_keyword("on").is_some() {
                 self.parse_year_occurrence_list()
             } else {
                 Vec::new()
@@ -195,7 +194,7 @@ impl<'src> Parser<'src> {
         let Token::Ident(s) = self.peek() else {
             return None;
         };
-        let dow = match s.to_lowercase().as_str() {
+        let dow = match *s {
             "monday" | "mondays" | "mon" => Dow::Monday,
             "tuesday" | "tuesdays" | "tue" => Dow::Tuesday,
             "wednesday" | "wednesdays" | "wed" => Dow::Wednesday,
@@ -215,7 +214,7 @@ impl<'src> Parser<'src> {
         let Token::Ident(s) = self.peek() else {
             return None;
         };
-        let month = match s.to_lowercase().as_str() {
+        let month = match *s {
             "january" | "jan" => Month::January,
             "february" | "feb" => Month::February,
             "march" | "mar" => Month::March,
@@ -254,7 +253,7 @@ impl<'src> Parser<'src> {
             }
         }
         if let Token::Ident(s) = self.peek() {
-            let n: u8 = match s.to_lowercase().as_str() {
+            let n: u8 = match *s {
                 "second" => 2,
                 "third" => 3,
                 "fourth" => 4,
@@ -278,11 +277,11 @@ impl<'src> Parser<'src> {
             return Some(Ordinal::First);
         }
         if let Token::Ident(s) = self.peek() {
-            if s.eq_ignore_ascii_case("first") {
+            if *s == "first" {
                 self.advance();
                 return Some(Ordinal::First);
             }
-            if s.eq_ignore_ascii_case("last") {
+            if *s == "last" {
                 self.advance();
                 return Some(Ordinal::Last);
             }
@@ -317,9 +316,7 @@ impl<'src> Parser<'src> {
             return Some(MonthOccurrence::Weekday(ordinal, dow));
         }
         self.check_day_ordinal(&ordinal, None, start);
-        let _ = self
-            .eat_ident_ci("day")
-            .or_else(|| self.eat_ident_ci("days"));
+        let _ = self.eat_keyword("day").or_else(|| self.eat_keyword("days"));
         Some(MonthOccurrence::Day(ordinal))
     }
 

@@ -114,9 +114,11 @@ impl<'src> Parser<'src> {
         None
     }
 
-    fn eat_ident_ci(&mut self, word: &str) -> Option<Span> {
+    /// Consumes `word`, a contextual keyword lexed as an identifier.
+    /// Keywords are lowercase only.
+    fn eat_keyword(&mut self, word: &str) -> Option<Span> {
         if let Token::Ident(s) = self.peek()
-            && s.eq_ignore_ascii_case(word)
+            && *s == word
         {
             let (_, span) = self.advance();
             return Some(span);
@@ -153,7 +155,7 @@ impl<'src> Parser<'src> {
             };
             items.push(item);
             let comma = self.eat(&Token::Comma).is_some();
-            let and = self.eat_ident_ci("and").is_some();
+            let and = self.eat_keyword("and").is_some();
             if !comma && !and {
                 break;
             }
@@ -413,7 +415,7 @@ impl<'src> Parser<'src> {
             }
         }
         self.expect(&Token::RBrace)?;
-        let alias = if self.eat_ident_ci("as").is_some() {
+        let alias = if self.eat_keyword("as").is_some() {
             Some(self.expect_ident("entry alias after `as`")?.0.to_string())
         } else {
             None
@@ -451,9 +453,9 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_interval(&mut self) -> Option<Interval> {
-        let start = self.eat_ident_ci("from")?;
+        let start = self.eat_keyword("from")?;
         let from = self.parse_date()?;
-        let to = if self.eat_ident_ci("to").is_some() {
+        let to = if self.eat_keyword("to").is_some() {
             Some(self.parse_date()?)
         } else {
             None
@@ -518,7 +520,7 @@ impl<'src> Parser<'src> {
         let account = self.parse_colon_path()?;
         let account_span = Span::new(start.start, self.last_span.end);
         let amount = if self.eat(&Token::Eq).is_some() {
-            if self.eat_ident_ci("all").is_some() {
+            if self.eat_keyword("all").is_some() {
                 Some(PostingAmount::All)
             } else {
                 Some(PostingAmount::Expr(self.parse_expr()?))
@@ -526,7 +528,7 @@ impl<'src> Parser<'src> {
         } else {
             None
         };
-        let (leg_name, leg_span) = if self.eat_ident_ci("as").is_some() {
+        let (leg_name, leg_span) = if self.eat_keyword("as").is_some() {
             let (leg, span) = self.expect_ident("leg name after `as`")?;
             (Some(leg.to_string()), Some(span))
         } else {
@@ -634,15 +636,15 @@ impl<'src> Parser<'src> {
     fn parse_atom(&mut self) -> Option<SpannedExpr> {
         let start = self.peek_span();
 
-        if self.eat_ident_ci("if").is_some() {
+        if self.eat_keyword("if").is_some() {
             let cond = self.parse_expr()?;
-            if self.eat_ident_ci("then").is_none() {
+            if self.eat_keyword("then").is_none() {
                 self.errors
                     .push(Diagnostic::new(self.peek_span(), "expected `then`"));
                 return None;
             }
             let then = self.parse_expr()?;
-            if self.eat_ident_ci("else").is_none() {
+            if self.eat_keyword("else").is_none() {
                 self.errors
                     .push(Diagnostic::new(self.peek_span(), "expected `else`"));
                 return None;
@@ -745,7 +747,7 @@ impl<'src> Parser<'src> {
 
     fn try_eat_agg_kind(&mut self) -> Option<AggKind> {
         if let Token::Ident(s) = self.peek() {
-            let kind = match s.to_lowercase().as_str() {
+            let kind = match *s {
                 "ytd" => AggKind::Ytd,
                 "qtd" => AggKind::Qtd,
                 "mtd" => AggKind::Mtd,

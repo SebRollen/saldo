@@ -986,3 +986,29 @@ fn cli_exits_cleanly_when_the_reader_stops_early() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// --- keywords ---
+
+#[test]
+fn keywords_are_lowercase_only() {
+    // Capitalized keywords are ordinary names.
+    let src = "
+        account Assets:Cash
+        account Income:Gifts
+        param All = 5
+        param If = 1
+        schedule Monthly = monthly on the 1st
+        entry Monthly \"Gift\" {
+          Assets:Cash = All + If
+          Income:Gifts
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
+    assert_eq!(posting(&output, 0, "Assets:Cash"), Decimal::new(6, 0));
+
+    let errors = run(
+        "param p = IF true THEN 1 ELSE 2",
+        &opts("2025-01-01", "2025-01-01"),
+    );
+    assert!(errors.is_err());
+}
