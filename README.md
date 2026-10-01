@@ -17,19 +17,19 @@ account Income:Salary
 account Expenses:Interest
 
 schedule paycheck_schedule = monthly on the 15th and last
-param interest_rate = 0.05
+param interest_rate = 5% per year
 param salary {
-    from 2025-01-01 to 2025-04-16 = 80_000
-    from 2025-04-16               = 95_000 // promoted!
+    from 2025-01-01 to 2025-04-16 = 80_000 per year
+    from 2025-04-16               = 95_000 per year // promoted!
 }
 
 entry paycheck_schedule "Paycheck" {
-  Assets:Cash = salary / 24
+  Assets:Cash = salary
   Income:Salary
 }
 
 entry daily "Interest accrual" {
-  Liabilities:AccruedInterest = Liabilities:Loan * interest_rate / 365
+  Liabilities:AccruedInterest = Liabilities:Loan * interest_rate
   Expenses:Interest
 }
 
@@ -62,24 +62,24 @@ When run through the `saldo` CLI, this file generates transactions:
   Income:Salary  -3958.33
 …
 2026-01-17 Loan payment
-  Liabilities:AccruedInterest     69.87
+  Liabilities:AccruedInterest     69.86
   Liabilities:Loan                 2000
-  Assets:Cash                  -2069.87
+  Assets:Cash                  -2069.86
 
 2026-01-18 Interest accrual
-  Liabilities:AccruedInterest  -3.84
-  Expenses:Interest             3.84
+  Liabilities:AccruedInterest  -3.83
+  Expenses:Interest             3.83
 …
 ```
 
 The transactions can be piped into other PTA tools for reporting:
 ```
 > saldo budget.saldo --from 2026-01-01 --to 2027-01-01 | hledger -f - bal
-            75107.92  Assets:Cash
+            75108.23  Assets:Cash
             25000.00  Equity:OpeningBalances
-              904.30  Expenses:Interest
-           -94999.92  Income:Salary
-              -12.30  Liabilities:AccruedInterest
+              904.10  Expenses:Interest
+           -95000.00  Income:Salary
+              -12.33  Liabilities:AccruedInterest
             -6000.00  Liabilities:Loan
 --------------------
                    0
@@ -116,20 +116,20 @@ Accounts hold balances (stocks). Names are colon-separated paths. An optional `=
 ```
 param interest_rate = 0.05
 
-param jim_salary : usd/year {
-  from 2025-12-31 to 2026-04-01 = 115_000
-  from 2026-04-01               = 130_000
+param jim_salary {
+  from 2025-12-31 to 2026-04-01 = 115_000 per year
+  from 2026-04-01               = 130_000 per year
 }
 ```
 
-Parameters are named scalars used inside flow expressions. A parameter can be a constant or a date-scheduled value that changes over time. The optional `: unit` annotation is documentation only.
+Parameters are named scalars used inside flow expressions. A parameter can be a constant or a date-scheduled value that changes over time. `per year` (or `per day`, `week`, `month`, `quarter`) after a value makes it a rate: entries spread it over their firings, so each year's paychecks add up to exactly the yearly salary.
 
 ### Entries
 
 ```
 entry monthly "Jim's paycheck" {
-  Assets:Retirement:Jim = min(max_401k - retirement_contribution.ytd, jim_salary * retirement_rate / 12)  as retirement_contribution
-  Assets:Cash           = jim_salary / 12 - retirement_contribution
+  Assets:Retirement:Jim = min(jim_salary * retirement_rate, max_401k - retirement_contribution.ytd)  as retirement_contribution
+  Assets:Cash           = jim_salary - retirement_contribution
   Income:Gross:Salary:Jim
 } as jim_paycheck
 ```
@@ -165,6 +165,8 @@ Assertions are checked after flows run each day. Simulation aborts with an error
 | Form | Description |
 |------|-------------|
 | `1_000`, `0.05` | Numeric literals (underscores ignored) |
+| `6.2%` | Percentage: divides by 100 |
+| `24_500 per year` | Rate: an amount per `day`, `week`, `month`, `quarter` or `year` |
 | `true`, `false` | Boolean literals |
 | `Assets:Cash` | Account or parameter reference |
 | `retirement_contribution` | Named leg reference (within its flow) |

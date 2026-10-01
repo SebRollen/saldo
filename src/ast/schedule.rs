@@ -1,3 +1,4 @@
+use super::TimeUnit;
 use chrono::{Datelike, NaiveDate};
 use std::fmt;
 
@@ -198,21 +199,29 @@ pub enum Schedule {
 
 impl Schedule {
     pub fn matches(&self, t: NaiveDate) -> bool {
+        if let Self::Periodic(periodic) = self
+            && periodic.start.is_some_and(|s| t < s)
+        {
+            return false;
+        }
+        self.matches_pattern(t)
+    }
+
+    /// Whether `t` fits the schedule's pattern, ignoring when the schedule
+    /// starts. The `from` date of an `every N …` schedule still picks which
+    /// days fit, before it as well as after.
+    fn matches_pattern(&self, t: NaiveDate) -> bool {
         let periodic = match self {
             Self::Dates(dates) => return dates.contains(&t),
             Self::Periodic(periodic) => periodic,
         };
-
-        if periodic.start.is_some_and(|s| t < s) {
-            return false;
-        }
 
         let origin = periodic.start.unwrap_or(t);
 
         match &periodic.period {
             Period::Day => match periodic.nth {
                 None => true,
-                Some(Nth(n)) => (t - origin).num_days() % n as i64 == 0,
+                Some(Nth(n)) => (t - origin).num_days().rem_euclid(n.into()) == 0,
             },
             Period::Week { on } => {
                 let dow_ok = if on.is_empty() {
@@ -229,7 +238,8 @@ impl Schedule {
                     // Count calendar weeks (Monday to Sunday), so days listed
                     // in `on` that share a week always fire together.
                     Some(Nth(n)) => {
-                        (week_start(t) - week_start(origin)).num_days() / 7 % n as i64 == 0
+                        ((week_start(t) - week_start(origin)).num_days() / 7).rem_euclid(n.into())
+                            == 0
                     }
                 }
             }
@@ -239,7 +249,7 @@ impl Schedule {
                 }
                 match periodic.nth {
                     None => true,
-                    Some(Nth(n)) => (t - origin).num_days() / 7 % n as i64 == 0,
+                    Some(Nth(n)) => (t - origin).num_days().div_euclid(7).rem_euclid(n.into()) == 0,
                 }
             }
             Period::Month { on } => {
@@ -256,7 +266,7 @@ impl Schedule {
                     Some(Nth(n)) => {
                         let months = (t.year() - origin.year()) * 12 + t.month() as i32
                             - origin.month() as i32;
-                        months % n as i32 == 0
+                        months.rem_euclid(n.into()) == 0
                     }
                 }
             }
@@ -273,7 +283,7 @@ impl Schedule {
                 }
                 match periodic.nth {
                     None => true,
-                    Some(Nth(n)) => (t.year() - origin.year()) % n as i32 == 0,
+                    Some(Nth(n)) => (t.year() - origin.year()).rem_euclid(n.into()) == 0,
                 }
             }
             Period::Quarter => {
@@ -285,7 +295,7 @@ impl Schedule {
                     Some(Nth(n)) => {
                         let quarters = (t.year() - origin.year()) * 4 + t.quarter() as i32
                             - origin.quarter() as i32;
-                        quarters % n as i32 == 0
+                        quarters.rem_euclid(n.into()) == 0
                     }
                 }
             }
@@ -301,11 +311,69 @@ impl Schedule {
                 }
                 match periodic.nth {
                     None => true,
-                    Some(Nth(n)) => (t.year() - origin.year()) % n as i32 == 0,
+                    Some(Nth(n)) => (t.year() - origin.year()).rem_euclid(n.into()) == 0,
                 }
             }
         }
     }
+
+    /// Which part of an amount per `unit` belongs to the firing on `t`, which
+    /// must fit the schedule.
+    ///
+    /// The days in `t`'s period that fit the schedule's pattern split the
+    /// period's amount equally, including days before the schedule's `from`
+    /// date, so a schedule that starts partway through a period gets only part
+    /// of it. A period with no such days adds its whole amount to the next day
+    /// that fits.
+    pub fn share(&self, unit: TimeUnit, t: NaiveDate) -> Share {
+        let start = unit.period_start(t);
+        let mut share = Share {
+            carried: 0,
+            index: 0,
+            count: 0,
+        };
+        let mut day = Some(start);
+        while let Some(d) = day
+            && unit.period_start(d) == start
+        {
+            if self.matches_pattern(d) {
+                share.count += 1;
+                if d <= t {
+                    share.index += 1;
+                }
+            }
+            day = d.succ_opt();
+        }
+        if share.index == 1
+            && let Some(previous) = self.previous_match(start)
+        {
+            let gap = unit.period_number(start) - unit.period_number(previous) - 1;
+            share.carried = gap.try_into().unwrap_or(u32::MAX);
+        }
+        share
+    }
+
+    /// The last day before `t` that fits the schedule's pattern, if there's one
+    /// in the few centuries before it.
+    fn previous_match(&self, t: NaiveDate) -> Option<NaiveDate> {
+        if let Self::Dates(dates) = self {
+            return dates.iter().filter(|d| **d < t).max().copied();
+        }
+        // Long enough for the sparsest schedule, `every 255 years` on a leap day.
+        const MAX_DAYS: usize = 255 * 8 * 366;
+        std::iter::successors(t.pred_opt(), NaiveDate::pred_opt)
+            .take(MAX_DAYS)
+            .find(|d| self.matches_pattern(*d))
+    }
+}
+
+/// A firing's part of an amount per period: the amounts of `carried` whole
+/// earlier periods, plus the `index`th of `count` equal parts of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Share {
+    pub carried: u32,
+    pub index: u32,
+    pub count: u32,
 }
 
 /// The Monday starting `t`'s week.
@@ -1006,6 +1074,154 @@ mod tests {
                     assert!(sched.matches(date(2025, 2, 2))); // week 3
                 }
             }
+        }
+    }
+
+    mod share {
+        use super::*;
+        use crate::ast::Decl;
+
+        fn schedule(src: &str) -> Schedule {
+            let src = format!("schedule s = {src}");
+            let tokens = crate::lexer::lex(&src).unwrap();
+            match crate::parser::parse(tokens).unwrap().decls.remove(0).0 {
+                Decl::Schedule { schedule, .. } => schedule,
+                _ => unreachable!(),
+            }
+        }
+
+        /// The shares of the firings of `src` from `from` to `to`, inclusive.
+        fn shares(src: &str, unit: TimeUnit, from: NaiveDate, to: NaiveDate) -> Vec<Share> {
+            let schedule = schedule(src);
+            from.iter_days()
+                .take_while(|d| *d <= to)
+                .filter(|d| schedule.matches(*d))
+                .map(|d| schedule.share(unit, d))
+                .collect()
+        }
+
+        fn share(carried: u32, index: u32, count: u32) -> Share {
+            Share {
+                carried,
+                index,
+                count,
+            }
+        }
+
+        #[test]
+        fn semi_monthly_splits_a_year_in_24() {
+            let year = shares(
+                "every month on the 15th and last day",
+                TimeUnit::Year,
+                date(2026, 1, 1),
+                date(2026, 12, 31),
+            );
+            let expected: Vec<Share> = (1..=24).map(|i| share(0, i, 24)).collect();
+            assert_eq!(year, expected);
+        }
+
+        #[test]
+        fn biweekly_years_have_26_or_27_paydays() {
+            let src = "every second friday from 2021-01-01";
+            let to = date(2022, 12, 31);
+            let paydays = shares(src, TimeUnit::Year, date(2021, 1, 1), to);
+            assert_eq!(paydays.len(), 27 + 26);
+            assert_eq!(paydays[0], share(0, 1, 27)); // 2021-01-01
+            assert_eq!(paydays[26], share(0, 27, 27)); // 2021-12-31
+            assert_eq!(paydays[27], share(0, 1, 26));
+        }
+
+        #[test]
+        fn paydays_before_from_still_count() {
+            // Jan 1 fits the pattern, so the year still has 27 paydays.
+            let paydays = shares(
+                "every second friday from 2021-01-15",
+                TimeUnit::Year,
+                date(2021, 1, 1),
+                date(2021, 12, 31),
+            );
+            assert_eq!(paydays.len(), 26);
+            assert_eq!(paydays[0], share(0, 2, 27));
+        }
+
+        #[test]
+        fn a_schedule_starting_midyear_gets_part_of_the_year() {
+            let months = shares(
+                "every month from 2026-07-01",
+                TimeUnit::Year,
+                date(2026, 1, 1),
+                date(2026, 12, 31),
+            );
+            assert_eq!(months.len(), 6);
+            assert_eq!(months[0], share(0, 7, 12));
+        }
+
+        #[test]
+        fn every_other_friday_extends_back_before_a_thursday_start() {
+            let schedule = schedule("every second friday from 2026-01-01");
+            assert!(schedule.matches(date(2026, 1, 2)));
+            assert!(schedule.matches_pattern(date(2025, 12, 19)));
+            assert!(!schedule.matches_pattern(date(2025, 12, 26)));
+            assert!(!schedule.matches(date(2025, 12, 19)));
+        }
+
+        #[test]
+        fn periods_without_firings_carry_into_the_next() {
+            let cases = [
+                ("quarterly", TimeUnit::Month, share(2, 1, 1)),
+                ("yearly", TimeUnit::Month, share(11, 1, 1)),
+                ("yearly", TimeUnit::Quarter, share(3, 1, 1)),
+                ("weekly", TimeUnit::Day, share(6, 1, 1)),
+                (
+                    "every 2 years from 2020-01-01",
+                    TimeUnit::Year,
+                    share(1, 1, 1),
+                ),
+                (
+                    "every second friday from 2021-01-01",
+                    TimeUnit::Week,
+                    share(1, 1, 1),
+                ),
+            ];
+            for (src, unit, expected) in cases {
+                let found = shares(src, unit, date(2026, 1, 1), date(2026, 12, 31));
+                assert!(
+                    found.iter().all(|s| *s == expected),
+                    "{src} per {unit}: {found:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn monthly_per_day_carries_the_rest_of_the_month() {
+            let days: Vec<u32> = shares(
+                "monthly",
+                TimeUnit::Day,
+                date(2026, 1, 1),
+                date(2026, 3, 31),
+            )
+            .iter()
+            .map(|s| s.carried + 1)
+            .collect();
+            assert_eq!(days, [31, 28, 31]);
+        }
+
+        #[test]
+        fn date_lists_split_by_period() {
+            let src = "2026-04-15, 2026-06-15, 2026-09-15, 2027-01-15";
+            let found = shares(src, TimeUnit::Year, date(2026, 1, 1), date(2027, 12, 31));
+            assert_eq!(
+                found,
+                [
+                    share(0, 1, 3),
+                    share(0, 2, 3),
+                    share(0, 3, 3),
+                    share(0, 1, 1)
+                ]
+            );
+            // The first date has no earlier one to carry from.
+            let found = shares(src, TimeUnit::Month, date(2026, 1, 1), date(2026, 12, 31));
+            assert_eq!(found, [share(0, 1, 1), share(1, 1, 1), share(2, 1, 1)]);
         }
     }
 }

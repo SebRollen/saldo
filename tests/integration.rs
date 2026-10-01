@@ -1187,3 +1187,329 @@ fn unicode_account_names_work_and_align() {
         "{ledger}"
     );
 }
+
+// --- rates ---
+
+/// The sum of the postings to `account` dated in `year`.
+fn posted_in(output: &saldo::Output, account: &str, year: i32) -> Decimal {
+    use chrono::Datelike;
+    output
+        .log
+        .transactions
+        .iter()
+        .filter(|tx| tx.date.year() == year)
+        .flat_map(|tx| &tx.postings)
+        .filter(|(p, _)| p.to_string() == account)
+        .map(|(_, v)| *v)
+        .sum()
+}
+
+/// The amounts posted to `account`, in order.
+fn postings_to(output: &saldo::Output, account: &str) -> Vec<Decimal> {
+    output
+        .log
+        .transactions
+        .iter()
+        .flat_map(|tx| &tx.postings)
+        .filter(|(p, _)| p.to_string() == account)
+        .map(|(_, v)| *v)
+        .collect()
+}
+
+fn usd(amount: &str) -> Decimal {
+    amount.parse().unwrap()
+}
+
+#[test]
+fn per_year_amounts_add_up_exactly_whatever_the_number_of_paydays() {
+    // 2021 starts and ends on a Friday, so it has 27 biweekly paydays; 2022
+    // has 26.
+    let src = "
+        account Assets:Retirement:SemiMonthly
+        account Assets:Retirement:Biweekly
+        account Income:Salary
+        param max_401k = 24_500 per year
+        entry every month on the 15th and last day \"Semi-monthly\" {
+          Assets:Retirement:SemiMonthly = max_401k
+          Income:Salary
+        }
+        entry every second friday from 2021-01-01 \"Biweekly\" {
+          Assets:Retirement:Biweekly = max_401k
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2021-01-01", "2022-12-31")).unwrap();
+    for year in [2021, 2022] {
+        for account in [
+            "Assets:Retirement:SemiMonthly",
+            "Assets:Retirement:Biweekly",
+        ] {
+            assert_eq!(
+                posted_in(&output, account, year),
+                usd("24500.00"),
+                "{account} {year}"
+            );
+        }
+    }
+    let biweekly = postings_to(&output, "Assets:Retirement:Biweekly");
+    assert_eq!(biweekly.len(), 27 + 26);
+    assert_eq!(biweekly[0], usd("907.41")); // 24_500 / 27
+    assert_eq!(biweekly[27], usd("942.31")); // 24_500 / 26
+}
+
+#[test]
+fn a_raise_applies_from_the_next_paycheck() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+        param salary {
+          from 2026-01-01 to 2026-07-01 = 100_000 per year
+          from 2026-07-01               = 110_000 per year
+        }
+        entry every month on the 15th and last day \"Paycheck\" {
+          Assets:Cash = salary
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
+    let cash = postings_to(&output, "Assets:Cash");
+    assert_eq!(cash[..2], [usd("4166.67"), usd("4166.66")]);
+    assert_eq!(cash[12], usd("4583.33")); // 110_000 / 24
+    assert_eq!(posted_in(&output, "Assets:Cash", 2026), usd("105000.00"));
+}
+
+#[test]
+fn a_posting_spreads_rates_but_not_the_legs_it_subtracts() {
+    let src = "
+        account Assets:Cash
+        account Assets:Retirement
+        account Income:Salary
+        param salary   = 120_000 per year
+        param max_401k = 24_000 per year
+        entry monthly \"Paycheck\" {
+          Assets:Retirement = max_401k as contribution
+          Assets:Cash       = salary - contribution
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "Assets:Retirement"), usd("2000.00"));
+    assert_eq!(posting(&output, 0, "Assets:Cash"), usd("8000.00"));
+    assert_eq!(posting(&output, 0, "Income:Salary"), usd("-10000.00"));
+}
+
+#[test]
+fn a_rate_minus_its_period_total_is_whats_left_of_it() {
+    // Contribute 16% of each paycheck until the yearly limit is reached.
+    let src = "
+        account Assets:Retirement
+        account Income:Salary
+        param salary   = 300_000 per year
+        param max_401k = 24_500 per year
+        entry every month on the 15th and last day \"Paycheck\" {
+          Assets:Retirement = min(salary * 0.16, max_401k - contribution.ytd) as contribution
+          Income:Salary
+        } as pay
+        assert that pay.contribution.ytd <= max_401k
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
+    let contributions = postings_to(&output, "Assets:Retirement");
+    assert_eq!(
+        contributions[..13],
+        [[usd("2000.00"); 12].as_slice(), &[usd("500.00")]].concat()
+    );
+    assert_eq!(
+        posted_in(&output, "Assets:Retirement", 2026),
+        usd("24500.00")
+    );
+}
+
+#[test]
+fn interest_accrues_by_the_actual_days_in_the_year() {
+    let src = "
+        account Liabilities:Loan = -100_000 @ 2026-01-01
+        account Liabilities:AccruedInterest
+        account Expenses:Interest
+        param rate = 5% per year
+        entry daily \"Interest\" {
+          Liabilities:AccruedInterest = Liabilities:Loan * rate
+          Expenses:Interest
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2028-12-31")).unwrap();
+    let interest = postings_to(&output, "Liabilities:AccruedInterest");
+    assert_eq!(interest[0], usd("-13.70")); // 5_000 / 365
+    // 2028 has 366 days.
+    for year in [2026, 2027, 2028] {
+        let total = posted_in(&output, "Liabilities:AccruedInterest", year);
+        assert_eq!(total, usd("-5000.00"), "{year}");
+    }
+}
+
+#[test]
+fn a_schedule_starting_midyear_gets_part_of_a_yearly_amount() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+        param salary = 120_000 per year
+        entry every month from 2026-07-01 \"Paycheck\" {
+          Assets:Cash = salary
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
+    assert_eq!(postings_to(&output, "Assets:Cash"), [usd("10000.00"); 6]);
+}
+
+#[test]
+fn entries_firing_less_often_than_the_rate_collect_the_periods_between() {
+    let src = "
+        account Assets:Cash
+        account Expenses:Rent
+        account Expenses:Stipend
+        param rent    = 1_000 per month
+        param stipend = 200 per week
+        entry quarterly \"Rent\" {
+          Expenses:Rent = rent
+          Assets:Cash
+        }
+        entry every second friday from 2026-01-09 \"Stipend\" {
+          Expenses:Stipend = stipend
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
+    assert_eq!(postings_to(&output, "Expenses:Rent"), [usd("3000.00"); 4]);
+    assert_eq!(
+        postings_to(&output, "Expenses:Stipend"),
+        [usd("400.00"); 26]
+    );
+}
+
+#[test]
+fn per_converts_rates_between_months_and_years() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+        param salary  = 120_000 per year
+        param monthly = salary per month
+        param raise = 1_200
+        param raised  = (monthly + raise / 12) per year
+        entry yearly \"Pay\" {
+          Assets:Cash = monthly
+          Income:Salary
+        }
+        entry monthly \"Raise\" {
+          Assets:Cash = raised - salary
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
+    let pay = |label: &str| {
+        let tx = output
+            .log
+            .transactions
+            .iter()
+            .position(|t| &*t.label == label);
+        posting(&output, tx.unwrap(), "Assets:Cash")
+    };
+    assert_eq!(pay("Pay"), usd("120000.00"));
+    assert_eq!(pay("Raise"), usd("100.00"));
+}
+
+#[test]
+fn functions_pass_rates_through() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+        fn net(gross, rate) { gross - gross * rate }
+        param salary = 120_000 per year
+        entry monthly \"Paycheck\" {
+          Assets:Cash = net(salary, 0.25)
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "Assets:Cash"), usd("7500.00"));
+}
+
+#[test]
+fn rates_and_amounts_dont_mix_outside_postings() {
+    let cases = [
+        (
+            "param x = salary + Assets:Cash",
+            "`+` mixes an amount per year with an amount",
+        ),
+        (
+            "assert that Assets:Cash >= salary",
+            "`>=` mixes an amount with an amount per year",
+        ),
+        (
+            "param x = salary + rent",
+            "`+` mixes an amount per year with an amount per month",
+        ),
+        (
+            "param x = salary * rent",
+            "can't multiply an amount per year by an amount per month",
+        ),
+        (
+            "param x = 1 / salary",
+            "can't divide a number by an amount per year",
+        ),
+        (
+            "account Assets:Odd = salary @ 2026-01-01",
+            "an opening balance must be an amount, but this is an amount per year",
+        ),
+        (
+            "param x = salary per week",
+            "can't convert an amount per year to per week: \
+             a year isn't a fixed number of weeks",
+        ),
+        (
+            "param x = job.pay.ytd per year",
+            "`per year` can't apply to a year-to-date total, \
+             which is an amount so far, not per period",
+        ),
+        (
+            "fn monthly(x) { x per month }\nparam x = monthly(salary)",
+            "can't convert an amount per year to per month inside a function",
+        ),
+        (
+            "param x { from 2026-01-01 to 2026-02-01 = salary\n from 2026-02-01 = Assets:Cash }",
+            "param `x` is an amount per year in one interval but an amount in another",
+        ),
+        (
+            "fn f(a, b) { a - b }\nparam x = f(salary, Assets:Cash)",
+            "`-` mixes an amount per year with an amount",
+        ),
+    ];
+    for (decl, message) in cases {
+        let src = format!(
+            "account Assets:Cash
+             account Income:Salary
+             param salary = 120_000 per year
+             param rent   = 1_000 per month
+             entry monthly \"Pay\" {{
+               Assets:Cash = 1 as pay
+               Income:Salary
+             }} as job
+             {decl}"
+        );
+        let errors = run(&src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
+        assert!(has_error(&errors, message), "{decl}: {errors:?}");
+    }
+}
+
+#[test]
+fn dividing_by_a_per_points_at_its_precedence() {
+    let src = "param salary = 130_000 / 52 per week";
+    let errors = run(src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
+    let [saldo::Error::Diagnostic(d)] = errors.as_slice() else {
+        panic!("{errors:?}");
+    };
+    assert_eq!(d.message, "can't divide a number by an amount per week");
+    assert!(
+        d.extra[0].1.contains("`per` binds tighter than `/`"),
+        "{d:?}"
+    );
+}

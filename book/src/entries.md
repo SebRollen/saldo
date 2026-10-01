@@ -66,12 +66,15 @@ into period-to-date totals that can be read in later expressions within the
 same simulation day:
 
 ```
-entry semi_monthly "Seb's paycheck" {
-  Assets:Retirement:Seb = min(max_401k - retirement_contribution.ytd,
-                              max_401k / 24 + 0.01)  as retirement_contribution
-  Assets:Cash           = seb_salary / 24 - retirement_contribution
-  Income:Gross:Salary:Seb                            as gross_income
-} as seb_paycheck
+param jim_salary = 120_000 per year
+param max_401k   = 24_500 per year
+
+entry semi_monthly "Jim's paycheck" {
+  Assets:Retirement:Jim = min(jim_salary * 0.16,
+                              max_401k - retirement_contribution.ytd)  as retirement_contribution
+  Assets:Cash           = jim_salary - retirement_contribution
+  Income:Gross:Salary:Jim                                              as gross_income
+} as jim_paycheck
 ```
 
 `retirement_contribution.ytd` is the running year-to-date sum of every
@@ -94,38 +97,99 @@ The optional `as <alias>` at the end of the block gives the flow a name for
 use in scoped aggregations:
 
 ```
-} as seb_paycheck
+} as jim_paycheck
 ```
 
 Reference a leg scoped to this flow with `<alias>.<leg>.ytd`:
 
 ```
-assert that seb_paycheck.retirement_contribution.ytd <= 24_500
+assert that jim_paycheck.retirement_contribution.ytd <= 24_500
 ```
 
 Without an alias, a leg can only be referenced from inside its own entry
 (`retirement_contribution.ytd`). Add an alias to read it from other entries,
 params, or assertions.
 
+## Rates
+
+A posting whose amount is a rate, like `24_500 per year` (see
+[Params](./params.md#rates)), posts each firing's share of it:
+
+```
+param salary   = 120_000 per year
+param max_401k = 24_500 per year
+
+entry every month on the 15th and last day "Paycheck" {
+  Assets:Retirement = max_401k               as contribution
+  Assets:Cash       = salary - contribution
+  Income:Salary
+}
+```
+
+The days in each calendar year that fit the entry's schedule split the
+year's amount equally, rounded so that they add up to it exactly. Here
+that's 24 contributions of 1020.83 or 1020.84, which come to 24,500.00. An
+`every second friday` schedule has 26 paydays in some years and 27 in
+others, and each year still comes to 24,500.00.
+
+In a posting, a rate used with an amount, like `salary - contribution`,
+means the firing's share of it, and so do rates that `min`, `max` and `if`
+choose between. A rate added to, subtracted from or compared with a total
+over the same period counts in full, so this contributes 16% of each
+paycheck until the year's limit is reached:
+
+```
+entry every month on the 15th and last day "Paycheck" {
+  Assets:Retirement = min(salary * 0.16, max_401k - contribution.ytd) as contribution
+  Assets:Cash       = salary - contribution
+  Income:Salary
+}
+```
+
+In detail:
+
+- **Periods are calendar periods** of the rate: years, quarters,
+  months, weeks (Monday to Sunday) or days. A daily entry posts 1/365 of a
+  yearly rate, or 1/366 in a leap year, so interest at
+  `Liabilities:Loan * rate` accrues by the actual number of days.
+- **Changes apply from the next firing.** Each firing uses the rate's value
+  on its own day, so a raise on April 1 shows up in the next paycheck.
+- **The schedule's pattern decides the split, not its `from` date.** An
+  entry `every month from 2026-07-01` posts a twelfth of a yearly rate each
+  month, so half of it in 2026. Firings before the simulation starts count
+  too, so you see the same paychecks whatever `--from` you choose.
+- **A period without a firing rolls into the next one.** A `quarterly` entry
+  posts three months of a rate per month, and an `every second friday`
+  entry posts two weeks of a rate per week.
+
+The last rule gives you the other common way of paying a yearly salary
+biweekly: the same amount every payday, so that a year with 27 paydays pays
+more. Declare the salary per week:
+
+```
+param salary = (130_000 / 52) per week
+```
+
 ## Complete example
 
 ```
-param max_401k       : usd/year = 24_500
-param jim_salary     : usd/year {
-  from 2025-12-31 to 2026-04-01 = 115_000
-  from 2026-04-01               = 130_000
+param max_401k   = 24_500 per year
+param jim_salary {
+  from 2025-12-31 to 2026-04-01 = 115_000 per year
+  from 2026-04-01               = 130_000 per year
 }
-param retirement_rate = 0.16
+param retirement_rate = 16%
+param interest_rate   = 5% per year
 
 entry monthly "Jim's paycheck" {
-  Assets:Retirement:Jim = min(max_401k - retirement_contribution.ytd,
-                              jim_salary * retirement_rate / 12)  as retirement_contribution
-  Assets:Cash           = jim_salary / 12 - retirement_contribution
+  Assets:Retirement:Jim = min(jim_salary * retirement_rate,
+                              max_401k - retirement_contribution.ytd)  as retirement_contribution
+  Assets:Cash           = jim_salary - retirement_contribution
   Income:Gross:Salary:Jim
 } as jim_paycheck
 
 entry daily "Interest accrual" {
-  Liabilities:AccruedInterest = Liabilities:Loan * interest_rate / 365
+  Liabilities:AccruedInterest = Liabilities:Loan * interest_rate
   Expenses:Interest
 }
 ```

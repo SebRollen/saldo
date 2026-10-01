@@ -137,11 +137,11 @@ account Income:Gross:Salary:Jim
 account Expenses:Rent
 account Expenses:Interest
 
-param jim_salary     : usd/year = 130_000
-param interest_rate             = 0.065
+param jim_salary     = 130_000 per year
+param interest_rate  = 6.5% per year
 
 entry monthly "Jim's paycheck" {
-  Assets:Cash           = jim_salary / 12
+  Assets:Cash           = jim_salary
   Income:Gross:Salary:Jim
 }
 
@@ -151,7 +151,7 @@ entry monthly "Rent" {
 }
 
 entry daily "Loan interest" {
-  Liabilities:Loan = Liabilities:Loan * interest_rate / 365
+  Liabilities:Loan = Liabilities:Loan * interest_rate
   Expenses:Interest
 }
 

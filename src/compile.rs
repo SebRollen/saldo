@@ -3,7 +3,7 @@
 //! all become indices.
 
 use crate::ast::Schedule;
-use crate::ast::{self, AggKind, BinOp, Path, Span};
+use crate::ast::{self, AggKind, BinOp, Path, Span, TimeUnit};
 use crate::resolver::Model;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -112,6 +112,12 @@ pub enum ExprKind {
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Builtin(Builtin, Vec<Expr>),
     Call(usize, Vec<Expr>),
+    /// `x per year`. The units pass converts `x` if it's a rate per another
+    /// unit, so the value passes through unchanged.
+    Per(Box<Expr>, TimeUnit),
+    /// The firing entry's share of an amount per period. The units pass adds
+    /// these where postings use rates.
+    Spread(Box<Expr>, TimeUnit),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -320,6 +326,7 @@ impl Names<'_> {
             ast::Expr::Bool(b) => ExprKind::Bool(*b),
             ast::Expr::Ref(path) => self.lower_ref(path, scope),
             ast::Expr::Neg(x) => ExprKind::Neg(lower(x)),
+            ast::Expr::Per(x, unit) => ExprKind::Per(lower(x), *unit),
             ast::Expr::Not(x) => ExprKind::Not(lower(x)),
             ast::Expr::Bin(a, op, b) => ExprKind::Bin(lower(a), *op, lower(b)),
             ast::Expr::If { cond, then, else_ } => {

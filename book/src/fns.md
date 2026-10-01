@@ -112,14 +112,18 @@ fn net(gross, rate) {
   gross - tax
 }
 
-param salary : usd/year {
-  from 2025-01-01 to 2026-01-01 = 120_000
-  from 2026-01-01               = 140_000
+param salary {
+  from 2025-01-01 to 2026-01-01 = 120_000 per year
+  from 2026-01-01               = 140_000 per year
 }
 
 entry monthly "paycheck" {
-  Assets:Cash    = net(salary / 12, 0.28)
-  Expenses:Tax   = salary / 12 * 0.28
+  Assets:Cash    = net(salary, 0.28)
+  Expenses:Tax   = salary * 0.28
   Income:Salary
 }
 ```
+
+Rates pass through functions: `salary` is per year, so `net(salary, 0.28)`
+is too, and the entry posts a twelfth of it each month (see
+[Rates](./entries.md#rates)).

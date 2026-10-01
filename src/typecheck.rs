@@ -114,6 +114,10 @@ impl<'a> Checker<'a> {
                 self.expect(x, Ty::Num, "the operand of `-`");
                 Some(Ty::Num)
             }
+            Expr::Per(x, unit) => {
+                self.expect(x, Ty::Num, &format!("the operand of `per {unit}`"));
+                Some(Ty::Num)
+            }
             Expr::Not(x) => {
                 self.expect(x, Ty::Bool, "the operand of `not`");
                 Some(Ty::Bool)

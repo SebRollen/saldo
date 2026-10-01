@@ -139,7 +139,7 @@ impl<'a> Resolver<'a> {
                 Decl::Schedule { .. } => {
                     // already processed in collect_schedules
                 }
-                Decl::Param { name, body, .. } => {
+                Decl::Param { name, body } => {
                     if let Some(prev) = self.param_spans.get(name) {
                         self.diags.push(
                             Diagnostic::new(*span, format!("duplicate param `{name}`"))
@@ -723,7 +723,7 @@ pub(crate) fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
     f(e);
     match e.0.as_ref() {
         Expr::Num(_) | Expr::Bool(_) | Expr::Ref(_) | Expr::ParamAgg(..) => {}
-        Expr::Neg(x) | Expr::Not(x) => walk_expr(x, f),
+        Expr::Neg(x) | Expr::Not(x) | Expr::Per(x, _) => walk_expr(x, f),
         Expr::Bin(a, _, b) => {
             walk_expr(a, f);
             walk_expr(b, f);

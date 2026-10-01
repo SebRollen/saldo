@@ -3,10 +3,11 @@ mod schedule;
 use crate::Span;
 use crate::ast::{
     AggKind, BinOp, Decl, Expr, Interval, ParamBody, Path, Posting, PostingAmount, Program,
-    ScheduleRef, SpannedExpr, Stmt,
+    ScheduleRef, SpannedExpr, Stmt, TimeUnit,
 };
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
+use rust_decimal::Decimal;
 
 /// Upper bound on expression nesting (parentheses, unary minus, chained
 /// operators), so pathological input can't overflow the stack while parsing or
@@ -276,11 +277,9 @@ impl<'src> Parser<'src> {
 
     fn parse_param_decl(&mut self) -> Option<Decl> {
         let (name, _) = self.expect_ident("param name")?;
-        let unit = if self.eat(&Token::Colon).is_some() {
-            Some(self.parse_unit()?)
-        } else {
-            None
-        };
+        if let Some(colon) = self.eat(&Token::Colon) {
+            self.old_unit_annotation(colon);
+        }
         let body = if self.eat(&Token::Eq).is_some() {
             ParamBody::Const(self.parse_expr()?)
         } else if self.eat(&Token::LBrace).is_some() {
@@ -304,7 +303,6 @@ impl<'src> Parser<'src> {
         };
         Some(Decl::Param {
             name: name.to_string(),
-            unit,
             body,
         })
     }
@@ -471,45 +469,27 @@ impl<'src> Parser<'src> {
         })
     }
 
-    fn parse_unit(&mut self) -> Option<String> {
-        let first = match self.peek() {
-            Token::Ident(s) => {
-                let s = s.to_string();
-                self.advance();
-                s
-            }
-            Token::Percent => {
-                self.advance();
-                "%".to_string()
-            }
-            _ => {
-                let span = self.peek_span();
-                self.errors.push(Diagnostic::new(span, "expected unit"));
-                return None;
-            }
-        };
-        if self.eat(&Token::Slash).is_some() {
-            let second = match self.peek() {
-                Token::Ident(s) => {
-                    let s = s.to_string();
-                    self.advance();
-                    s
-                }
-                Token::Percent => {
-                    self.advance();
-                    "%".to_string()
-                }
-                _ => {
-                    let span = self.peek_span();
-                    self.errors
-                        .push(Diagnostic::new(span, "expected unit after `/`"));
-                    return None;
-                }
-            };
-            Some(format!("{first}/{second}"))
-        } else {
-            Some(first)
+    /// Reports a unit annotation in the old `param x : usd/year = …` style,
+    /// skipping it so the rest of the param still parses.
+    fn old_unit_annotation(&mut self, colon: Span) {
+        let mut per = None;
+        if matches!(self.peek(), Token::Ident(_) | Token::Percent) {
+            self.advance();
         }
+        if self.eat(&Token::Slash).is_some() {
+            if let Token::Ident(name) = self.peek() {
+                per = TimeUnit::from_name(name.strip_suffix('s').unwrap_or(name));
+            }
+            if matches!(self.peek(), Token::Ident(_) | Token::Percent) {
+                self.advance();
+            }
+        }
+        let message = match per {
+            Some(unit) => format!("units go after the value now: write `per {unit}` after it"),
+            None => "params don't have units like this anymore; use a comment".to_string(),
+        };
+        let span = Span::new(colon.start, self.last_span.end);
+        self.errors.push(Diagnostic::new(span, message));
     }
 
     fn parse_posting(&mut self) -> Option<Posting> {
@@ -673,7 +653,44 @@ impl<'src> Parser<'src> {
             let span = Span::new(minus_span.start, inner.1.end);
             Some((Box::new(Expr::Neg(inner)), span))
         } else {
-            self.parse_atom()
+            self.parse_postfix()
+        }
+    }
+
+    /// An atom followed by any number of `%` and `per <unit>`, which bind
+    /// tighter than any other operator: `salary - 500 per month` subtracts
+    /// 500 a month.
+    fn parse_postfix(&mut self) -> Option<SpannedExpr> {
+        let mut expr = self.parse_atom()?;
+        loop {
+            if let Some(percent) = self.eat(&Token::Percent) {
+                self.nest()?;
+                let span = Span::new(expr.1.start, percent.end);
+                let hundred = Decimal::ONE_HUNDRED;
+                let value = match *expr.0 {
+                    Expr::Num(n) => Expr::Num(n / hundred),
+                    _ => Expr::Bin(expr, BinOp::Div, (Box::new(Expr::Num(hundred)), percent)),
+                };
+                expr = (Box::new(value), span);
+            } else if self.eat_keyword("per").is_some() {
+                self.nest()?;
+                let unit = match self.peek() {
+                    Token::Ident(name) => TimeUnit::from_name(name),
+                    _ => None,
+                };
+                let Some(unit) = unit else {
+                    self.errors.push(Diagnostic::new(
+                        self.peek_span(),
+                        "expected `day`, `week`, `month`, `quarter` or `year` after `per`",
+                    ));
+                    return None;
+                };
+                self.advance();
+                let span = Span::new(expr.1.start, self.last_span.end);
+                expr = (Box::new(Expr::Per(expr, unit)), span);
+            } else {
+                return Some(expr);
+            }
         }
     }
 
@@ -884,9 +901,8 @@ mod tests {
     fn parses_param_const() {
         let prog = parse_prog("param interest_rate = 0.05");
         match &prog.decls[0].0 {
-            Decl::Param { name, unit, body } => {
+            Decl::Param { name, body } => {
                 assert_eq!(name, "interest_rate");
-                assert!(unit.is_none());
                 assert!(matches!(body, ParamBody::Const(_)));
             }
             _ => panic!(),
@@ -896,12 +912,11 @@ mod tests {
     #[test]
     fn parses_param_schedule() {
         let prog = parse_prog(
-            "param salary_rate : usd/year { from 2026-01-01 to 2026-04-01 = 215_000\nfrom 2026-04-01 = 220_000 }",
+            "param salary_rate { from 2026-01-01 to 2026-04-01 = 100_000 per year\nfrom 2026-04-01 = 110_000 per year }",
         );
         match &prog.decls[0].0 {
-            Decl::Param { name, unit, body } => {
+            Decl::Param { name, body } => {
                 assert_eq!(name, "salary_rate");
-                assert_eq!(unit.as_deref(), Some("usd/year"));
                 let ParamBody::Schedule(intervals) = body else {
                     panic!("Not a schedule body")
                 };
@@ -1008,6 +1023,63 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The value of `param x = <src>`.
+    fn param_value(src: &str) -> Expr {
+        match parse_prog(&format!("param x = {src}")).decls.remove(0).0 {
+            Decl::Param {
+                body: ParamBody::Const((e, _)),
+                ..
+            } => *e,
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn percent_divides_by_100() {
+        assert!(matches!(param_value("6.2%"), Expr::Num(n) if n == Decimal::new(62, 3)));
+        assert!(matches!(param_value("-5%"), Expr::Neg(_)));
+        let Expr::Bin(x, BinOp::Div, hundred) = param_value("rate%") else {
+            panic!()
+        };
+        assert!(matches!(*x.0, Expr::Ref(_)));
+        assert!(matches!(*hundred.0, Expr::Num(n) if n == Decimal::ONE_HUNDRED));
+    }
+
+    #[test]
+    fn per_binds_tighter_than_arithmetic() {
+        let Expr::Bin(_, BinOp::Sub, rhs) = param_value("salary - 500 per month") else {
+            panic!()
+        };
+        assert!(matches!(*rhs.0, Expr::Per(_, TimeUnit::Month)));
+        let Expr::Per(inner, TimeUnit::Year) = param_value("(a + b) per year") else {
+            panic!()
+        };
+        assert!(matches!(*inner.0, Expr::Bin(_, BinOp::Add, _)));
+        let Expr::Per(inner, TimeUnit::Year) = param_value("5% per year") else {
+            panic!()
+        };
+        assert!(matches!(*inner.0, Expr::Num(_)));
+    }
+
+    #[test]
+    fn per_needs_a_unit_of_time() {
+        let errs = parse_errs("param x = 5 per fortnight");
+        assert!(errs[0].message.contains("after `per`"), "{errs:?}");
+        let errs = parse_errs("param x = 5 per years");
+        assert!(errs[0].message.contains("after `per`"), "{errs:?}");
+    }
+
+    #[test]
+    fn old_unit_annotations_are_errors() {
+        let errs = parse_errs("param x : usd/years = 5");
+        assert_eq!(
+            errs[0].message,
+            "units go after the value now: write `per year` after it"
+        );
+        let errs = parse_errs("param x : usd = 5");
+        assert!(errs[0].message.contains("use a comment"), "{errs:?}");
     }
 
     #[test]

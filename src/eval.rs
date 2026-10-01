@@ -1,3 +1,4 @@
+use crate::ast::schedule::Share;
 use crate::ast::{AggKind, BinOp, Expr, ParamBody, Path, PostingAmount, Span, SpannedExpr};
 use crate::compile::{Amount, Builtin, ExprKind, Function, Program, Stmt};
 use crate::errors::Diagnostic;
@@ -178,6 +179,8 @@ struct State<'p> {
     legs_today: Vec<Decimal>,
     /// Each leg's year/quarter/month-to-date totals, excluding today.
     totals: Vec<[Decimal; 3]>,
+    /// The entry whose postings are being evaluated.
+    firing: Option<usize>,
 }
 
 impl Program {
@@ -199,6 +202,7 @@ impl Program {
             params: Vec::with_capacity(self.params.len()),
             legs_today: vec![Decimal::ZERO; self.legs.len()],
             totals: vec![[Decimal::ZERO; 3]; self.legs.len()],
+            firing: None,
         };
         let equity: Arc<Path> = Arc::new(Path(vec![
             "Equity".to_string(),
@@ -364,6 +368,7 @@ impl State<'_> {
     fn fire(&mut self, index: usize) -> Result<Option<Transaction>, Diagnostic> {
         let program = self.program;
         let entry = &program.entries[index];
+        self.firing = Some(index);
         let mut postings: Vec<(Arc<Path>, Decimal)> = Vec::with_capacity(entry.postings.len());
         let mut amounts: Vec<(usize, Decimal)> = Vec::with_capacity(entry.postings.len());
         let mut auto = None;
@@ -596,6 +601,18 @@ impl State<'_> {
                 }
                 self.call(function, frame, span)
             }
+            ExprKind::Per(e, _) => self.eval(e, locals),
+            ExprKind::Spread(e, unit) => {
+                let amount = self.eval_num(e, locals)?;
+                let entry = self.firing.expect("only postings spread amounts");
+                let share = self.program.entries[entry].schedule.share(*unit, self.date);
+                spread(amount, share).map(Value::Num).ok_or_else(|| {
+                    Diagnostic::new(
+                        span,
+                        format!("arithmetic overflow spreading {amount} per {unit}"),
+                    )
+                })
+            }
         }
     }
 
@@ -675,6 +692,23 @@ fn to_amount(value: Decimal) -> Decimal {
     } else {
         amount
     }
+}
+
+/// A firing's part of `amount` per period, in cents. Each firing in a period
+/// gets the difference between two rounded running totals, so a period's
+/// firings add up to exactly its amount.
+fn spread(amount: Decimal, share: Share) -> Option<Decimal> {
+    debug_assert!(share.index >= 1 && share.index <= share.count);
+    let running = |firings: u32| {
+        let total = amount
+            .checked_mul(firings.into())?
+            .checked_div(share.count.into())?;
+        Some(total.round_dp(2))
+    };
+    let carried = amount.checked_mul(share.carried.into())?.round_dp(2);
+    carried
+        .checked_add(running(share.index)?)?
+        .checked_sub(running(share.index - 1)?)
 }
 
 fn checked_sum<'a>(values: impl IntoIterator<Item = &'a Decimal>) -> Option<Decimal> {

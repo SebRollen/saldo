@@ -6,6 +6,7 @@ mod lexer;
 mod parser;
 mod resolver;
 mod typecheck;
+mod units;
 mod util;
 
 use chrono::NaiveDate;
@@ -72,8 +73,14 @@ pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
     let model = resolver::resolve(&program)
         .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
 
+    let mut program = compile::compile(&model);
+    let diags = units::check(&mut program);
+    if !diags.is_empty() {
+        return Err(diags.into_iter().map(Error::Diagnostic).collect());
+    }
+
     let first_day = model.first_day(opts.from);
-    let log = compile::compile(&model)
+    let log = program
         .simulate(first_day, opts.from, opts.to)
         .map_err(|d| vec![Error::Diagnostic(d)])?;
 
