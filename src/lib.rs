@@ -175,6 +175,7 @@ mod doc_tests {
         ("intro.md", include_str!("../book/src/intro.md")),
         ("params.md", include_str!("../book/src/params.md")),
         ("schedules.md", include_str!("../book/src/schedules.md")),
+        ("simulation.md", include_str!("../book/src/simulation.md")),
     ];
 
     const KEYWORDS: &[&str] = &["account", "assert", "entry", "fn", "param", "schedule"];

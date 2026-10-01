@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](./intro.md)
+[How a simulation runs](./simulation.md)
 
 # Concepts
 
