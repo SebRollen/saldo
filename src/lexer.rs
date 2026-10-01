@@ -295,17 +295,20 @@ impl<'src> Lexer<'src> {
         self.emit_token(Token::Number(val))
     }
 
+    fn peek_char(&self) -> Option<char> {
+        self.src[self.current..].chars().next()
+    }
+
+    // Identifiers are a letter or `_` followed by letters, digits and `_`, in
+    // any script.
     fn lex_identifier(&mut self) -> Result<Spanned<Token<'src>>, Diagnostic> {
-        loop {
-            match self.peek() {
-                Some(c) if c.is_ascii_alphanumeric() || *c == b'_' => {
-                    self.advance();
-                }
-                _ => break,
-            }
+        while let Some(c) = self.peek_char()
+            && (c.is_alphanumeric() || c == '_')
+        {
+            self.current += c.len_utf8();
         }
 
-        let word = &self.src[self.start..self.src.ceil_char_boundary(self.current)];
+        let word = &self.src[self.start..self.current];
         let token = match word {
             "true" => Token::True,
             "false" => Token::False,
@@ -361,11 +364,14 @@ impl<'src> Lexer<'src> {
             return self.emit_token(Token::Eof);
         }
 
-        let c = self.advance();
-
-        if c.is_ascii_alphabetic() || c == b'_' {
+        if let Some(c) = self.peek_char()
+            && (c.is_alphabetic() || c == '_')
+        {
+            self.current += c.len_utf8();
             return self.lex_identifier();
         }
+
+        let c = self.advance();
 
         if c.is_ascii_digit() {
             return self.lex_digitlike();
@@ -451,6 +457,23 @@ mod tests {
         assert_eq!(
             toks,
             vec![Token::Date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())]
+        );
+    }
+
+    #[test]
+    fn lexes_unicode_identifiers() {
+        let toks = lex("Assets:Café Ausgaben:Lebensmittel_2 日本");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("Assets"),
+                Token::Colon,
+                Token::Ident("Café"),
+                Token::Ident("Ausgaben"),
+                Token::Colon,
+                Token::Ident("Lebensmittel_2"),
+                Token::Ident("日本"),
+            ]
         );
     }
 

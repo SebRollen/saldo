@@ -151,7 +151,12 @@ fn write_transaction(
     postings: &[(String, Decimal)],
 ) -> io::Result<()> {
     let amounts: Vec<String> = postings.iter().map(|(_, amt)| amt.to_string()).collect();
-    let account_width = postings.iter().map(|(a, _)| a.len()).max().unwrap_or(0);
+    // Format widths count characters, not bytes.
+    let account_width = postings
+        .iter()
+        .map(|(a, _)| a.chars().count())
+        .max()
+        .unwrap_or(0);
     let amount_width = amounts.iter().map(String::len).max().unwrap_or(0);
     writeln!(out, "{header}")?;
     for ((account, _), amount) in postings.iter().zip(&amounts) {

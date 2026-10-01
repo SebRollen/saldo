@@ -624,9 +624,9 @@ fn arithmetic_overflow_is_a_diagnostic() {
 
 #[test]
 fn non_ascii_outside_a_string_is_a_diagnostic() {
-    for src in ["account Café", "param p = 1sé"] {
+    for src in ["account Caf€", "param p = 1s€"] {
         let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-        assert!(has_error(&errors, "unexpected character `é`"), "{src}");
+        assert!(has_error(&errors, "unexpected character `€`"), "{src}");
         // Rendering must not split the multi-byte character.
         saldo::format_errors("test.saldo", src, &errors, true);
     }
@@ -1162,4 +1162,23 @@ fn no_warning_when_nothing_was_missed() {
         "account Assets:Retirement = 0 @ 2025-01-01",
     );
     assert!(warnings(&warmed_up, "2025-06-01").is_empty());
+}
+
+#[test]
+fn unicode_account_names_work_and_align() {
+    let src = "
+        account Aktiva:Geld = 100 @ 2025-01-01
+        account Ausgaben:Café
+        entry daily \"Kaffee\" {
+          Ausgaben:Café = 3
+          Aktiva:Geld
+        }
+    ";
+    let ledger = run(src, &opts("2025-01-01", "2025-01-01"))
+        .unwrap()
+        .to_ledger();
+    assert!(
+        ledger.contains("  Ausgaben:Café   3\n  Aktiva:Geld    -3\n"),
+        "{ledger}"
+    );
 }
