@@ -159,12 +159,6 @@ pub struct Interval {
     pub span: Span,
 }
 
-impl Interval {
-    pub fn contains(&self, t: NaiveDate) -> bool {
-        t >= self.from && self.to.map(|to| t < to).unwrap_or(true)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub enum PostingAmount {
     Expr(SpannedExpr),

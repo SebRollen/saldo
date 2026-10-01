@@ -40,7 +40,6 @@ pub struct Model {
     pub fns: IndexMap<String, FnDef>,
     pub entries: Vec<EntryDef>,
     pub asserts: Vec<(Schedule, SpannedExpr)>,
-    pub leg_names: HashSet<(String, String)>,
 }
 
 struct Resolver<'a> {
@@ -472,7 +471,7 @@ impl<'a> Resolver<'a> {
         let fns = &self.fns;
         walk_expr(e, &mut |sub: &SpannedExpr| {
             if let Expr::Ref(path) = sub.0.as_ref()
-                && resolve_ref(path, stock_set, param_set).is_none()
+                && !is_known_ref(path, stock_set, param_set)
                 && !(path.0.len() == 1 && extra_refs.contains(&path.0[0]))
             {
                 local_diags.push(Diagnostic::new(
@@ -524,7 +523,6 @@ impl<'a> Resolver<'a> {
             }),
             entries: self.entries,
             asserts: self.asserts,
-            leg_names: self.leg_names,
         }
     }
 }
@@ -716,24 +714,9 @@ fn topo_sort_postings(
     sorted
 }
 
-/// Classify a reference path. Returns None for unknown references.
-pub fn resolve_ref(
-    path: &Path,
-    stocks: &HashSet<Path>,
-    params: &HashSet<String>,
-) -> Option<RefKind> {
-    if stocks.contains(path) {
-        return Some(RefKind::Stock(path.clone()));
-    }
-    if path.0.len() == 1 && params.contains(&path.0[0]) {
-        return Some(RefKind::Param(path.0[0].clone()));
-    }
-    None
-}
-
-pub enum RefKind {
-    Stock(Path),
-    Param(String),
+/// Whether `path` names an account or a param.
+fn is_known_ref(path: &Path, stocks: &HashSet<Path>, params: &HashSet<String>) -> bool {
+    stocks.contains(path) || (path.0.len() == 1 && params.contains(&path.0[0]))
 }
 
 pub(crate) fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {

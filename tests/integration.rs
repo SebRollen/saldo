@@ -74,7 +74,7 @@ fn log_is_accessible_directly() {
     let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
     assert_eq!(output.log.snapshots.len(), 31);
     assert_eq!(output.log.transactions.len(), 1);
-    assert_eq!(output.log.transactions[0].label, "Paycheck");
+    assert_eq!(&*output.log.transactions[0].label, "Paycheck");
 }
 
 // --- option validation ---
@@ -588,7 +588,7 @@ fn param_can_read_an_account_once_it_opens() {
         .log
         .transactions
         .iter()
-        .position(|t| t.label == "Interest")
+        .position(|t| &*t.label == "Interest")
         .unwrap();
     assert_eq!(posting(&output, tx, "Assets:Cash"), Decimal::new(20, 0));
 }
@@ -930,7 +930,12 @@ fn every_transaction_balances() {
 #[test]
 fn ledger_postings_reproduce_the_daily_balances() {
     let output = run(KITCHEN_SINK, &opts("2026-01-01", "2026-12-31")).unwrap();
-    let mut balances = output.log.opening.clone();
+    // Snapshot balances are in the order of `output.accounts`.
+    let mut balances: Vec<Decimal> = output
+        .accounts
+        .iter()
+        .map(|a| output.log.opening[a])
+        .collect();
     let mut snapshots = output.log.snapshots.iter().peekable();
     for tx in &output.log.transactions {
         // Before applying a day's transactions, every earlier day must match.
@@ -938,8 +943,8 @@ fn ledger_postings_reproduce_the_daily_balances() {
             assert_eq!(balances, snap.balances, "balances differ on {}", snap.date);
         }
         for (account, amt) in &tx.postings {
-            if let Some(balance) = balances.get_mut(account) {
-                *balance += amt;
+            if let Some(i) = output.accounts.iter().position(|a| a == &**account) {
+                balances[i] += amt;
             }
         }
     }

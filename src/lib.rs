@@ -1,4 +1,5 @@
 mod ast;
+mod compile;
 mod errors;
 mod eval;
 mod lexer;
@@ -71,12 +72,13 @@ pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
     let model = resolver::resolve(&program)
         .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
 
-    let log = model
-        .simulate(opts.from, opts.to)
+    let first_day = model.first_day(opts.from);
+    let log = compile::compile(&model)
+        .simulate(first_day, opts.from, opts.to)
         .map_err(|d| vec![Error::Diagnostic(d)])?;
 
     let accounts = model.stocks.keys().cloned().collect();
-    let warnings = model.missed_aggregate_warnings(model.first_day(opts.from));
+    let warnings = model.missed_aggregate_warnings(first_day);
 
     Ok(Output {
         accounts,
@@ -174,8 +176,7 @@ fn emit_csv(out: &mut impl io::Write, accounts: &[Path], log: &eval::SimLog) -> 
 
     for snap in &log.snapshots {
         write!(out, "{}", snap.date)?;
-        for name in accounts {
-            let v = snap.balances.get(name).copied().unwrap_or(Decimal::ZERO);
+        for v in &snap.balances {
             write!(out, ",{v:.2}")?;
         }
         writeln!(out)?;
