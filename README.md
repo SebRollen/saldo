@@ -10,8 +10,8 @@ analysis.
 ## Example
 
 ```
-account Assets:Cash       =   5_000
-account Liabilities:Loan  = -30_000
+account Assets:Cash       =   5_000 @ 2026-01-01
+account Liabilities:Loan  = -30_000 @ 2026-01-01
 account Liabilities:AccruedInterest
 account Income:Salary
 account Expenses:Interest
@@ -105,11 +105,11 @@ The full language reference is available at https://sebrollen.github.io/saldo/
 ### Accounts
 
 ```
-account Assets:Cash = 5_000
+account Assets:Cash = 5_000 @ 2026-01-01
 account Liabilities:Loan
 ```
 
-Accounts hold balances (stocks). Names are colon-separated paths. An optional `= <expr>` sets the opening balance.
+Accounts hold balances (stocks). Names are colon-separated paths. An optional `= <expr> @ <date>` sets the opening balance on that date; accounts without one start at zero.
 
 ### Parameters
 
@@ -155,7 +155,7 @@ can be declared using the `schedule` keyword, or built inline.
 
 ```
 assert that Assets:Cash >= 0
-assert on 2026-12-31 that Assets:Retirement:Beth == 24_500
+assert 2026-12-31 that Assets:Retirement:Beth == 24_500
 ```
 
 Assertions are checked after flows run each day. Simulation aborts with an error if any assertion fails.
@@ -171,10 +171,28 @@ Assertions are checked after flows run each day. Simulation aborts with an error
 | `leg.ytd` / `leg.qtd` / `leg.mtd` | Period aggregate |
 | `alias.leg.ytd` | Cross-flow period aggregate |
 | `a + b`, `a - b`, `a * b`, `a / b` | Arithmetic |
-| `a == b`, `a < b`, `a <= b`, `a > b`, `a >= b` | Comparison |
+| `a == b`, `a != b`, `a < b`, `a <= b`, `a > b`, `a >= b` | Comparison |
 | `if c then a else b` | Conditional |
 | `min(a, b)`, `max(a, b)` | Built-in functions |
 | `abs(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Built-in functions |
+| `net(gross, 0.3)` | User-defined function call |
+
+Posting amounts and opening balances are rounded to cents, and `round(x)`
+rounds to a whole number. Both use round-half-to-even (`round(2.5) == 2`),
+as hledger and beancount do. Entries whose postings all come to zero are left
+out of the output.
+
+### Functions
+
+```
+fn net(gross, rate) {
+  let tax = gross * rate;
+  gross - tax
+}
+```
+
+Functions are pure: they can only use their parameters and local `let`
+bindings, and may not recurse. The final expression is the return value.
 
 ## Building
 
@@ -182,7 +200,7 @@ Assertions are checked after flows run each day. Simulation aborts with an error
 cargo build --release
 ```
 
-Requires Rust 2024 edition (Rust 1.85+).
+Requires Rust 1.91+.
 
 ## Tree-sitter grammar
 

@@ -4,7 +4,10 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]";
 
-enum OutputFormat { Ledger, Csv }
+enum OutputFormat {
+    Ledger,
+    Csv,
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -41,9 +44,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn parse_args(
-    args: &[String],
-) -> Result<(String, NaiveDate, NaiveDate, OutputFormat), String> {
+fn parse_args(args: &[String]) -> Result<(String, NaiveDate, NaiveDate, OutputFormat), String> {
     let mut path: Option<String> = None;
     let mut from: Option<NaiveDate> = None;
     let mut to: Option<NaiveDate> = None;

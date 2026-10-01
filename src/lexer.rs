@@ -1,4 +1,5 @@
-use crate::ast::{Spanned, Span};
+use crate::ast::schedule::ordinal_suffix;
+use crate::ast::{Span, Spanned};
 use crate::errors::Diagnostic;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -11,7 +12,7 @@ pub enum Token<'src> {
     Ident(&'src str),
     Str(&'src str),
     Ordinal(u8),
-    
+
     // keywords
     True,
     False,
@@ -57,19 +58,7 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Date(d) => write!(f, "{}", d.format("%Y-%m-%d")),
             Token::Ident(s) => write!(f, "{s}"),
             Token::Str(s) => write!(f, "\"{s}\""),
-            Token::Ordinal(i) => {
-                let suffix = if *i == 11 || *i == 12 || *i == 13 {
-                    "th"
-                } else {
-                    match i % 10 {
-                        1 => "st",
-                        2 => "nd",
-                        3 => "rd",
-                        _ => "th",
-                    }
-                };
-                write!(f, "{i}{suffix}")
-            }
+            Token::Ordinal(i) => write!(f, "{i}{}", ordinal_suffix(*i)),
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),
             Token::Account => write!(f, "account"),
@@ -131,11 +120,11 @@ impl<'src> Lexer<'src> {
             match self.lex_token() {
                 Ok((Token::EOF, _)) => {
                     if errors.is_empty() {
-                        return Ok(tokens)
+                        return Ok(tokens);
                     } else {
-                        return Err(errors)
+                        return Err(errors);
                     }
-                },
+                }
                 Ok(token) => tokens.push(token),
                 Err(diagnostic) => errors.push(diagnostic),
             }
@@ -183,7 +172,10 @@ impl<'src> Lexer<'src> {
                 Some(b'/') => {
                     if self.peek_next() == Some(b'/') {
                         // entering a comment, skip to end of line
-                        while let Some(s) = self.peek() && *s != b'\n' && !self.at_end() {
+                        while let Some(s) = self.peek()
+                            && *s != b'\n'
+                            && !self.at_end()
+                        {
                             self.advance();
                         }
                     } else {
@@ -217,17 +209,28 @@ impl<'src> Lexer<'src> {
         }
 
         // guaranteed to be a char index boundary since we just progressed past "
-        let content = &self.src[self.start+1..self.current-1];
+        let content = &self.src[self.start + 1..self.current - 1];
         self.emit_token(Token::Str(content))
     }
 
     fn lex_digitlike(&mut self) -> Result<Spanned<Token<'src>>, Diagnostic> {
         // The first digit was already consumed; self.start is its position.
 
-        // Try bare date: YYYY-MM-DD (checks from self.start without moving current)
-        if let Some(date) = self.try_lex_bare_date() {
+        // Bare date: YYYY-MM-DD. Anything shaped like a date is lexed as one (or
+        // rejected), never as subtraction.
+        if self.is_date_shaped() {
             self.current = self.start + 10;
-            return self.emit_token(Token::Date(date));
+            let text = &self.src[self.start..self.current];
+            let y: i32 = text[0..4].parse().expect("checked digits");
+            let m: u32 = text[5..7].parse().expect("checked digits");
+            let d: u32 = text[8..10].parse().expect("checked digits");
+            return match NaiveDate::from_ymd_opt(y, m, d) {
+                Some(date) => self.emit_token(Token::Date(date)),
+                None => Err(Diagnostic::new(
+                    self.current_span(),
+                    format!("invalid date `{text}`"),
+                )),
+            };
         }
 
         // Consume remaining plain digits (no underscores) for ordinal probe
@@ -239,7 +242,8 @@ impl<'src> Lexer<'src> {
         // Check for ordinal suffix (st/nd/rd/th) not immediately followed by a word char
         if let Some(suffix_len) = self.ordinal_suffix_len() {
             let after = self.current + suffix_len;
-            let next_is_word = self.bytes
+            let next_is_word = self
+                .bytes
                 .get(after)
                 .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
             if !next_is_word {
@@ -285,10 +289,7 @@ impl<'src> Lexer<'src> {
         };
 
         let Ok(val) = num_str.parse::<Decimal>() else {
-            return Err(Diagnostic::new(
-                    self.current_span(),
-                    "not a valid decimal"
-            ));
+            return Err(Diagnostic::new(self.current_span(), "not a valid decimal"));
         };
         self.emit_token(Token::Float(val))
     }
@@ -298,10 +299,9 @@ impl<'src> Lexer<'src> {
             match self.peek() {
                 Some(c) if c.is_ascii_alphanumeric() || *c == b'_' => {
                     self.advance();
-                },
-                _ => break
+                }
+                _ => break,
             }
-
         }
 
         let word = &self.src[self.start..self.src.ceil_char_boundary(self.current)];
@@ -326,47 +326,30 @@ impl<'src> Lexer<'src> {
     // Returns the length (always 2) of an ordinal suffix at self.current, or None.
     // Callers are responsible for checking that the following char is not a word char.
     fn ordinal_suffix_len(&self) -> Option<usize> {
-        let i = self.current;
-        if i + 2 > self.src.len() {
-            return None;
-        }
-        match &self.src[i..i + 2] {
-            "st" | "nd" | "rd" | "th" => Some(2),
+        match self.bytes.get(self.current..self.current + 2)? {
+            b"st" | b"nd" | b"rd" | b"th" => Some(2),
             _ => None,
         }
     }
 
-    // Checks whether a YYYY-MM-DD date starts at self.start, and if so parses and
-    // returns it. Does not advance self.current.
-    fn try_lex_bare_date(&self) -> Option<NaiveDate> {
-        let i = self.start;
-        let b = self.bytes;
-        if i + 10 > self.src.len() {
-            return None;
-        }
-        if !b[i..i + 4].iter().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-        if b[i + 4] != b'-' {
-            return None;
-        }
-        if !b[i + 5..i + 7].iter().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-        if b[i + 7] != b'-' {
-            return None;
-        }
-        if !b[i + 8..i + 10].iter().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
+    // Checks whether text shaped like YYYY-MM-DD starts at self.start. Does not
+    // advance self.current.
+    fn is_date_shaped(&self) -> bool {
+        let Some(b) = self.bytes.get(self.start..self.start + 10) else {
+            return false;
+        };
+        let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
         // Reject if immediately followed by another digit (part of a longer number)
-        if b.get(i + 10).is_some_and(|c| c.is_ascii_digit()) {
-            return None;
-        }
-        let y: i32 = self.src[i..i + 4].parse().ok()?;
-        let m: u32 = self.src[i + 5..i + 7].parse().ok()?;
-        let d: u32 = self.src[i + 8..i + 10].parse().ok()?;
-        NaiveDate::from_ymd_opt(y, m, d)
+        let followed_by_digit = self
+            .bytes
+            .get(self.start + 10)
+            .is_some_and(u8::is_ascii_digit);
+        digits(0..4)
+            && b[4] == b'-'
+            && digits(5..7)
+            && b[7] == b'-'
+            && digits(8..10)
+            && !followed_by_digit
     }
 
     fn lex_token(&mut self) -> Result<Spanned<Token<'src>>, Diagnostic> {
@@ -432,9 +415,16 @@ impl<'src> Lexer<'src> {
             _ => {}
         }
 
+        // Consume the rest of a multi-byte character so the span never splits it.
+        while !self.src.is_char_boundary(self.current) {
+            self.current += 1;
+        }
         Err(Diagnostic::new(
-            Span::new(self.start, self.current),
-            "Unexpected character",
+            self.current_span(),
+            format!(
+                "unexpected character `{}`",
+                &self.src[self.start..self.current]
+            ),
         ))
     }
 }
@@ -461,6 +451,15 @@ mod tests {
             toks,
             vec![Token::Date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())]
         );
+    }
+
+    #[test]
+    fn rejects_invalid_dates() {
+        for src in ["2025-13-01", "2025-02-30", "2025-00-10"] {
+            let errs = Lexer::new(src).lex().unwrap_err();
+            assert_eq!(errs.len(), 1, "{src}");
+            assert_eq!(errs[0].message, format!("invalid date `{src}`"));
+        }
     }
 
     #[test]

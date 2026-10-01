@@ -27,6 +27,10 @@ Expenses:Rent = 3_915.30
 The account balance is increased by the given amount. Use a negative
 expression to decrease a balance.
 
+Amounts are rounded to cents using round-half-to-even (`0.125` becomes
+`0.12`), the same rule hledger and beancount use. If every posting in a
+firing comes to zero, no transaction is written for it.
+
 ### Auto-balance
 
 Omit `=` on exactly one posting per entry. saldo calculates the amount that
@@ -99,8 +103,9 @@ Reference a leg scoped to this flow with `<alias>.<leg>.ytd`:
 assert that seb_paycheck.retirement_contribution.ytd <= 24_500
 ```
 
-Without an alias, leg aggregations are unscoped and can be referenced
-directly by leg name.
+Without an alias, a leg can only be referenced from inside its own entry
+(`retirement_contribution.ytd`). Add an alias to read it from other entries,
+params, or assertions.
 
 ## Complete example
 

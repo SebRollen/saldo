@@ -1,6 +1,6 @@
 use crate::ast::{AggKind, BinOp, Expr, ParamBody, Path, PostingAmount, Span, SpannedExpr, Stmt};
 use crate::errors::Diagnostic;
-use crate::resolver::{resolve_ref, FnDef, Model, RefKind};
+use crate::resolver::{FnDef, Model, RefKind, resolve_ref};
 use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
@@ -42,9 +42,18 @@ pub struct DaySnapshot {
     pub balances: IndexMap<Path, Decimal>,
 }
 
+/// A param's value for the current day.
+enum ParamValue {
+    Value(Decimal),
+    /// A time-varying param with no interval covering the current day.
+    Inactive,
+    /// Evaluation failed; reported only if the param is read.
+    Error(Diagnostic),
+}
+
 struct Environment<'m> {
     stocks: HashMap<Path, Decimal>,
-    params: HashMap<String, Decimal>,
+    params: HashMap<String, ParamValue>,
     /// (flow_name, leg_name) → value for the current day (0 on non-firing days).
     leg_values: HashMap<(&'m str, &'m str), Decimal>,
     /// ((flow_name, leg_name), period) → running total.
@@ -67,11 +76,21 @@ impl<'m> Environment<'m> {
     fn new(model: &'m Model) -> Self {
         let stock_set = model.stocks.keys().cloned().collect();
         let param_set = model.params.keys().cloned().collect();
-        let leg_set = model.leg_names.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        let opening_dates = model.stocks.iter()
+        let leg_set = model
+            .leg_names
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let opening_dates = model
+            .stocks
+            .iter()
             .filter_map(|(p, a)| a.opening.as_ref().map(|(_, d)| (p.clone(), *d)))
             .collect();
-        let fns = model.fns.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let fns = model
+            .fns
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         Self {
             stocks: HashMap::new(),
             params: HashMap::new(),
@@ -91,26 +110,35 @@ impl<'m> Environment<'m> {
         self.stocks.insert(name, value);
     }
 
-    fn add_param(&mut self, name: String, value: Decimal) {
+    fn add_param(&mut self, name: String, value: ParamValue) {
         self.params.insert(name, value);
     }
 
-    fn stocks_mut(&mut self) -> &mut HashMap<Path, Decimal> {
-        &mut self.stocks
+    /// Adds `amount` to `account`'s balance.
+    fn post(&mut self, account: &Path, amount: Decimal, span: Span) -> Result<(), Diagnostic> {
+        let balance = self.stocks.entry(account.clone()).or_insert(Decimal::ZERO);
+        *balance = balance
+            .checked_add(amount)
+            .ok_or_else(|| Diagnostic::new(span, format!("balance of `{account}` overflowed")))?;
+        Ok(())
     }
 
-    fn advance_period(&mut self) {
-        // Accumulate named leg values into period totals. Runs every day; since leg_values
-        // is cleared at the start of each day and only populated when a flow fires, this
-        // is a no-op on non-firing days and accumulates the actual amount on firing days.
+    /// Accumulates named leg values into period totals. On overflow, returns the
+    /// (entry key, leg name) whose total overflowed.
+    fn advance_period(&mut self) -> Result<(), (&'m str, &'m str)> {
+        // Runs every day; since leg_values is cleared at the start of each day and only
+        // populated when a flow fires, this is a no-op on non-firing days and accumulates
+        // the actual amount on firing days.
         for (key, &value) in &self.leg_values {
             for kind in [AggKind::Mtd, AggKind::Qtd, AggKind::Ytd] {
-                *self
+                let total = self
                     .accumulators
                     .entry((*key, kind))
-                    .or_insert(Decimal::ZERO) += value;
+                    .or_insert(Decimal::ZERO);
+                *total = total.checked_add(value).ok_or(*key)?;
             }
         }
+        Ok(())
     }
 
     fn reset_periods(&mut self, t: NaiveDate) {
@@ -139,7 +167,9 @@ impl Model {
 
         // Simulate from the earliest opening date (if before start) so the
         // warmup period accumulates the right balances before reporting starts.
-        let effective_start = self.stocks.values()
+        let effective_start = self
+            .stocks
+            .values()
             .filter_map(|a| a.opening.as_ref().map(|(_, d)| *d))
             .min()
             .map(|earliest| earliest.min(start))
@@ -155,30 +185,41 @@ impl Model {
         let mut opening_captured = false;
         while t <= end {
             env.current_date = t;
+            env.leg_values.clear();
+            env.reset_periods(t);
+            self.evaluate_params(t, &mut env);
 
-            // Initialize accounts whose opening date is today.
-            for (name, account) in &self.stocks {
-                if let Some((expr, date)) = &account.opening {
-                    if *date == t {
-                        let v = eval_num(expr, &env)?;
-                        env.add_stock(name.clone(), v);
-                    }
-                }
+            // Initialize accounts whose opening date is today. Params may read the
+            // new balances, so re-evaluate them if anything opened.
+            let opened = self.open_accounts(t, &mut env)?;
+            if !opened.is_empty() {
+                self.evaluate_params(t, &mut env);
             }
 
             // Capture opening balances at the start of the user's simulation range,
             // after any accounts that open today are initialized but before entries fire.
             if t == start && !opening_captured {
-                log.opening = self.stocks.keys()
+                log.opening = self
+                    .stocks
+                    .keys()
                     .map(|p| (p.clone(), *env.stocks.get(p).unwrap_or(&Decimal::ZERO)))
                     .collect();
+                if checked_sum(log.opening.values()).is_none() {
+                    return Err(Diagnostic::new(
+                        Span::new(0, 0),
+                        format!("opening balances on {t} overflow when summed"),
+                    ));
+                }
                 opening_captured = true;
             }
 
-            env.leg_values.clear();
-            env.reset_periods(t);
-            self.evaluate_params(t, &mut env)?;
-            let txs = self.apply_flows(t, &mut env)?;
+            // Accounts opening after the start of the range get their own
+            // opening transaction so ledger output agrees with the balances.
+            let mut txs = Vec::new();
+            if t > start {
+                txs.extend(opening_transaction(t, opened)?);
+            }
+            txs.extend(self.apply_flows(t, &mut env)?);
             self.check_assertions(t, &env)?;
 
             if t >= start {
@@ -191,7 +232,17 @@ impl Model {
                 log.snapshots.push(DaySnapshot { date: t, balances });
             }
 
-            env.advance_period();
+            if let Err((key, leg)) = env.advance_period() {
+                let span = self
+                    .entries
+                    .iter()
+                    .find(|e| e.key == key)
+                    .map_or(Span::new(0, 0), |e| e.span);
+                return Err(Diagnostic::new(
+                    span,
+                    format!("running total of leg `{leg}` overflowed"),
+                ));
+            }
 
             t = t
                 .checked_add_signed(Duration::days(1))
@@ -199,7 +250,9 @@ impl Model {
         }
 
         if !opening_captured {
-            log.opening = self.stocks.keys()
+            log.opening = self
+                .stocks
+                .keys()
                 .map(|p| (p.clone(), *env.stocks.get(p).unwrap_or(&Decimal::ZERO)))
                 .collect();
         }
@@ -207,26 +260,46 @@ impl Model {
         Ok(log)
     }
 
-    fn evaluate_params<'m>(
+    /// Evaluates every param for day `t`. Failures are recorded rather than
+    /// returned, so they only abort the simulation if the param is actually read.
+    fn evaluate_params<'m>(&'m self, t: NaiveDate, env: &mut Environment<'m>) {
+        for (name, body) in &self.params {
+            let expr = match body {
+                ParamBody::Const(e) => Some(e),
+                ParamBody::Schedule(intervals) => intervals
+                    .iter()
+                    .find(|iv| iv.contains(t))
+                    .map(|iv| &iv.value),
+            };
+            let value = match expr {
+                Some(e) => match eval_num(e, env) {
+                    Ok(v) => ParamValue::Value(v),
+                    Err(d) => ParamValue::Error(d),
+                },
+                None => ParamValue::Inactive,
+            };
+            env.add_param(name.clone(), value);
+        }
+    }
+
+    /// Initializes accounts whose opening date is `t`, in declaration order, and
+    /// returns their opening balances.
+    fn open_accounts<'m>(
         &'m self,
         t: NaiveDate,
         env: &mut Environment<'m>,
-    ) -> Result<(), Diagnostic> {
-        for (name, body) in &self.params {
-            match body {
-                ParamBody::Const(e) => {
-                    let v = eval_num(e, env)?;
-                    env.add_param(name.clone(), v);
-                }
-                ParamBody::Schedule(intervals) => {
-                    if let Some(iv) = intervals.iter().find(|iv| iv.contains(t)) {
-                        let v = eval_num(&iv.value, env)?;
-                        env.add_param(name.clone(), v);
-                    }
-                }
+    ) -> Result<Vec<(Path, Decimal)>, Diagnostic> {
+        let mut opened = Vec::new();
+        for (name, account) in &self.stocks {
+            if let Some((expr, date)) = &account.opening
+                && *date == t
+            {
+                let v = to_amount(eval_num(expr, env)?);
+                env.add_stock(name.clone(), v);
+                opened.push((name.clone(), v));
             }
         }
-        Ok(())
+        Ok(opened)
     }
 
     fn apply_flows<'m>(
@@ -250,7 +323,7 @@ impl Model {
                         let amt = eval_num(e, env).map_err(|d| {
                             d.with_note(entry.span, format!("in entry `{}`", entry.label))
                         })?;
-                        let amt = amt.round_dp(2);
+                        let amt = to_amount(amt);
                         if let Some(leg) = &posting.leg_name {
                             env.leg_values
                                 .insert((entry.key.as_str(), leg.as_str()), amt);
@@ -260,7 +333,7 @@ impl Model {
                     Some(PostingAmount::All) => {
                         // Clear the current balance: amt = -(current balance).
                         let current = *env.stocks.get(&posting.account).unwrap_or(&Decimal::ZERO);
-                        let amt = -current.round_dp(2);
+                        let amt = to_amount(-current);
                         if let Some(leg) = &posting.leg_name {
                             env.leg_values
                                 .insert((entry.key.as_str(), leg.as_str()), amt);
@@ -273,39 +346,57 @@ impl Model {
                 }
             }
 
-            let explicit_sum: Decimal = explicit.iter().map(|(_, c)| c).sum();
+            let explicit_sum = checked_sum(explicit.iter().map(|(_, c)| c)).ok_or_else(|| {
+                Diagnostic::new(
+                    entry.span,
+                    format!("postings of entry `{}` overflow when summed", entry.label),
+                )
+            })?;
+            if auto_leg.is_none() && !explicit_sum.is_zero() {
+                return Err(Diagnostic::new(
+                    entry.span,
+                    format!(
+                        "entry `{}` does not balance on {t}: postings sum to {explicit_sum}",
+                        entry.label
+                    ),
+                ));
+            }
 
             // Apply explicit postings to balances.
             for (account, amt) in &explicit {
-                *env.stocks_mut()
-                    .entry(account.clone())
-                    .or_insert(Decimal::ZERO) += amt;
+                env.post(account, *amt, entry.span)?;
             }
 
             // Auto-balance posting: exact negation guarantees the transaction sums to zero.
             let mut postings = explicit;
             if let Some((account, leg_name)) = auto_leg {
-                let auto = -explicit_sum;
+                let auto = to_amount(-explicit_sum);
                 if let Some(leg) = leg_name {
                     env.leg_values.insert((entry.key.as_str(), leg), auto);
                 }
-                *env.stocks_mut()
-                    .entry(account.clone())
-                    .or_insert(Decimal::ZERO) += auto;
+                env.post(&account, auto, entry.span)?;
                 postings.push((account, auto));
             }
 
-            txs.push(Transaction {
-                date: t,
-                label: entry.label.clone(),
-                postings,
-            });
+            // An entry that moves no money (e.g. `= all` on an empty account) is
+            // not worth a ledger transaction.
+            if postings.iter().any(|(_, amt)| !amt.is_zero()) {
+                txs.push(Transaction {
+                    date: t,
+                    label: entry.label.clone(),
+                    postings,
+                });
+            }
         }
         env.current_entry = None;
         Ok(txs)
     }
 
-    fn check_assertions<'m>(&'m self, t: NaiveDate, env: &Environment<'m>) -> Result<(), Diagnostic> {
+    fn check_assertions<'m>(
+        &'m self,
+        t: NaiveDate,
+        env: &Environment<'m>,
+    ) -> Result<(), Diagnostic> {
         for (sched, expr) in &self.asserts {
             if !sched.matches(t) {
                 continue;
@@ -337,7 +428,10 @@ impl Model {
     }
 }
 
-fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result<Value, Diagnostic> {
+fn eval_expr<'m>(
+    (expr, span): &'m SpannedExpr,
+    env: &Environment<'m>,
+) -> Result<Value, Diagnostic> {
     match expr.as_ref() {
         Expr::Num(n) => Ok(Value::Num(*n)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
@@ -375,7 +469,7 @@ fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result
                         return Err(Diagnostic::new(
                             a.1,
                             format!("argument to `{name}` must be numeric"),
-                        ))
+                        ));
                     }
                 }
             }
@@ -389,7 +483,9 @@ fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result
         }
         Expr::Ref(path) => {
             // Bare leg name: resolves to the current-day value within the same flow (0 if not fired yet).
-            if path.0.len() == 1 && let Some(entry) = env.current_entry {
+            if path.0.len() == 1
+                && let Some(entry) = env.current_entry
+            {
                 let key = (entry, path.0[0].as_str());
                 if env.leg_set.contains(&key) {
                     return Ok(Value::Num(
@@ -399,21 +495,22 @@ fn eval_expr<'m>((expr, span): &'m SpannedExpr, env: &Environment<'m>) -> Result
             }
             match resolve_ref(path, &env.stock_set, &env.param_set) {
                 Some(RefKind::Stock(p)) => {
-                    if let Some(&open_date) = env.opening_dates.get(&p) {
-                        if env.current_date < open_date {
-                            return Err(Diagnostic::new(
-                                *span,
-                                format!("account `{p}` opens on {open_date}, but referenced on {}", env.current_date),
-                            ));
-                        }
-                    }
-                    Ok(Value::Num(*env.stocks.get(&p).unwrap_or(&Decimal::ZERO)))
+                    check_account_open(env, &p, *span)?;
+                    Ok(Value::Num(env.stocks[&p]))
                 }
-                Some(RefKind::Param(n)) => {
-                    Ok(Value::Num(*env.params.get(&n).ok_or_else(|| {
-                        Diagnostic::new(*span, format!("param `{n}` has no active interval"))
-                    })?))
-                }
+                Some(RefKind::Param(n)) => match env.params.get(&n) {
+                    Some(ParamValue::Value(v)) => Ok(Value::Num(*v)),
+                    Some(ParamValue::Error(d)) => Err(d
+                        .clone()
+                        .with_note(*span, format!("while evaluating param `{n}`"))),
+                    Some(ParamValue::Inactive) | None => Err(Diagnostic::new(
+                        *span,
+                        format!(
+                            "param `{n}` has no value on {}: none of its intervals cover this date",
+                            env.current_date
+                        ),
+                    )),
+                },
                 None => Err(Diagnostic::new(
                     *span,
                     format!("unknown reference `{path}`"),
@@ -461,15 +558,64 @@ fn call_builtin(name: &str, args: &[Decimal], span: Span) -> Result<Value, Diagn
 }
 
 fn check_account_open(env: &Environment<'_>, account: &Path, span: Span) -> Result<(), Diagnostic> {
-    if let Some(&open_date) = env.opening_dates.get(account) {
-        if env.current_date < open_date {
-            return Err(Diagnostic::new(
-                span,
-                format!("account `{account}` opens on {open_date}, but referenced on {}", env.current_date),
-            ));
-        }
+    if env.stocks.contains_key(account) {
+        return Ok(());
     }
-    Ok(())
+    let open_date = env.opening_dates[account];
+    let message = if open_date == env.current_date {
+        format!(
+            "account `{account}` is referenced on {open_date} before its opening balance is set"
+        )
+    } else {
+        format!(
+            "account `{account}` opens on {open_date}, but referenced on {}",
+            env.current_date
+        )
+    };
+    Err(Diagnostic::new(span, message))
+}
+
+/// The ledger transaction recording balances of accounts that opened on `date`.
+fn opening_transaction(
+    date: NaiveDate,
+    opened: Vec<(Path, Decimal)>,
+) -> Result<Option<Transaction>, Diagnostic> {
+    let mut postings: Vec<(Path, Decimal)> =
+        opened.into_iter().filter(|(_, v)| !v.is_zero()).collect();
+    if postings.is_empty() {
+        return Ok(None);
+    }
+    let equity = -checked_sum(postings.iter().map(|(_, v)| v)).ok_or_else(|| {
+        Diagnostic::new(
+            Span::new(0, 0),
+            format!("opening balances on {date} overflow when summed"),
+        )
+    })?;
+    postings.push((
+        Path(vec!["Equity".to_string(), "OpeningBalances".to_string()]),
+        equity,
+    ));
+    Ok(Some(Transaction {
+        date,
+        label: "opening-balances".to_string(),
+        postings,
+    }))
+}
+
+/// Rounds a value to the precision of a posted amount (cents), normalizing -0.
+fn to_amount(value: Decimal) -> Decimal {
+    let amount = value.round_dp(2);
+    if amount.is_zero() {
+        Decimal::ZERO
+    } else {
+        amount
+    }
+}
+
+fn checked_sum<'a>(values: impl IntoIterator<Item = &'a Decimal>) -> Option<Decimal> {
+    values
+        .into_iter()
+        .try_fold(Decimal::ZERO, |acc, v| acc.checked_add(*v))
 }
 
 fn eval_fn_body(
@@ -490,11 +636,15 @@ fn eval_fn_body(
             Stmt::Let { name, value } => {
                 let v = eval_fn_expr(value, &scope, env)?;
                 match v {
-                    Value::Num(n) => { scope.insert(name.clone(), n); }
-                    Value::Bool(_) => return Err(Diagnostic::new(
-                        value.1,
-                        format!("let binding `{name}` must evaluate to a number"),
-                    )),
+                    Value::Num(n) => {
+                        scope.insert(name.clone(), n);
+                    }
+                    Value::Bool(_) => {
+                        return Err(Diagnostic::new(
+                            value.1,
+                            format!("let binding `{name}` must evaluate to a number"),
+                        ));
+                    }
                 }
             }
             Stmt::Return(expr) => {
@@ -502,7 +652,10 @@ fn eval_fn_body(
             }
         }
     }
-    Err(Diagnostic::new(call_span, "function has no return statement"))
+    Err(Diagnostic::new(
+        call_span,
+        "function has no return statement",
+    ))
 }
 
 fn eval_fn_expr(
@@ -523,7 +676,10 @@ fn eval_fn_expr(
         }
         Expr::Neg(x) => match eval_fn_expr(x, scope, env)? {
             Value::Num(n) => Ok(Value::Num(-n)),
-            _ => Err(Diagnostic::new(*span, "unary minus requires a numeric operand")),
+            _ => Err(Diagnostic::new(
+                *span,
+                "unary minus requires a numeric operand",
+            )),
         },
         Expr::Bin(a, op, b) => {
             let x = eval_fn_expr(a, scope, env)?;
@@ -532,19 +688,28 @@ fn eval_fn_expr(
         }
         Expr::If { cond, then, else_ } => match eval_fn_expr(cond, scope, env)? {
             Value::Bool(c) => {
-                if c { eval_fn_expr(then, scope, env) } else { eval_fn_expr(else_, scope, env) }
+                if c {
+                    eval_fn_expr(then, scope, env)
+                } else {
+                    eval_fn_expr(else_, scope, env)
+                }
             }
-            _ => Err(Diagnostic::new(*span, "condition in `if` expression must be a bool")),
+            _ => Err(Diagnostic::new(
+                *span,
+                "condition in `if` expression must be a bool",
+            )),
         },
         Expr::Call(name, args) => {
             let mut nums = Vec::with_capacity(args.len());
             for a in args {
                 match eval_fn_expr(a, scope, env)? {
                     Value::Num(n) => nums.push(n),
-                    _ => return Err(Diagnostic::new(
-                        a.1,
-                        format!("argument to `{name}` must be numeric"),
-                    )),
+                    _ => {
+                        return Err(Diagnostic::new(
+                            a.1,
+                            format!("argument to `{name}` must be numeric"),
+                        ));
+                    }
                 }
             }
             if BUILTINS.iter().any(|(n, _)| *n == name.as_str()) {
@@ -584,13 +749,16 @@ fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagn
             if op == BinOp::Div && y.is_zero() {
                 return Err(Diagnostic::new(span, "division by zero"));
             }
-            Ok(Value::Num(match op {
-                BinOp::Add => x + y,
-                BinOp::Sub => x - y,
-                BinOp::Mul => x * y,
-                BinOp::Div => x / y,
+            let result = match op {
+                BinOp::Add => x.checked_add(y),
+                BinOp::Sub => x.checked_sub(y),
+                BinOp::Mul => x.checked_mul(y),
+                BinOp::Div => x.checked_div(y),
                 _ => unreachable!(),
-            }))
+            };
+            result.map(Value::Num).ok_or_else(|| {
+                Diagnostic::new(span, format!("arithmetic overflow in `{x} {op} {y}`"))
+            })
         }
         BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
             let (Value::Num(x), Value::Num(y)) = (a, b) else {
@@ -608,6 +776,6 @@ fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagn
             }))
         }
         BinOp::Eq => Ok(Value::Bool(a == b)),
-        BinOp::NotEq => Ok(Value::Bool(a != b))
+        BinOp::NotEq => Ok(Value::Bool(a != b)),
     }
 }

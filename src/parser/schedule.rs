@@ -1,4 +1,5 @@
 use super::Parser;
+use crate::Span;
 use crate::ast::schedule::{Dow, Month, MonthOccurrence, Nth, Ordinal, Period, Periodic, Schedule};
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
@@ -118,66 +119,75 @@ impl<'src> Parser<'src> {
 
     fn try_parse_day(&mut self) -> Option<Period> {
         if let Token::Ident(s) = self.peek()
-            && (s.eq_ignore_ascii_case("day") || s.eq_ignore_ascii_case("days")) {
-                self.advance();
-                return Some(Period::Day);
+            && (s.eq_ignore_ascii_case("day") || s.eq_ignore_ascii_case("days"))
+        {
+            self.advance();
+            return Some(Period::Day);
         }
         None
     }
 
     fn try_parse_week(&mut self) -> Option<Period> {
         if let Token::Ident(s) = self.peek()
-            && (s.eq_ignore_ascii_case("week") || s.eq_ignore_ascii_case("weeks")) {
-                self.advance();
-                let on = if self.eat_ident_ci("on").is_some() {
-                    self.parse_dow_list()
-                } else {
-                    Vec::new()
-                };
-                return Some(Period::Week { on });
-            }
+            && (s.eq_ignore_ascii_case("week") || s.eq_ignore_ascii_case("weeks"))
+        {
+            self.advance();
+            let on = if self.eat_ident_ci("on").is_some() {
+                self.parse_dow_list()
+            } else {
+                Vec::new()
+            };
+            return Some(Period::Week { on });
+        }
         None
     }
 
     fn try_parse_month_period(&mut self) -> Option<Period> {
         if let Some(month) = self.try_parse_month_name() {
+            let start = self.peek_span();
             let day = self.try_parse_ordinal();
+            if let Some(day) = &day {
+                self.check_day_ordinal(day, Some(month), start);
+            }
             return Some(Period::NamedMonth { month, day });
         }
         if let Token::Ident(s) = self.peek()
-            && (s.eq_ignore_ascii_case("month") || s.eq_ignore_ascii_case("months")) {
-                self.advance();
-                let on = if self.eat_ident_ci("on").is_some() {
-                    self.eat_ident_ci("the");
-                    self.parse_month_occurrence_list()
-                } else {
-                    Vec::new()
-                };
-                return Some(Period::Month { on });
-            }
+            && (s.eq_ignore_ascii_case("month") || s.eq_ignore_ascii_case("months"))
+        {
+            self.advance();
+            let on = if self.eat_ident_ci("on").is_some() {
+                self.eat_ident_ci("the");
+                self.parse_month_occurrence_list()
+            } else {
+                Vec::new()
+            };
+            return Some(Period::Month { on });
+        }
         None
     }
 
     fn try_parse_quarter(&mut self) -> Option<Period> {
-        if let Token::Ident(s) = self.peek() 
-            && (s.eq_ignore_ascii_case("quarter") || s.eq_ignore_ascii_case("quarters")) {
-                self.advance();
-                return Some(Period::Quarter);
+        if let Token::Ident(s) = self.peek()
+            && (s.eq_ignore_ascii_case("quarter") || s.eq_ignore_ascii_case("quarters"))
+        {
+            self.advance();
+            return Some(Period::Quarter);
         }
         None
     }
 
     fn try_parse_year(&mut self) -> Option<Period> {
-        if let Token::Ident(s) = self.peek() 
-            && (s.eq_ignore_ascii_case("year") || s.eq_ignore_ascii_case("years")) {
-                self.advance();
-                let on = if self.eat_ident_ci("on").is_some() {
-                    self.parse_year_occurrence_list()
-                } else {
-                    Vec::new()
-                };
-                return Some(Period::Year { on });
-            }
+        if let Token::Ident(s) = self.peek()
+            && (s.eq_ignore_ascii_case("year") || s.eq_ignore_ascii_case("years"))
+        {
+            self.advance();
+            let on = if self.eat_ident_ci("on").is_some() {
+                self.parse_year_occurrence_list()
+            } else {
+                Vec::new()
+            };
+            return Some(Period::Year { on });
+        }
         None
     }
 
@@ -225,17 +235,22 @@ impl<'src> Parser<'src> {
     }
 
     fn try_parse_nth(&mut self) -> Option<Nth> {
-        if let Token::Ordinal(n) = self.peek() && *n >= 2 {
+        if let Token::Ordinal(n) = self.peek()
+            && *n >= 2
+        {
             let n = *n;
             self.advance();
             return Some(Nth::new(n));
         }
         if let Token::Float(n) = self.peek() {
             let n = *n;
-            if n.fract() == Decimal::ZERO && n >= Decimal::from(2) && n <= Decimal::from(255)
-                && let Ok(val) = n.to_string().parse::<u8>() {
-                    self.advance();
-                    return Some(Nth::new(val));
+            if n.fract() == Decimal::ZERO
+                && n >= Decimal::from(2)
+                && n <= Decimal::from(255)
+                && let Ok(val) = n.to_string().parse::<u8>()
+            {
+                self.advance();
+                return Some(Nth::new(val));
             }
         }
         if let Token::Ident(s) = self.peek() {
@@ -293,14 +308,45 @@ impl<'src> Parser<'src> {
     }
 
     fn try_parse_month_occurrence(&mut self) -> Option<MonthOccurrence> {
+        let start = self.peek_span();
         let ordinal = self.try_parse_ordinal()?;
         if let Some(dow) = self.try_parse_dow() {
+            self.check_weekday_ordinal(&ordinal, &dow, start);
             return Some(MonthOccurrence::Weekday(ordinal, dow));
         }
+        self.check_day_ordinal(&ordinal, None, start);
         let _ = self
             .eat_ident_ci("day")
             .or_else(|| self.eat_ident_ci("days"));
         Some(MonthOccurrence::Day(ordinal))
+    }
+
+    /// Reports day ordinals that no month (or not `month`) has, such as "32nd".
+    /// `start` is the span of the ordinal's first token.
+    fn check_day_ordinal(&mut self, ordinal: &Ordinal, month: Option<Month>, start: Span) {
+        let Ordinal::Nth(nth) = ordinal else { return };
+        let max = month.map_or(31, Month::max_days);
+        if nth.get() > max {
+            let message = match month {
+                Some(month) => format!("{month:?} has at most {max} days"),
+                None => format!("no month has a {nth} day"),
+            };
+            let span = Span::new(start.start, self.last_span.end);
+            self.errors.push(Diagnostic::new(span, message));
+        }
+    }
+
+    /// Reports weekday ordinals that no month has, such as "6th monday".
+    /// `start` is the span of the ordinal's first token.
+    fn check_weekday_ordinal(&mut self, ordinal: &Ordinal, dow: &Dow, start: Span) {
+        let Ordinal::Nth(nth) = ordinal else { return };
+        if nth.get() > dow.max_per_month() {
+            let span = Span::new(start.start, self.last_span.end);
+            self.errors.push(Diagnostic::new(
+                span,
+                format!("no month has a {nth} {}", dow.name()),
+            ));
+        }
     }
 
     fn parse_year_occurrence_list(&mut self) -> Vec<(Month, Ordinal)> {
@@ -309,7 +355,9 @@ impl<'src> Parser<'src> {
 
     fn try_parse_year_occurrence(&mut self) -> Option<(Month, Ordinal)> {
         let month = self.try_parse_month_name()?;
+        let start = self.peek_span();
         let ordinal = self.require_ordinal()?;
+        self.check_day_ordinal(&ordinal, Some(month), start);
         Some((month, ordinal))
     }
 
@@ -652,6 +700,26 @@ mod tests {
                 assert_eq!(MonthOccurrence::Day(Ordinal::First), on[0]);
                 assert_eq!(MonthOccurrence::Day(Ordinal::Last), on[1]);
             }
+        }
+
+        #[test]
+        fn rejects_impossible_ordinals() {
+            let cases = [
+                ("monthly on the 32nd", "no month has a 32nd day"),
+                ("monthly on the 6th monday", "no month has a 6th Monday"),
+                ("monthly on the 24th weekday", "no month has a 24th weekday"),
+                ("every feb 30th", "February has at most 29 days"),
+                ("yearly on apr 31st", "April has at most 30 days"),
+            ];
+            for (src, expected) in cases {
+                let errs = parse_schedule_str(src).unwrap_err();
+                assert!(
+                    errs.iter().any(|d| d.message == expected),
+                    "`{src}`: expected {expected:?}, got {errs:?}"
+                );
+            }
+            parse("monthly on the 31st, 5th friday, 23rd weekday");
+            parse("yearly on feb 29th");
         }
 
         #[test]

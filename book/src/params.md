@@ -16,8 +16,10 @@ param retirement_rate = 0.16
 param max_401k : usd/year = 24_500
 ```
 
-The expression is evaluated once and the param holds that value for the
-entire simulation.
+The expression is re-evaluated at the start of each simulated day. For
+expressions built from numbers and other constant params, the value never
+changes. A param that reads an account balance follows that balance as it
+changes.
 
 ## Time-varying params
 
@@ -40,6 +42,11 @@ Each interval specifies a `from` date (inclusive) and an optional `to`
 date (exclusive). The simulator uses whichever interval covers the current
 day. Intervals must not overlap. An interval without a `to` clause extends
 indefinitely.
+
+On a day that no interval covers (before the first interval, in a gap
+between intervals, or after the last one ends), the param has no value.
+Using it on such a day is an error, so add an interval with the value you
+want, for example `= 0`, to cover those days.
 
 A more complete example:
 

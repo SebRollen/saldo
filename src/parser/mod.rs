@@ -1,18 +1,25 @@
 mod schedule;
 
+use crate::Span;
 use crate::ast::{
     AggKind, BinOp, Decl, Expr, Interval, ParamBody, Path, Posting, PostingAmount, Program,
     ScheduleRef, SpannedExpr, Stmt,
 };
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
-use crate::Span;
+
+/// Upper bound on expression nesting (parentheses, unary minus, chained
+/// operators), so pathological input can't overflow the stack while parsing or
+/// evaluating.
+const MAX_EXPR_DEPTH: usize = 256;
 
 pub struct Parser<'src> {
     tokens: Vec<(Token<'src>, Span)>,
     current: usize,
     errors: Vec<Diagnostic>,
     last_span: Span,
+    /// Current expression nesting depth, bounded by `MAX_EXPR_DEPTH`.
+    depth: usize,
 }
 
 impl<'src> Parser<'src> {
@@ -23,6 +30,7 @@ impl<'src> Parser<'src> {
             current: 0,
             errors: Vec::new(),
             last_span,
+            depth: 0,
         }
     }
 
@@ -96,11 +104,22 @@ impl<'src> Parser<'src> {
         }
     }
 
+    fn expect_ident(&mut self, what: &str) -> Option<(&'src str, Span)> {
+        if let Some(ident) = self.eat_ident() {
+            return Some(ident);
+        }
+        let span = self.peek_span();
+        self.errors
+            .push(Diagnostic::new(span, format!("expected {what}")));
+        None
+    }
+
     fn eat_ident_ci(&mut self, word: &str) -> Option<Span> {
         if let Token::Ident(s) = self.peek()
-            && s.eq_ignore_ascii_case(word) {
-                let (_, span) = self.advance();
-                return Some(span);
+            && s.eq_ignore_ascii_case(word)
+        {
+            let (_, span) = self.advance();
+            return Some(span);
         }
         None
     }
@@ -153,7 +172,14 @@ impl<'src> Parser<'src> {
             if let Some(decl) = self.parse_decl() {
                 let span = Span::new(start.start, self.last_span.end);
                 decls.push((decl, span));
-            } else if *self.peek() != Token::EOF {
+            } else {
+                // Every failure path should report something, but never let a
+                // malformed declaration disappear without an error.
+                if self.errors.len() == err_count {
+                    let span = Span::new(start.start, self.last_span.end.max(start.end));
+                    self.errors
+                        .push(Diagnostic::new(span, "malformed declaration"));
+                }
                 // Keep only the first error from this failed declaration, then
                 // skip to the next declaration boundary to avoid cascades.
                 self.errors.truncate(err_count + 1);
@@ -169,9 +195,13 @@ impl<'src> Parser<'src> {
     fn synchronize(&mut self) {
         loop {
             match self.peek() {
-                Token::EOF | Token::Account | Token::Assert | Token::Entry | Token::Fn | Token::Param | Token::Schedule => {
-                    return
-                }
+                Token::EOF
+                | Token::Account
+                | Token::Assert
+                | Token::Entry
+                | Token::Fn
+                | Token::Param
+                | Token::Schedule => return,
                 _ => {
                     self.advance();
                 }
@@ -234,7 +264,7 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_schedule_decl(&mut self) -> Option<Decl> {
-        let (name, _) = self.eat_ident()?;
+        let (name, _) = self.expect_ident("schedule name")?;
         self.expect(&Token::Eq)?;
         let schedule = self.parse_schedule_literal()?;
         Some(Decl::Schedule {
@@ -244,7 +274,7 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_param_decl(&mut self) -> Option<Decl> {
-        let (name, _) = self.eat_ident()?;
+        let (name, _) = self.expect_ident("param name")?;
         let unit = if self.eat(&Token::Colon).is_some() {
             Some(self.parse_unit()?)
         } else {
@@ -286,12 +316,12 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_fn_decl(&mut self) -> Option<Decl> {
-        let (name, _) = self.eat_ident()?;
+        let (name, _) = self.expect_ident("function name")?;
         let name = name.to_string();
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
         while !matches!(self.peek(), Token::RParen | Token::EOF) {
-            let (p, _) = self.eat_ident()?;
+            let (p, _) = self.expect_ident("parameter name")?;
             params.push(p.to_string());
             if self.eat(&Token::Comma).is_none() {
                 break;
@@ -346,11 +376,14 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_let_stmt(&mut self) -> Option<Stmt> {
-        let (name, _) = self.eat_ident()?;
+        let (name, _) = self.expect_ident("variable name")?;
         self.expect(&Token::Eq)?;
         let value = self.parse_expr()?;
         self.expect(&Token::Semicolon)?;
-        Some(Stmt::Let { name: name.to_string(), value })
+        Some(Stmt::Let {
+            name: name.to_string(),
+            value,
+        })
     }
 
     fn parse_return_stmt(&mut self) -> Option<Stmt> {
@@ -382,7 +415,7 @@ impl<'src> Parser<'src> {
         }
         self.expect(&Token::RBrace)?;
         let alias = if self.eat_ident_ci("as").is_some() {
-            self.eat_ident().map(|(s, _)| s.to_string())
+            Some(self.expect_ident("entry alias after `as`")?.0.to_string())
         } else {
             None
         };
@@ -483,7 +516,7 @@ impl<'src> Parser<'src> {
             None
         };
         let leg_name = if self.eat_ident_ci("as").is_some() {
-            self.eat_ident().map(|(s, _)| s.to_string())
+            Some(self.expect_ident("leg name after `as`")?.0.to_string())
         } else {
             None
         };
@@ -497,7 +530,24 @@ impl<'src> Parser<'src> {
     // ---- expressions ----
 
     fn parse_expr(&mut self) -> Option<SpannedExpr> {
-        self.parse_comparison()
+        let depth = self.depth;
+        let expr = self.nest().and_then(|()| self.parse_comparison());
+        self.depth = depth;
+        expr
+    }
+
+    /// Records one more level of expression nesting. `parse_expr` restores the
+    /// depth when it returns.
+    fn nest(&mut self) -> Option<()> {
+        self.depth += 1;
+        if self.depth > MAX_EXPR_DEPTH {
+            self.errors.push(Diagnostic::new(
+                self.peek_span(),
+                "expression is nested too deeply",
+            ));
+            return None;
+        }
+        Some(())
     }
 
     fn parse_comparison(&mut self) -> Option<SpannedExpr> {
@@ -513,6 +563,7 @@ impl<'src> Parser<'src> {
                 _ => break,
             };
             self.advance();
+            self.nest()?;
             let right = self.parse_sum()?;
             let span = Span::new(left.1.start, right.1.end);
             left = (Box::new(Expr::Bin(left, op, right)), span);
@@ -529,6 +580,7 @@ impl<'src> Parser<'src> {
                 _ => break,
             };
             self.advance();
+            self.nest()?;
             let right = self.parse_product()?;
             let span = Span::new(left.1.start, right.1.end);
             left = (Box::new(Expr::Bin(left, op, right)), span);
@@ -545,6 +597,7 @@ impl<'src> Parser<'src> {
                 _ => break,
             };
             self.advance();
+            self.nest()?;
             let right = self.parse_unary()?;
             let span = Span::new(left.1.start, right.1.end);
             left = (Box::new(Expr::Bin(left, op, right)), span);
@@ -554,6 +607,7 @@ impl<'src> Parser<'src> {
 
     fn parse_unary(&mut self) -> Option<SpannedExpr> {
         if let Some(minus_span) = self.eat(&Token::Minus) {
+            self.nest()?;
             let inner = self.parse_unary()?;
             let span = Span::new(minus_span.start, inner.1.end);
             Some((Box::new(Expr::Neg(inner)), span))
@@ -691,7 +745,7 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_colon_path(&mut self) -> Option<Path> {
-        let (first, _) = self.eat_ident()?;
+        let (first, _) = self.expect_ident("account name")?;
         let mut parts = vec![first.to_string()];
         while self.eat(&Token::Colon).is_some() {
             if let Some((part, _)) = self.eat_ident() {
@@ -760,7 +814,10 @@ mod tests {
     fn account_init_without_date_is_error() {
         let tokens = crate::lexer::lex("account Assets:Cash = 5000").expect("lexer errored");
         let errs = parse(tokens).unwrap_err();
-        assert!(errs.iter().any(|d| d.message.contains("opening balance requires a date")));
+        assert!(
+            errs.iter()
+                .any(|d| d.message.contains("opening balance requires a date"))
+        );
     }
 
     #[test]
@@ -937,5 +994,33 @@ mod tests {
     fn if_requires_else() {
         let errs = parse_errs("assert that if Assets:Cash > 0 then 1 0");
         assert!(errs.iter().any(|d| d.message.contains("else")));
+    }
+
+    #[test]
+    fn malformed_declarations_are_never_dropped_silently() {
+        let cases = [
+            ("param 5 = 3", "expected param name"),
+            ("schedule 5 = daily", "expected schedule name"),
+            ("account 5", "expected account name"),
+            ("fn 5(x) { x }", "expected function name"),
+            ("fn f(1) { 2 }", "expected parameter name"),
+            ("fn f(x) { let 5 = x; x }", "expected variable name"),
+            (
+                "entry monthly \"x\" { A = 1\nB } as 5",
+                "expected entry alias",
+            ),
+            ("entry monthly \"x\" { A = 1 as 5\nB }", "expected leg name"),
+            ("account A\nparam", "expected param name"),
+        ];
+        for (src, expected) in cases {
+            let tokens = crate::lexer::lex(src).expect("lexer errored");
+            let Err(errs) = parse(tokens) else {
+                panic!("`{src}` parsed without errors");
+            };
+            assert!(
+                errs.iter().any(|d| d.message.contains(expected)),
+                "`{src}`: expected an error containing {expected:?}, got {errs:?}"
+            );
+        }
     }
 }

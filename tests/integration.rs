@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-use saldo::{run, RunOpts};
+use saldo::{RunOpts, run};
 
 fn d(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
@@ -178,7 +178,12 @@ fn opening_balance_before_sim_start_warms_up() {
     // Simulate from 2025-01-01, with opening on 2024-01-01.
     // The warm-up should apply 12 monthly entries, so opening at 2025-01-01 is 1000 + 12*500 = 7000.
     let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
-    let opening_cash = output.log.opening.get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()])).copied().unwrap_or_default();
+    let opening_cash = output
+        .log
+        .opening
+        .get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()]))
+        .copied()
+        .unwrap_or_default();
     assert_eq!(opening_cash, rust_decimal::Decimal::new(7000, 0));
 }
 
@@ -196,9 +201,11 @@ fn reference_before_opening_date_is_error() {
     // Simulation starts 2025-01-01, before Assets:Cash opens on 2025-06-01.
     // The entry fires in January and references Assets:Cash before it opens.
     let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(errors.iter().any(
-        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("opens on"))
-    ));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("opens on")))
+    );
 }
 
 // --- user-defined functions ---
@@ -278,13 +285,17 @@ fn fn_with_time_varying_param() {
     assert_eq!(output.log.transactions.len(), 12);
     // January: doubled = 200
     let jan = &output.log.transactions[0];
-    let jan_cash = jan.postings.iter()
+    let jan_cash = jan
+        .postings
+        .iter()
         .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
     assert_eq!(jan_cash.1, Decimal::new(200, 0));
     // July: doubled = 400
     let jul = &output.log.transactions[6];
-    let jul_cash = jul.postings.iter()
+    let jul_cash = jul
+        .postings
+        .iter()
         .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
     assert_eq!(jul_cash.1, Decimal::new(400, 0));
@@ -322,7 +333,7 @@ fn fn_calling_builtin() {
         fn positive(x) { return max(x, 0); }
 
         entry monthly \"pay\" {
-          Assets:Cash = positive(-50)
+          Assets:Cash = positive(-50) + positive(30)
           Income:Salary
         }
     ";
@@ -332,7 +343,8 @@ fn fn_calling_builtin() {
         .iter()
         .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
         .unwrap();
-    assert_eq!(posting.1, Decimal::ZERO);
+    // max(-50, 0) + max(30, 0)
+    assert_eq!(posting.1, Decimal::new(30, 0));
 }
 
 #[test]
@@ -383,7 +395,12 @@ fn opening_balance_date_equals_sim_start() {
         }
     ";
     let output = run(src, &opts("2025-03-01", "2025-03-31")).unwrap();
-    let opening_cash = output.log.opening.get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()])).copied().unwrap_or_default();
+    let opening_cash = output
+        .log
+        .opening
+        .get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()]))
+        .copied()
+        .unwrap_or_default();
     assert_eq!(opening_cash, rust_decimal::Decimal::new(500, 0));
 }
 
@@ -444,7 +461,326 @@ fn fn_arity_mismatch_is_rejected() {
         }
     ";
     let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(errors.iter().any(
-        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("argument"))
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("argument")))
+    );
+}
+
+fn has_error(errors: &[saldo::Error], needle: &str) -> bool {
+    errors
+        .iter()
+        .any(|e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains(needle)))
+}
+
+// --- balancing ---
+
+#[test]
+fn unbalanced_explicit_postings_are_rejected() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+
+        entry monthly \"Paycheck\" {
+          Assets:Cash   = 500
+          Income:Salary = -400
+        }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(has_error(&errors, "does not balance"));
+}
+
+#[test]
+fn balanced_explicit_postings_are_accepted() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+
+        entry monthly \"Paycheck\" {
+          Assets:Cash   = 500
+          Income:Salary = -500
+        }
+    ";
+    run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+}
+
+#[test]
+fn single_posting_entry_is_rejected() {
+    let src = "
+        account Assets:Cash
+        entry monthly \"Free money\" { Assets:Cash = 500 }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(has_error(&errors, "at least two postings"));
+}
+
+// --- params & opening balances ---
+
+fn posting(output: &saldo::Output, tx: usize, account: &str) -> Decimal {
+    output.log.transactions[tx]
+        .postings
+        .iter()
+        .find(|(p, _)| p.to_string() == account)
+        .map(|(_, v)| *v)
+        .unwrap_or_else(|| panic!("no posting to {account} in transaction {tx}"))
+}
+
+#[test]
+fn param_is_an_error_once_its_interval_ends() {
+    let src = "
+        account Assets:Cash
+        account Income:Bonus
+        param bonus { from 2025-01-01 to 2025-01-02 = 1000 }
+        entry daily \"Bonus\" {
+          Assets:Cash = bonus
+          Income:Bonus
+        }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-03")).unwrap_err();
+    assert!(has_error(
+        &errors,
+        "param `bonus` has no value on 2025-01-02"
     ));
+}
+
+#[test]
+fn unused_param_without_a_value_is_not_an_error() {
+    let src = "
+        param bonus { from 2025-01-01 to 2025-01-02 = 1000 }
+        param half = bonus / 2
+    ";
+    run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
+}
+
+#[test]
+fn opening_balance_can_reference_a_param() {
+    let src = "
+        param initial = 5_000
+        account Assets:Cash = initial @ 2025-01-01
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
+    let opening = output
+        .log
+        .opening
+        .get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()]));
+    assert_eq!(opening, Some(&Decimal::new(5000, 0)));
+}
+
+#[test]
+fn param_can_read_an_account_once_it_opens() {
+    let src = "
+        account Assets:Savings = 10 @ 2025-01-03
+        account Assets:Cash
+        account Income:Interest
+        param doubled = Assets:Savings * 2
+        entry 2025-01-03 \"Interest\" {
+          Assets:Cash = doubled
+          Income:Interest
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
+    let tx = output
+        .log
+        .transactions
+        .iter()
+        .position(|t| t.label == "Interest")
+        .unwrap();
+    assert_eq!(posting(&output, tx, "Assets:Cash"), Decimal::new(20, 0));
+}
+
+#[test]
+fn account_opening_after_start_gets_an_opening_transaction() {
+    let src = "account Assets:Cash = 1000 @ 2025-01-02";
+    let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
+    let tx = &output.log.transactions[0];
+    assert_eq!(tx.date, d("2025-01-02"));
+    assert_eq!(posting(&output, 0, "Assets:Cash"), Decimal::new(1000, 0));
+    assert_eq!(
+        posting(&output, 0, "Equity:OpeningBalances"),
+        Decimal::new(-1000, 0)
+    );
+}
+
+// --- hostile input ---
+
+#[test]
+fn arithmetic_overflow_is_a_diagnostic() {
+    let src = "
+        account Assets:Cash = 1 @ 2025-01-01
+        account Income:Magic
+        entry daily \"Grow\" {
+          Assets:Cash = Assets:Cash * 1_000_000
+          Income:Magic
+        }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-12-31")).unwrap_err();
+    assert!(has_error(&errors, "overflow"));
+}
+
+#[test]
+fn non_ascii_outside_a_string_is_a_diagnostic() {
+    for src in ["account Café", "param p = 1sé"] {
+        let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+        assert!(has_error(&errors, "unexpected character `é`"), "{src}");
+        // Rendering must not split the multi-byte character.
+        saldo::format_errors("test.saldo", src, &errors);
+    }
+}
+
+#[test]
+fn deeply_nested_expressions_are_rejected() {
+    let parens = format!("param p = {}1{}", "(".repeat(20_000), ")".repeat(20_000));
+    let negations = format!("param p = {}1", "-".repeat(20_000));
+    let chain = format!("param p = {}", vec!["1"; 20_000].join(" + "));
+    for src in [parens, negations, chain] {
+        let errors = run(&src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+        assert!(has_error(&errors, "nested too deeply"));
+    }
+}
+
+#[test]
+fn expressions_near_the_nesting_limit_evaluate() {
+    let src = format!(
+        "param p = {}1{}\nparam q = {}\nassert that p + q == 251",
+        "(".repeat(250),
+        ")".repeat(250),
+        vec!["1"; 250].join(" + "),
+    );
+    run(&src, &opts("2025-01-01", "2025-01-01")).unwrap();
+}
+
+// --- name resolution ---
+
+#[test]
+fn invalid_date_is_a_diagnostic() {
+    let errors = run("param p = 2025-13-01", &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(&errors, "invalid date `2025-13-01`"));
+}
+
+#[test]
+fn fn_named_like_a_builtin_is_rejected() {
+    let errors = run("fn min(a, b) { a + b }", &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(&errors, "same name as a built-in"));
+}
+
+#[test]
+fn param_cycles_are_reported_once_with_their_path() {
+    let src = "
+        param a = b
+        param b = c + 1
+        param c = a
+        param d = a
+        param e = e * 2
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(has_error(
+        &errors,
+        "param `a` depends on itself (a → b → c → a)"
+    ));
+    assert!(has_error(&errors, "param `e` depends on itself (e → e)"));
+}
+
+#[test]
+fn leg_name_conflicting_with_a_later_param_is_rejected() {
+    let src = "
+        account Assets:Cash
+        account Income:Salary
+        entry monthly \"Paycheck\" {
+          Assets:Cash = 10 as rate
+          Income:Salary
+        }
+        param rate = 0.5
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(has_error(&errors, "leg name `rate` conflicts with a param"));
+}
+
+#[test]
+fn leg_name_conflicting_with_an_account_is_rejected() {
+    let src = "
+        account Cash
+        account Income
+        entry monthly \"Paycheck\" {
+          Cash = 10 as Income
+          Income
+        }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(has_error(
+        &errors,
+        "leg name `Income` conflicts with an account"
+    ));
+}
+
+#[test]
+fn referencing_the_auto_balanced_leg_is_rejected() {
+    let src = "
+        account Assets:Cash
+        account Expenses:Tax
+        account Income:Salary
+        entry monthly \"Paycheck\" {
+          Assets:Cash  = 100 + gross
+          Expenses:Tax = 5
+          Income:Salary as gross
+        }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(has_error(&errors, "`gross` is the auto-balanced leg"));
+}
+
+// --- amounts ---
+
+#[test]
+fn clearing_an_empty_account_posts_zero_not_negative_zero() {
+    let src = "
+        account Liabilities:Accrued
+        account Assets:Cash
+        entry daily \"Clear\" {
+          Liabilities:Accrued = all
+          Assets:Cash
+        }
+    ";
+    let ledger = run(src, &opts("2025-01-01", "2025-01-01"))
+        .unwrap()
+        .to_ledger();
+    assert!(
+        !ledger.lines().any(|line| line.ends_with(" -0")),
+        "{ledger}"
+    );
+}
+
+#[test]
+fn entries_that_move_no_money_are_skipped() {
+    let src = "
+        account Liabilities:Accrued = 50 @ 2025-01-01
+        account Assets:Cash
+        entry daily \"Clear\" {
+          Liabilities:Accrued = all
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
+    // Only the first day has a balance to clear.
+    assert_eq!(output.log.transactions.len(), 1);
+    assert_eq!(output.log.transactions[0].date, d("2025-01-01"));
+}
+
+#[test]
+fn opening_balances_are_rounded_like_postings() {
+    let src = "
+        account Liabilities:Accrued = 100 / 3 @ 2025-01-01
+        account Assets:Cash
+        entry daily \"Clear\" {
+          Liabilities:Accrued = all
+          Assets:Cash
+        }
+        assert that Liabilities:Accrued == 0
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
+    assert_eq!(
+        posting(&output, 0, "Liabilities:Accrued"),
+        Decimal::new(-3333, 2)
+    );
 }

@@ -113,10 +113,14 @@ entry daily "Interest accrual" {
 }
 ```
 
-The value of an account reference is the balance at the start of the current
-simulation day, before any entries fire on that day. Within a single entry the
-balance reflects each posting as it is applied, so a later posting in the same
-entry sees an updated value.
+An account reference in an entry reads the current balance. Entries that fire
+on the same day run in declaration order, so a later entry sees the postings of
+earlier ones. Within a single entry, every posting is evaluated against the
+balances from before that entry fired, so one posting never sees another
+posting from the same entry.
+
+Params are evaluated at the start of each day, so a param that reads an account
+sees the balance before any entries fire that day.
 
 ## Declaration order
 
@@ -131,6 +135,7 @@ account Assets:Retirement:Jim   = 45_000   @ 2025-01-01
 account Liabilities:Loan        = -320_000 @ 2025-01-01
 account Income:Gross:Salary:Jim
 account Expenses:Rent
+account Expenses:Interest
 
 param jim_salary     : usd/year = 130_000
 param interest_rate             = 0.065
