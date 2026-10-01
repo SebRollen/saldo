@@ -42,9 +42,9 @@ module.exports = grammar({
 
     // -----------------------------------------------------------------------
     // Param declaration
-    //   param interest_rate = 0.05
-    //   param jim_salary : usd/year {
-    //     from 2025-12-31 to 2026-04-01 = 115_000
+    //   param interest_rate = 5%
+    //   param jim_salary {
+    //     from 2025-12-31 to 2026-04-01 = 115_000 per year
     //   }
     // -----------------------------------------------------------------------
 
@@ -52,7 +52,6 @@ module.exports = grammar({
       seq(
         "param",
         field("name", $.identifier),
-        optional(seq(":", field("unit", $.unit))),
         choice($.const_body, $.schedule_body),
       ),
 
@@ -294,14 +293,6 @@ module.exports = grammar({
     posting_amount: ($) => choice("all", $._expr),
 
     // -----------------------------------------------------------------------
-    // Unit annotation  e.g. `usd`, `usd/year`, `%`
-    // -----------------------------------------------------------------------
-
-    unit: ($) => seq($._unit_atom, optional(seq("/", $._unit_atom))),
-
-    _unit_atom: ($) => choice($.identifier, "%"),
-
-    // -----------------------------------------------------------------------
     // Colon-separated path  e.g. `Assets:Cash`, `Income:Gross:Salary:Jim`
     // -----------------------------------------------------------------------
 
@@ -321,6 +312,8 @@ module.exports = grammar({
         $.binary_expr,
         $.not_expr,
         $.unary_minus,
+        $.percent_expr,
+        $.per_expr,
         $.call_expr,
         $.agg_expr,
         $.colon_path,
@@ -343,7 +336,8 @@ module.exports = grammar({
         ),
       ),
 
-    // Precedence, loosest first: or, and, not, comparisons, + -, * /, unary -.
+    // Precedence, loosest first: or, and, not, comparisons, + -, * /, unary -,
+    // then the postfix `%` and `per <unit>`.
     binary_expr: ($) => {
       const level = (precedence, operator) =>
         prec.left(
@@ -372,6 +366,18 @@ module.exports = grammar({
     not_expr: ($) => prec(3, seq("not", field("operand", $._expr))),
 
     unary_minus: ($) => prec(7, seq("-", field("operand", $._expr))),
+
+    // `6.2%` is 0.062.
+    percent_expr: ($) => prec.left(8, seq(field("operand", $._expr), "%")),
+
+    // `24_500 per year` is an amount per period.
+    per_expr: ($) =>
+      prec.left(
+        8,
+        seq(field("value", $._expr), "per", field("unit", $.time_unit)),
+      ),
+
+    time_unit: (_) => choice("day", "week", "month", "quarter", "year"),
 
     call_expr: ($) =>
       prec(

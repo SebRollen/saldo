@@ -64,6 +64,7 @@
   "and"
   "or"
   "not"
+  "per"
 ] @keyword.operator
 
 ; Operators
@@ -72,7 +73,7 @@
   "==" "!="
   "<" ">" "<=" ">="
   "@"
-  "+" "-" "*" "/"
+  "+" "-" "*" "/" "%"
 ] @operator
 
 ; Literals
@@ -111,8 +112,8 @@
 ; Builtin function calls
 (call_expr function: (identifier) @function.builtin)
 
-; Unit annotations
-(unit) @type
+; Rate units
+(per_expr unit: (time_unit) @type)
 
 ; Brackets and delimiters
 [ "{" "}" "(" ")" ] @punctuation.bracket

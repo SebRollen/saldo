@@ -58,6 +58,14 @@
             "named": true
           },
           {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
             "type": "unary_minus",
             "named": true
           }
@@ -225,6 +233,14 @@
             "named": true
           },
           {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
             "type": "unary_minus",
             "named": true
           }
@@ -288,6 +304,14 @@
           },
           {
             "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
             "named": true
           },
           {
@@ -367,6 +391,14 @@
             "named": true
           },
           {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
             "type": "unary_minus",
             "named": true
           }
@@ -429,6 +461,14 @@
           },
           {
             "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
             "named": true
           },
           {
@@ -515,6 +555,14 @@
         },
         {
           "type": "parenthesized_expr",
+          "named": true
+        },
+        {
+          "type": "per_expr",
+          "named": true
+        },
+        {
+          "type": "percent_expr",
           "named": true
         },
         {
@@ -798,6 +846,14 @@
             "named": true
           },
           {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
             "type": "unary_minus",
             "named": true
           }
@@ -868,6 +924,14 @@
             "named": true
           },
           {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
             "type": "unary_minus",
             "named": true
           }
@@ -918,6 +982,14 @@
             "named": true
           },
           {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
             "type": "unary_minus",
             "named": true
           }
@@ -965,6 +1037,14 @@
           },
           {
             "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
             "named": true
           },
           {
@@ -1044,6 +1124,14 @@
             "named": true
           },
           {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
             "type": "unary_minus",
             "named": true
           }
@@ -1107,6 +1195,14 @@
           },
           {
             "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
             "named": true
           },
           {
@@ -1176,6 +1272,14 @@
             "named": true
           },
           {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
             "type": "unary_minus",
             "named": true
           }
@@ -1233,16 +1337,6 @@
         "types": [
           {
             "type": "identifier",
-            "named": true
-          }
-        ]
-      },
-      "unit": {
-        "multiple": false,
-        "required": false,
-        "types": [
-          {
-            "type": "unit",
             "named": true
           }
         ]
@@ -1312,10 +1406,156 @@
           "named": true
         },
         {
+          "type": "per_expr",
+          "named": true
+        },
+        {
+          "type": "percent_expr",
+          "named": true
+        },
+        {
           "type": "unary_minus",
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "per_expr",
+    "named": true,
+    "fields": {
+      "unit": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "time_unit",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "agg_expr",
+            "named": true
+          },
+          {
+            "type": "binary_expr",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expr",
+            "named": true
+          },
+          {
+            "type": "colon_path",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "if_expr",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
+            "type": "unary_minus",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "percent_expr",
+    "named": true,
+    "fields": {
+      "operand": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "agg_expr",
+            "named": true
+          },
+          {
+            "type": "binary_expr",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expr",
+            "named": true
+          },
+          {
+            "type": "colon_path",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "if_expr",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
+            "type": "unary_minus",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -1403,6 +1643,14 @@
           "named": true
         },
         {
+          "type": "per_expr",
+          "named": true
+        },
+        {
+          "type": "percent_expr",
+          "named": true
+        },
+        {
           "type": "unary_minus",
           "named": true
         }
@@ -1455,6 +1703,14 @@
           },
           {
             "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
             "named": true
           },
           {
@@ -1565,6 +1821,11 @@
     }
   },
   {
+    "type": "time_unit",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "unary_minus",
     "named": true,
     "fields": {
@@ -1613,26 +1874,19 @@
             "named": true
           },
           {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
             "type": "unary_minus",
             "named": true
           }
         ]
       }
-    }
-  },
-  {
-    "type": "unit",
-    "named": true,
-    "fields": {},
-    "children": {
-      "multiple": true,
-      "required": false,
-      "types": [
-        {
-          "type": "identifier",
-          "named": true
-        }
-      ]
     }
   },
   {
@@ -1981,6 +2235,10 @@
   },
   {
     "type": "param",
+    "named": false
+  },
+  {
+    "type": "per",
     "named": false
   },
   {
