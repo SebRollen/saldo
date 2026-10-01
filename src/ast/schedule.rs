@@ -216,7 +216,8 @@ impl Schedule {
             },
             Period::Week { on } => {
                 let dow_ok = if on.is_empty() {
-                    Dow::Monday.matches(t)
+                    // Like other periods, default to the last day: Sunday.
+                    Dow::Sunday.matches(t)
                 } else {
                     on.iter().any(|dow| dow.matches(t))
                 };
@@ -398,9 +399,10 @@ mod tests {
                 #[test]
                 fn matches_without_on() {
                     let sched = schedule(Period::Week { on: vec![] });
-                    assert!(sched.matches(date(2024, 12, 30))); // monday
+                    assert!(!sched.matches(date(2024, 12, 30))); // monday
                     assert!(!sched.matches(date(2025, 1, 1))); // wednesday
-                    assert!(sched.matches(date(2025, 1, 6))); // monday
+                    assert!(sched.matches(date(2025, 1, 5))); // sunday
+                    assert!(sched.matches(date(2025, 1, 12))); // sunday
                 }
 
                 #[test]
@@ -949,15 +951,16 @@ mod tests {
             mod week {
                 use super::*;
 
-                // start = Mon 2025-01-06; every 2 weeks (no explicit on → defaults to Monday)
+                // start = Mon 2025-01-06; every 2 weeks (no explicit on → defaults to Sunday)
                 #[test]
-                fn every_2_weeks_default_monday() {
+                fn every_2_weeks_default_sunday() {
                     let sched = schedule(2, Period::Week { on: vec![] }, date(2025, 1, 6));
-                    assert!(sched.matches(date(2025, 1, 6))); // week 0 — Mon
-                    assert!(!sched.matches(date(2025, 1, 13))); // week 1 — Mon, skip
-                    assert!(sched.matches(date(2025, 1, 20))); // week 2 — Mon
-                    assert!(!sched.matches(date(2025, 1, 27))); // week 3 — Mon, skip
-                    assert!(sched.matches(date(2025, 2, 3))); // week 4 — Mon
+                    assert!(!sched.matches(date(2025, 1, 6))); // week 0 — Mon
+                    assert!(sched.matches(date(2025, 1, 12))); // week 0 — Sun
+                    assert!(!sched.matches(date(2025, 1, 19))); // week 1 — Sun, skip
+                    assert!(sched.matches(date(2025, 1, 26))); // week 2 — Sun
+                    assert!(!sched.matches(date(2025, 2, 2))); // week 3 — Sun, skip
+                    assert!(sched.matches(date(2025, 2, 9))); // week 4 — Sun
                 }
 
                 #[test]
@@ -997,10 +1000,10 @@ mod tests {
                 #[test]
                 fn every_3_weeks() {
                     let sched = schedule(3, Period::Week { on: vec![] }, date(2025, 1, 6));
-                    assert!(sched.matches(date(2025, 1, 6))); // week 0
-                    assert!(!sched.matches(date(2025, 1, 13))); // week 1
-                    assert!(!sched.matches(date(2025, 1, 20))); // week 2
-                    assert!(sched.matches(date(2025, 1, 27))); // week 3
+                    assert!(sched.matches(date(2025, 1, 12))); // week 0
+                    assert!(!sched.matches(date(2025, 1, 19))); // week 1
+                    assert!(!sched.matches(date(2025, 1, 26))); // week 2
+                    assert!(sched.matches(date(2025, 2, 2))); // week 3
                 }
             }
         }

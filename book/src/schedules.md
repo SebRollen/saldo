@@ -26,7 +26,7 @@ when no further detail is given.
 | Keyword | Fires on |
 |---------|----------|
 | `daily` | Every day |
-| `weekly` | Every Monday |
+| `weekly` | Every Sunday |
 | `monthly` | Last day of every month |
 | `quarterly` | Mar 31, Jun 30, Sep 30, Dec 31 |
 | `yearly` / `annually` | Dec 31 |
@@ -61,7 +61,7 @@ every 3 days from 2026-01-01
 ```
 
 **`week [on <days>]`** — fires every week on the given day(s). Without `on`,
-defaults to Monday:
+defaults to Sunday:
 
 ```
 every week
@@ -145,10 +145,13 @@ A comma- or `and`-separated list of ISO dates fires on exactly those days:
 
 ## Default behaviors summary
 
+Without an `on` clause, every period fires on its last day. Weeks run
+Monday to Sunday.
+
 | Form | Default firing day |
 |------|--------------------|
-| `weekly` | Monday |
-| `every week` | Monday |
+| `weekly` | Sunday |
+| `every week` | Sunday |
 | `monthly` | Last day of month |
 | `every month` | Last day of month |
 | `quarterly` | Quarter-end (Mar 31 / Jun 30 / Sep 30 / Dec 31) |
