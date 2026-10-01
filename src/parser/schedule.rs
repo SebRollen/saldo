@@ -242,7 +242,7 @@ impl<'src> Parser<'src> {
             self.advance();
             return Some(Nth::new(n));
         }
-        if let Token::Float(n) = self.peek() {
+        if let Token::Number(n) = self.peek() {
             let n = *n;
             if n.fract() == Decimal::ZERO
                 && n >= Decimal::from(2)

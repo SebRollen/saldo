@@ -477,25 +477,7 @@ impl<'a> Resolver<'a> {
                 ));
             }
             if let Expr::Call(name, args) = sub.0.as_ref() {
-                if let Some((_, arity)) = BUILTINS.iter().find(|(n, _)| *n == name.as_str()) {
-                    if args.len() != *arity {
-                        let argument_str = if *arity == 1 { "argument" } else { "arguments" };
-                        local_diags.push(Diagnostic::new(
-                            sub.1,
-                            format!("`{name}` takes {arity} {argument_str}, got {}", args.len()),
-                        ));
-                    }
-                } else if let Some(def) = fns.get(name.as_str()) {
-                    if args.len() != def.params.len() {
-                        let expected = def.params.len();
-                        local_diags.push(Diagnostic::new(
-                            sub.1,
-                            format!("`{name}` takes {expected} argument(s), got {}", args.len()),
-                        ));
-                    }
-                } else {
-                    local_diags.push(Diagnostic::new(sub.1, format!("unknown function `{name}`")));
-                }
+                local_diags.extend(check_call(name, args.len(), sub.1, fns));
             }
             if let Expr::ParamAgg(entry_opt, leg, _) = sub.0.as_ref() {
                 let key: (String, String) = match entry_opt {
@@ -532,8 +514,10 @@ impl<'a> Resolver<'a> {
     fn into_model(self) -> Model {
         Model {
             stocks: self.stocks,
-            params: topo_sort_params(self.params),
-            fns: topo_sort_fns(self.fns),
+            params: topo_sort_by_deps(self.params, collect_param_deps),
+            fns: topo_sort_by_deps(self.fns, |def, known| {
+                collect_fn_call_deps(&def.body, known)
+            }),
             entries: self.entries,
             asserts: self.asserts,
             leg_names: self.leg_names,
@@ -616,51 +600,47 @@ fn find_cycle<'a>(start: &'a str, deps: &'a HashMap<&str, Vec<String>>) -> Optio
     None
 }
 
-/// Orders params so each comes after the params it depends on. Cycles are
-/// reported by `check_param_cycles`.
-fn topo_sort_params(mut map: HashMap<String, ParamBody>) -> IndexMap<String, ParamBody> {
-    let known: HashSet<String> = map.keys().cloned().collect();
-
-    // Assign stable integer indices in sorted key order for deterministic output.
-    let mut names: Vec<String> = map.keys().cloned().collect();
+/// Orders `items` so each comes after the items it depends on, as reported by
+/// `deps(item, known_names)`. Ties are broken by name for deterministic output.
+/// Members of cycles (reported elsewhere) are appended at the end.
+fn topo_sort_by_deps<T>(
+    mut items: HashMap<String, T>,
+    deps: impl Fn(&T, &HashSet<String>) -> Vec<String>,
+) -> IndexMap<String, T> {
+    let known: HashSet<String> = items.keys().cloned().collect();
+    let mut names: Vec<String> = items.keys().cloned().collect();
     names.sort();
     let idx: HashMap<&str, usize> = names
         .iter()
         .enumerate()
         .map(|(i, n)| (n.as_str(), i))
         .collect();
-    let n = names.len();
 
-    let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
-    for (name, param) in &map {
+    let mut dependents: Vec<Vec<usize>> = vec![vec![]; names.len()];
+    for (name, item) in &items {
         let i = idx[name.as_str()];
-        for dep in collect_param_deps(param, &known) {
-            let j = idx[dep.as_str()];
-            dependents[j].push(i);
+        for dep in deps(item, &known) {
+            dependents[idx[dep.as_str()]].push(i);
         }
     }
-    // Sort each adjacency list so newly-ready nodes are enqueued in key order.
-    for deps in &mut dependents {
-        deps.sort();
+    // Sort each adjacency list so newly-ready nodes are enqueued in name order.
+    for d in &mut dependents {
+        d.sort();
     }
 
-    let (order, had_cycle) = crate::util::topological_sort(&dependents);
-
-    let mut result: IndexMap<String, ParamBody> = IndexMap::new();
+    let (order, _) = crate::util::topological_sort(&dependents);
+    let mut result = IndexMap::new();
     for i in order {
         let name = &names[i];
-        if let Some(param) = map.remove(name) {
-            result.insert(name.clone(), param);
+        if let Some(item) = items.remove(name) {
+            result.insert(name.clone(), item);
         }
     }
-    if had_cycle {
-        let mut remaining: Vec<String> = map.keys().cloned().collect();
-        remaining.sort();
-        for name in remaining {
-            if let Some(param) = map.remove(&name) {
-                result.insert(name, param);
-            }
-        }
+    let mut remaining: Vec<String> = items.keys().cloned().collect();
+    remaining.sort();
+    for name in remaining {
+        let item = items.remove(&name).expect("name taken from items");
+        result.insert(name, item);
     }
     result
 }
@@ -835,6 +815,30 @@ fn validate_fn_bodies(fns: &HashMap<String, FnDef>, diags: &mut Vec<Diagnostic>)
     }
 }
 
+/// Checks that `name` is a builtin or user function taking `arg_count` arguments.
+fn check_call(
+    name: &str,
+    arg_count: usize,
+    span: Span,
+    user_fns: &HashMap<String, FnDef>,
+) -> Option<Diagnostic> {
+    let arity = match BUILTINS.iter().find(|(n, _)| *n == name) {
+        Some((_, arity)) => *arity,
+        None => match user_fns.get(name) {
+            Some(def) => def.params.len(),
+            None => return Some(Diagnostic::new(span, format!("unknown function `{name}`"))),
+        },
+    };
+    if arg_count == arity {
+        return None;
+    }
+    let word = if arity == 1 { "argument" } else { "arguments" };
+    Some(Diagnostic::new(
+        span,
+        format!("`{name}` takes {arity} {word}, got {arg_count}"),
+    ))
+}
+
 fn validate_fn_expr(
     expr: &SpannedExpr,
     scope: &HashSet<String>,
@@ -855,31 +859,7 @@ fn validate_fn_expr(
             }
         }
         Expr::Call(callee, args) => {
-            if let Some((_, arity)) = BUILTINS.iter().find(|(n, _)| *n == callee.as_str()) {
-                if args.len() != *arity {
-                    let word = if *arity == 1 { "argument" } else { "arguments" };
-                    diags.push(Diagnostic::new(
-                        sub.1,
-                        format!("`{callee}` takes {arity} {word}, got {}", args.len()),
-                    ));
-                }
-            } else if let Some(def) = user_fns.get(callee.as_str()) {
-                if args.len() != def.params.len() {
-                    let expected = def.params.len();
-                    diags.push(Diagnostic::new(
-                        sub.1,
-                        format!(
-                            "`{callee}` takes {expected} argument(s), got {}",
-                            args.len()
-                        ),
-                    ));
-                }
-            } else {
-                diags.push(Diagnostic::new(
-                    sub.1,
-                    format!("unknown function `{callee}`"),
-                ));
-            }
+            diags.extend(check_call(callee, args.len(), sub.1, user_fns));
         }
         Expr::ParamAgg(..) => {
             diags.push(Diagnostic::new(
@@ -889,51 +869,6 @@ fn validate_fn_expr(
         }
         _ => {}
     });
-}
-
-fn topo_sort_fns(mut map: HashMap<String, FnDef>) -> IndexMap<String, FnDef> {
-    let known: HashSet<String> = map.keys().cloned().collect();
-
-    let mut names: Vec<String> = map.keys().cloned().collect();
-    names.sort();
-    let idx: HashMap<&str, usize> = names
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.as_str(), i))
-        .collect();
-    let n = names.len();
-
-    let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
-    for (name, def) in &map {
-        let i = idx[name.as_str()];
-        for dep in collect_fn_call_deps(&def.body, &known) {
-            let j = idx[dep.as_str()];
-            dependents[j].push(i);
-        }
-    }
-    for deps in &mut dependents {
-        deps.sort();
-    }
-
-    let (order, had_cycle) = crate::util::topological_sort(&dependents);
-
-    let mut result: IndexMap<String, FnDef> = IndexMap::new();
-    for i in order {
-        let name = &names[i];
-        if let Some(def) = map.remove(name) {
-            result.insert(name.clone(), def);
-        }
-    }
-    if had_cycle {
-        let mut remaining: Vec<String> = map.keys().cloned().collect();
-        remaining.sort();
-        for name in remaining {
-            if let Some(def) = map.remove(&name) {
-                result.insert(name, def);
-            }
-        }
-    }
-    result
 }
 
 #[cfg(test)]

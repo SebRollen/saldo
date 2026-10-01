@@ -7,7 +7,7 @@ use std::fmt;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token<'src> {
-    Float(Decimal),
+    Number(Decimal),
     Date(NaiveDate),
     Ident(&'src str),
     Str(&'src str),
@@ -54,7 +54,7 @@ pub enum Token<'src> {
 impl<'src> fmt::Display for Token<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Token::Float(n) => write!(f, "{n}"),
+            Token::Number(n) => write!(f, "{n}"),
             Token::Date(d) => write!(f, "{}", d.format("%Y-%m-%d")),
             Token::Ident(s) => write!(f, "{s}"),
             Token::Str(s) => write!(f, "\"{s}\""),
@@ -192,16 +192,21 @@ impl<'src> Lexer<'src> {
     }
 
     fn lex_string(&mut self) -> Result<Spanned<Token<'src>>, Diagnostic> {
+        // Strings can't span lines: a newline in an entry label would break
+        // the ledger output, and stopping at the line keeps errors local.
         loop {
-            if self.at_end() {
-                return Err(Diagnostic::new(self.current_span(), "Unterminated string."));
+            match self.peek() {
+                None | Some(b'\n') => {
+                    return Err(Diagnostic::new(self.current_span(), "unterminated string"));
+                }
+                Some(b'"') => {
+                    self.advance();
+                    break;
+                }
+                Some(_) => {
+                    self.advance();
+                }
             }
-
-            if *self.peek().expect("already checked at_end") == b'"' {
-                self.advance();
-                break;
-            }
-            self.advance();
         }
 
         // guaranteed to be a char index boundary since we just progressed past "
@@ -287,7 +292,7 @@ impl<'src> Lexer<'src> {
         let Ok(val) = num_str.parse::<Decimal>() else {
             return Err(Diagnostic::new(self.current_span(), "not a valid decimal"));
         };
-        self.emit_token(Token::Float(val))
+        self.emit_token(Token::Number(val))
     }
 
     fn lex_identifier(&mut self) -> Result<Spanned<Token<'src>>, Diagnostic> {
@@ -450,6 +455,13 @@ mod tests {
     }
 
     #[test]
+    fn strings_end_at_the_line() {
+        let errs = Lexer::new("\"Pay\nday\" 1").lex().unwrap_err();
+        assert_eq!(errs[0].message, "unterminated string");
+        assert_eq!(errs[0].span, Span::new(0, 4));
+    }
+
+    #[test]
     fn rejects_invalid_dates() {
         for src in ["2025-13-01", "2025-02-30", "2025-00-10"] {
             let errs = Lexer::new(src).lex().unwrap_err();
@@ -470,9 +482,9 @@ mod tests {
         assert_eq!(
             toks,
             vec![
-                Token::Float(Decimal::new(300_000, 0)),
-                Token::Float(Decimal::new(5, 2)),
-                Token::Float(Decimal::new(12000050, 2)),
+                Token::Number(Decimal::new(300_000, 0)),
+                Token::Number(Decimal::new(5, 2)),
+                Token::Number(Decimal::new(12000050, 2)),
             ]
         );
     }
@@ -489,6 +501,6 @@ mod tests {
     #[test]
     fn line_comment_drops_to_newline() {
         let toks = lex("// a comment\n42");
-        assert_eq!(toks, vec![Token::Float(Decimal::new(42, 0))]);
+        assert_eq!(toks, vec![Token::Number(Decimal::new(42, 0))]);
     }
 }

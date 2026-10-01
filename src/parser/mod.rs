@@ -659,7 +659,7 @@ impl<'src> Parser<'src> {
             return Some((Box::new(Expr::Bool(false)), s));
         }
 
-        if let Token::Float(f) = self.peek() {
+        if let Token::Number(f) = self.peek() {
             let f = *f;
             let (_, s) = self.advance();
             return Some((Box::new(Expr::Num(f)), s));
