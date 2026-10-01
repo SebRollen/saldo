@@ -139,6 +139,9 @@ impl<'a> Resolver<'a> {
                 Decl::Schedule { .. } => {
                     // already processed in collect_schedules
                 }
+                Decl::Import { .. } => {
+                    // replaced by the imported declarations when loading
+                }
                 Decl::Param { name, body } => {
                     if let Some(prev) = self.param_spans.get(name) {
                         self.diags.push(
@@ -862,7 +865,7 @@ fn validate_fn_expr(
 mod tests {
     use super::*;
     fn parse(src: &str) -> Program {
-        let tokens = crate::lexer::lex(src).expect("lex failed");
+        let tokens = crate::lexer::lex(src, 0).expect("lex failed");
         crate::parser::parse(tokens).expect("parse failed")
     }
 

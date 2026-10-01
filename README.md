@@ -202,6 +202,18 @@ fn net(gross, rate) {
 Functions are pure: they can only use their parameters and local `let`
 bindings, and may not recurse. The final expression is the return value.
 
+### Imports
+
+```
+import "salary.saldo"
+import "loans/car.saldo"
+```
+
+`import` splits a model across files. Paths are relative to the importing
+file. All files share one set of names, so `loans/car.saldo` can post to an
+`Assets:Cash` declared in the main file. Each file is read once however often
+it's imported, and its declarations go where it's first imported.
+
 ## Building
 
 ```

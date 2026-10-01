@@ -36,6 +36,10 @@
         {
           "type": "SYMBOL",
           "name": "fn_decl"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "import_decl"
         }
       ]
     },
@@ -502,6 +506,23 @@
         {
           "type": "STRING",
           "value": ";"
+        }
+      ]
+    },
+    "import_decl": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "import"
+        },
+        {
+          "type": "FIELD",
+          "name": "path",
+          "content": {
+            "type": "SYMBOL",
+            "name": "string"
+          }
         }
       ]
     },

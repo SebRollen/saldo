@@ -1101,7 +1101,7 @@ mod tests {
 
         fn schedule(src: &str) -> Schedule {
             let src = format!("schedule s = {src}");
-            let tokens = crate::lexer::lex(&src).unwrap();
+            let tokens = crate::lexer::lex(&src, 0).unwrap();
             match crate::parser::parse(tokens).unwrap().decls.remove(0).0 {
                 Decl::Schedule { schedule, .. } => schedule,
                 _ => unreachable!(),

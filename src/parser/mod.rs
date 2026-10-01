@@ -202,6 +202,7 @@ impl<'src> Parser<'src> {
                 | Token::Assert
                 | Token::Entry
                 | Token::Fn
+                | Token::Import
                 | Token::Param
                 | Token::Schedule => return,
                 _ => {
@@ -236,6 +237,10 @@ impl<'src> Parser<'src> {
             Token::Fn => {
                 self.advance();
                 return self.parse_fn_decl();
+            }
+            Token::Import => {
+                self.advance();
+                return self.parse_import_decl();
             }
             Token::Eof => return None,
             _ => {}
@@ -372,6 +377,19 @@ impl<'src> Parser<'src> {
             return None;
         }
         Some(Decl::Fn { name, params, body })
+    }
+
+    fn parse_import_decl(&mut self) -> Option<Decl> {
+        if let Token::Str(path) = self.peek() {
+            let path = path.to_string();
+            let (_, span) = self.advance();
+            return Some(Decl::Import { path: (path, span) });
+        }
+        self.errors.push(Diagnostic::new(
+            self.peek_span(),
+            "expected a file path in quotes after `import`",
+        ));
+        None
     }
 
     fn parse_let_stmt(&mut self) -> Option<Stmt> {
@@ -856,7 +874,7 @@ mod tests {
     use chrono::NaiveDate;
 
     fn parse_prog(src: &str) -> Program {
-        let tokens = crate::lexer::lex(src).expect("lexer errored");
+        let tokens = crate::lexer::lex(src, 0).expect("lexer errored");
         parse(tokens).unwrap_or_else(|errs| panic!("parse errs: {errs:?}"))
     }
 
@@ -889,7 +907,7 @@ mod tests {
 
     #[test]
     fn account_init_without_date_is_error() {
-        let tokens = crate::lexer::lex("account Assets:Cash = 5000").expect("lexer errored");
+        let tokens = crate::lexer::lex("account Assets:Cash = 5000", 0).expect("lexer errored");
         let errs = parse(tokens).unwrap_err();
         assert!(
             errs.iter()
@@ -1083,6 +1101,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_import() {
+        let prog = parse_prog("import \"loans.saldo\"\naccount A");
+        let Decl::Import { path } = &prog.decls[0].0 else {
+            panic!("expected import");
+        };
+        assert_eq!(path, &("loans.saldo".to_string(), Span::new(7, 20)));
+        let errs = parse_errs("import loans\naccount A");
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].message.contains("file path"), "{errs:?}");
+    }
+
+    #[test]
     fn parses_min_call() {
         let prog = parse_prog("entry monthly \"f\" { A:B = min(A:Cash, 2_000)\nC:D }");
         match &prog.decls[0].0 {
@@ -1112,7 +1142,7 @@ mod tests {
     }
 
     fn parse_errs(src: &str) -> Vec<Diagnostic> {
-        let tokens = crate::lexer::lex(src).expect("lexer errored");
+        let tokens = crate::lexer::lex(src, 0).expect("lexer errored");
         parse(tokens).unwrap_err()
     }
 
@@ -1152,7 +1182,7 @@ mod tests {
             ("account A\nparam", "expected param name"),
         ];
         for (src, expected) in cases {
-            let tokens = crate::lexer::lex(src).expect("lexer errored");
+            let tokens = crate::lexer::lex(src, 0).expect("lexer errored");
             let Err(errs) = parse(tokens) else {
                 panic!("`{src}` parsed without errors");
             };

@@ -396,7 +396,7 @@ mod tests {
     use crate::Span;
 
     fn parse_schedule_str(src: &str) -> Result<Schedule, Vec<Diagnostic>> {
-        let tokens = crate::lexer::lex(src)?;
+        let tokens = crate::lexer::lex(src, 0)?;
         let mut p = Parser::new(tokens);
         let sched = p.parse_schedule_literal();
         if sched.is_none() && p.errors.is_empty() {

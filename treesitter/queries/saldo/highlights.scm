@@ -10,6 +10,8 @@
   "let"
 ] @keyword
 
+"import" @keyword.import
+
 "return" @keyword.return
 
 ; Temporal / interval keywords

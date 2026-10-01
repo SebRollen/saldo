@@ -23,6 +23,7 @@ module.exports = grammar({
         $.entry_decl,
         $.assert_decl,
         $.fn_decl,
+        $.import_decl,
       ),
 
     // -----------------------------------------------------------------------
@@ -152,6 +153,13 @@ module.exports = grammar({
       seq("let", field("name", $.identifier), "=", field("value", $._expr), ";"),
 
     return_stmt: ($) => seq("return", field("value", $._expr), ";"),
+
+    // -----------------------------------------------------------------------
+    // Import declaration
+    //   import "loans/car.saldo"
+    // -----------------------------------------------------------------------
+
+    import_decl: ($) => seq("import", field("path", $.string)),
 
     // -----------------------------------------------------------------------
     // Schedule reference — literal schedule or a named schedule identifier

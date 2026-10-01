@@ -5,6 +5,7 @@ mod eval;
 mod lexer;
 mod parser;
 mod resolver;
+mod sources;
 mod typecheck;
 mod units;
 mod util;
@@ -16,6 +17,7 @@ use std::io;
 pub use ast::{Path, Span};
 pub use errors::{Diagnostic, Error};
 pub use eval::{DaySnapshot, SimLog, Transaction};
+pub use sources::Sources;
 
 pub struct RunOpts {
     pub from: NaiveDate,
@@ -56,21 +58,39 @@ impl Output {
     }
 }
 
+/// Simulates a model given as text. It can't import other files; use
+/// [`run_file`] for that.
 pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
+    check_range(opts)?;
+    let program = sources::load_text(&mut Sources::default(), src)?;
+    simulate(&program, opts)
+}
+
+/// Simulates the model in the file at `path`, reading the files it imports
+/// relative to the file that imports them. `sources` collects the text of every
+/// file read, for [`Sources::format_errors`] and [`Sources::format_warnings`].
+pub fn run_file(
+    path: impl AsRef<std::path::Path>,
+    opts: &RunOpts,
+    sources: &mut Sources,
+) -> Result<Output, Vec<Error>> {
+    check_range(opts)?;
+    let program = sources::load_file(sources, path.as_ref())?;
+    simulate(&program, opts)
+}
+
+fn check_range(opts: &RunOpts) -> Result<(), Vec<Error>> {
     if opts.from > opts.to {
         return Err(vec![Error::InvalidDateRange {
             from: opts.from,
             to: opts.to,
         }]);
     }
+    Ok(())
+}
 
-    let tokens = lexer::lex(src)
-        .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
-
-    let program = parser::parse(tokens)
-        .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
-
-    let model = resolver::resolve(&program)
+fn simulate(program: &ast::Program, opts: &RunOpts) -> Result<Output, Vec<Error>> {
+    let model = resolver::resolve(program)
         .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
 
     let mut program = compile::compile(&model);
@@ -96,32 +116,16 @@ pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
     })
 }
 
-/// Renders errors for display. `color` enables ANSI colors.
+/// Renders errors from [`run`] for display, naming the model `path`. `color`
+/// enables ANSI colors.
 pub fn format_errors(path: &str, src: &str, errors: &[Error], color: bool) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-    for e in errors {
-        match e {
-            Error::InvalidDateRange { from, to } => {
-                writeln!(out, "--from ({from}) is after --to ({to})").ok();
-            }
-            Error::Diagnostic(d) => {
-                out.push_str(&errors::format_diagnostics(
-                    path,
-                    src,
-                    std::slice::from_ref(d),
-                    errors::Severity::Error,
-                    color,
-                ));
-            }
-        }
-    }
-    out
+    Sources::single(path, src).format_errors(errors, color)
 }
 
-/// Renders warnings for display. `color` enables ANSI colors.
+/// Renders warnings from [`run`] for display, naming the model `path`. `color`
+/// enables ANSI colors.
 pub fn format_warnings(path: &str, src: &str, warnings: &[Diagnostic], color: bool) -> String {
-    errors::format_diagnostics(path, src, warnings, errors::Severity::Warning, color)
+    Sources::single(path, src).format_warnings(warnings, color)
 }
 
 fn emit_ledger(out: &mut impl io::Write, accounts: &[Path], log: &eval::SimLog) -> io::Result<()> {
@@ -201,13 +205,16 @@ mod doc_tests {
         ("asserts.md", include_str!("../book/src/asserts.md")),
         ("entries.md", include_str!("../book/src/entries.md")),
         ("fns.md", include_str!("../book/src/fns.md")),
+        ("imports.md", include_str!("../book/src/imports.md")),
         ("intro.md", include_str!("../book/src/intro.md")),
         ("params.md", include_str!("../book/src/params.md")),
         ("schedules.md", include_str!("../book/src/schedules.md")),
         ("simulation.md", include_str!("../book/src/simulation.md")),
     ];
 
-    const KEYWORDS: &[&str] = &["account", "assert", "entry", "fn", "param", "schedule"];
+    const KEYWORDS: &[&str] = &[
+        "account", "assert", "entry", "fn", "import", "param", "schedule",
+    ];
 
     /// Fenced code blocks that look like saldo declarations, skipping syntax
     /// templates such as `account <path>`.
@@ -244,7 +251,7 @@ mod doc_tests {
         for (name, doc) in DOCS {
             for block in declaration_blocks(doc) {
                 checked += 1;
-                let result = crate::lexer::lex(block).and_then(crate::parser::parse);
+                let result = crate::lexer::lex(block, 0).and_then(crate::parser::parse);
                 if let Err(diags) = result {
                     failures.push(format!("{name}:\n{block}\n{diags:?}"));
                 }

@@ -1663,3 +1663,175 @@ fn fill_warns_when_the_simulation_starts_partway_through_its_period() {
     let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
     assert!(output.warnings.is_empty());
 }
+
+// --- imports ---
+
+/// Writes `files` into a fresh directory named after `test` and returns it.
+fn write_model(test: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(test);
+    std::fs::remove_dir_all(&dir).ok();
+    for (name, text) in files {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    dir
+}
+
+const LOAN_ACCOUNTS: &str = "
+    account Liabilities:Loan = -10_000 @ 2025-01-01
+    account Expenses:Interest
+";
+
+const LOAN_PAYMENTS: &str = "
+    param loan_rate = 6% per year
+    entry monthly \"Loan payment\" {
+      Liabilities:Loan  = 500
+      Expenses:Interest = -Liabilities:Loan * loan_rate
+      Assets:Cash
+    }
+";
+
+#[test]
+fn imported_files_join_the_model_where_they_are_imported() {
+    let main = "
+        account Assets:Cash = 20_000 @ 2025-01-01
+        import \"loans/payments.saldo\"
+        account Income:Salary
+        assert that Assets:Cash >= 0
+    ";
+    // Imports are relative to the file that imports them, and can use
+    // anything declared in any other file.
+    let payments = format!("import \"accounts.saldo\"\n{LOAN_PAYMENTS}");
+    let dir = write_model(
+        "imports_join",
+        &[
+            ("main.saldo", main),
+            ("loans/payments.saldo", &payments),
+            ("loans/accounts.saldo", LOAN_ACCOUNTS),
+        ],
+    );
+    let mut sources = saldo::Sources::default();
+    let range = opts("2025-01-01", "2025-12-31");
+    let output = saldo::run_file(dir.join("main.saldo"), &range, &mut sources).unwrap();
+
+    let single = format!(
+        "account Assets:Cash = 20_000 @ 2025-01-01
+         {LOAN_ACCOUNTS}
+         {LOAN_PAYMENTS}
+         account Income:Salary
+         assert that Assets:Cash >= 0"
+    );
+    let expected = run(&single, &range).unwrap();
+    assert_eq!(output.to_ledger(), expected.to_ledger());
+    assert_eq!(output.to_csv(), expected.to_csv());
+    assert!(output.to_csv().starts_with(
+        r#""date","Assets:Cash","Liabilities:Loan","Expenses:Interest","Income:Salary""#
+    ));
+}
+
+#[test]
+fn files_imported_more_than_once_are_read_once() {
+    // `a` and `b` both import `accounts`, and `b` imports `main` back.
+    let dir = write_model(
+        "imports_once",
+        &[
+            (
+                "main.saldo",
+                "import \"a.saldo\"\nimport \"b.saldo\"\naccount Assets:Cash",
+            ),
+            ("a.saldo", "import \"./accounts.saldo\"\n"),
+            (
+                "b.saldo",
+                &format!("import \"accounts.saldo\"\nimport \"main.saldo\"\n{LOAN_PAYMENTS}"),
+            ),
+            ("accounts.saldo", LOAN_ACCOUNTS),
+        ],
+    );
+    let mut sources = saldo::Sources::default();
+    let output = saldo::run_file(
+        dir.join("main.saldo"),
+        &opts("2025-01-01", "2025-01-31"),
+        &mut sources,
+    )
+    .unwrap();
+    assert_eq!(
+        posting(&output, 0, "Liabilities:Loan"),
+        Decimal::new(500, 0)
+    );
+}
+
+#[test]
+fn errors_name_the_file_they_are_in() {
+    let dir = write_model(
+        "imports_errors",
+        &[
+            (
+                "main.saldo",
+                "import \"loans.saldo\"\naccount Assets:Cash\naccount Liabilities:Loan",
+            ),
+            ("loans.saldo", LOAN_ACCOUNTS),
+        ],
+    );
+    let mut sources = saldo::Sources::default();
+    let main = dir.join("main.saldo");
+    let errors =
+        saldo::run_file(&main, &opts("2025-01-01", "2025-01-01"), &mut sources).unwrap_err();
+    assert!(has_error(&errors, "duplicate account `Liabilities:Loan`"));
+    let rendered = sources.format_errors(&errors, false);
+    let main_name = main.display().to_string();
+    let loans_name = dir.join("loans.saldo").display().to_string();
+    assert!(rendered.contains(&format!("{main_name}:3:1")), "{rendered}");
+    assert!(
+        rendered.contains(&format!("{loans_name}:2:5")),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn errors_in_imported_files_point_into_them() {
+    let dir = write_model(
+        "imports_parse_error",
+        &[
+            (
+                "main.saldo",
+                "account A\nimport \"bad.saldo\"\nimport \"gone.saldo\"",
+            ),
+            ("bad.saldo", "account B\nparam p = (1"),
+        ],
+    );
+    let mut sources = saldo::Sources::default();
+    let errors = saldo::run_file(
+        dir.join("main.saldo"),
+        &opts("2025-01-01", "2025-01-01"),
+        &mut sources,
+    )
+    .unwrap_err();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    let rendered = sources.format_errors(&errors, false);
+    let bad = dir.join("bad.saldo").display().to_string();
+    let gone = dir.join("gone.saldo").display().to_string();
+    assert!(rendered.contains(&format!("{bad}:2:12")), "{rendered}");
+    assert!(
+        rendered.contains(&format!("could not read `{gone}`")),
+        "{rendered}"
+    );
+    assert!(rendered.contains("main.saldo:3:8"), "{rendered}");
+}
+
+#[test]
+fn an_unreadable_model_is_a_read_error() {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("missing.saldo");
+    let mut sources = saldo::Sources::default();
+    let errors =
+        saldo::run_file(&path, &opts("2025-01-01", "2025-01-01"), &mut sources).unwrap_err();
+    assert!(matches!(&errors[0], saldo::Error::Read { path: p, .. } if *p == path));
+    let rendered = sources.format_errors(&errors, false);
+    assert!(rendered.starts_with(&format!("could not read `{}`", path.display())));
+}
+
+#[test]
+fn models_given_as_text_cannot_import() {
+    let errors = run("import \"loans.saldo\"", &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(&errors, "only works in a model read from a file"));
+}

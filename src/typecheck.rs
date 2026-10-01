@@ -60,7 +60,10 @@ pub fn check(program: &Program, fns: &HashMap<String, FnDef>) -> Vec<Diagnostic>
                 }
             }
             Decl::Assert { asserted, .. } => checker.expect(asserted, Ty::Bool, "an assertion"),
-            Decl::Account { .. } | Decl::Schedule { .. } | Decl::Fn { .. } => {}
+            Decl::Account { .. }
+            | Decl::Schedule { .. }
+            | Decl::Fn { .. }
+            | Decl::Import { .. } => {}
         }
     }
     checker.diags

@@ -318,6 +318,11 @@ pub enum Decl {
         params: Vec<Spanned<String>>,
         body: Vec<Stmt>,
     },
+    /// `import "path"`. Loading a model replaces these with the imported
+    /// file's declarations, so later stages never see them.
+    Import {
+        path: Spanned<String>,
+    },
 }
 
 #[derive(Clone, Debug)]

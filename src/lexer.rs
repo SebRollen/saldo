@@ -21,6 +21,7 @@ pub enum Token<'src> {
     That,
     Entry,
     Fn,
+    Import,
     Let,
     Param,
     Return,
@@ -66,6 +67,7 @@ impl<'src> fmt::Display for Token<'src> {
             Token::That => write!(f, "that"),
             Token::Entry => write!(f, "entry"),
             Token::Fn => write!(f, "fn"),
+            Token::Import => write!(f, "import"),
             Token::Let => write!(f, "let"),
             Token::Param => write!(f, "param"),
             Token::Return => write!(f, "return"),
@@ -99,15 +101,20 @@ impl<'src> fmt::Display for Token<'src> {
 pub struct Lexer<'src> {
     src: &'src str,
     bytes: &'src [u8],
+    /// Added to every span, so spans from different files don't overlap.
+    offset: usize,
     start: usize,
     current: usize,
 }
 
 impl<'src> Lexer<'src> {
-    pub fn new(src: &'src str) -> Self {
+    /// A lexer whose spans start at `offset`, so spans from different files
+    /// don't overlap.
+    pub fn new(src: &'src str, offset: usize) -> Self {
         Self {
             src,
             bytes: src.as_bytes(),
+            offset,
             start: 0,
             current: 0,
         }
@@ -132,7 +139,7 @@ impl<'src> Lexer<'src> {
     }
 
     fn current_span(&self) -> Span {
-        Span::new(self.start, self.current)
+        Span::new(self.offset + self.start, self.offset + self.current)
     }
 
     fn peek(&self) -> Option<&u8> {
@@ -317,6 +324,7 @@ impl<'src> Lexer<'src> {
             "that" => Token::That,
             "entry" => Token::Entry,
             "fn" => Token::Fn,
+            "import" => Token::Import,
             "let" => Token::Let,
             "param" => Token::Param,
             "return" => Token::Return,
@@ -436,8 +444,9 @@ impl<'src> Lexer<'src> {
     }
 }
 
-pub fn lex(src: &str) -> Result<Vec<Spanned<Token<'_>>>, Vec<Diagnostic>> {
-    Lexer::new(src).lex()
+/// Lexes `src` with spans starting at `offset`.
+pub fn lex(src: &str, offset: usize) -> Result<Vec<Spanned<Token<'_>>>, Vec<Diagnostic>> {
+    Lexer::new(src, offset).lex()
 }
 
 #[cfg(test)]
@@ -445,7 +454,7 @@ mod tests {
     use super::*;
 
     fn lex(src: &str) -> Vec<Token<'_>> {
-        let Ok(toks) = Lexer::new(src).lex() else {
+        let Ok(toks) = Lexer::new(src, 0).lex() else {
             panic!("lexer errored")
         };
         toks.into_iter().map(|(t, _)| t).collect()
@@ -479,15 +488,24 @@ mod tests {
 
     #[test]
     fn strings_end_at_the_line() {
-        let errs = Lexer::new("\"Pay\nday\" 1").lex().unwrap_err();
+        let errs = Lexer::new("\"Pay\nday\" 1", 0).lex().unwrap_err();
         assert_eq!(errs[0].message, "unterminated string");
         assert_eq!(errs[0].span, Span::new(0, 4));
     }
 
     #[test]
+    fn spans_start_at_the_offset() {
+        let errs = super::lex("a\n  \"b", 100).unwrap_err();
+        assert_eq!(errs[0].span, Span::new(104, 106));
+        let toks = super::lex("import x", 7).unwrap();
+        assert_eq!(toks[0], (Token::Import, Span::new(7, 13)));
+        assert_eq!(toks[1], (Token::Ident("x"), Span::new(14, 15)));
+    }
+
+    #[test]
     fn rejects_invalid_dates() {
         for src in ["2025-13-01", "2025-02-30", "2025-00-10"] {
-            let errs = Lexer::new(src).lex().unwrap_err();
+            let errs = Lexer::new(src, 0).lex().unwrap_err();
             assert_eq!(errs.len(), 1, "{src}");
             assert_eq!(errs[0].message, format!("invalid date `{src}`"));
         }

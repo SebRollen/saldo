@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use saldo::{RunOpts, format_errors, format_warnings, run};
+use saldo::{RunOpts, Sources, run_file};
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
@@ -39,19 +39,12 @@ fn main() -> ExitCode {
         }
     };
 
-    let src = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("could not read `{path}`: {e}");
-            return ExitCode::from(1);
-        }
-    };
-
     let opts = RunOpts { from, to };
     let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
-    match run(&src, &opts) {
+    let mut sources = Sources::default();
+    match run_file(&path, &opts, &mut sources) {
         Ok(output) => {
-            eprint!("{}", format_warnings(&path, &src, &output.warnings, color));
+            eprint!("{}", sources.format_warnings(&output.warnings, color));
             let mut out = std::io::BufWriter::new(std::io::stdout().lock());
             let written = match format {
                 OutputFormat::Ledger => output.write_ledger(&mut out),
@@ -69,7 +62,7 @@ fn main() -> ExitCode {
             }
         }
         Err(errors) => {
-            eprint!("{}", format_errors(&path, &src, &errors, color));
+            eprint!("{}", sources.format_errors(&errors, color));
             ExitCode::from(1)
         }
     }

@@ -617,6 +617,10 @@
           "named": true
         },
         {
+          "type": "import_decl",
+          "named": true
+        },
+        {
           "type": "param_decl",
           "named": true
         },
@@ -1049,6 +1053,22 @@
           },
           {
             "type": "unary_minus",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "import_decl",
+    "named": true,
+    "fields": {
+      "path": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
             "named": true
           }
         ]
@@ -2119,6 +2139,10 @@
   },
   {
     "type": "if",
+    "named": false
+  },
+  {
+    "type": "import",
     "named": false
   },
   {
