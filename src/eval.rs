@@ -445,6 +445,25 @@ fn eval_expr<'m>(
                 "unary minus requires a numeric operand",
             )),
         },
+        Expr::Not(x) => match eval_expr(x, env, locals)? {
+            Value::Bool(b) => Ok(Value::Bool(!b)),
+            _ => Err(Diagnostic::new(*span, "`not` requires a bool operand")),
+        },
+        Expr::Bin(a, op @ (BinOp::And | BinOp::Or), b) => {
+            let as_bool = |operand: &SpannedExpr, v| match v {
+                Value::Bool(b) => Ok(b),
+                Value::Num(_) => Err(Diagnostic::new(
+                    operand.1,
+                    format!("operands of `{op}` must be bools"),
+                )),
+            };
+            let x = as_bool(a, eval_expr(a, env, locals)?)?;
+            // Short-circuit: the right side is only evaluated when needed.
+            if (*op == BinOp::And && !x) || (*op == BinOp::Or && x) {
+                return Ok(Value::Bool(x));
+            }
+            Ok(Value::Bool(as_bool(b, eval_expr(b, env, locals)?)?))
+        }
         Expr::Bin(a, op, b) => {
             let x = eval_expr(a, env, locals)?;
             let y = eval_expr(b, env, locals)?;
@@ -721,5 +740,6 @@ fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagn
         }
         BinOp::Eq => Ok(Value::Bool(a == b)),
         BinOp::NotEq => Ok(Value::Bool(a != b)),
+        BinOp::And | BinOp::Or => unreachable!("evaluated with short-circuiting in eval_expr"),
     }
 }

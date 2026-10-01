@@ -171,7 +171,8 @@ Assertions are checked after flows run each day. Simulation aborts with an error
 | `leg.ytd` / `leg.qtd` / `leg.mtd` | Period aggregate |
 | `alias.leg.ytd` | Cross-flow period aggregate |
 | `a + b`, `a - b`, `a * b`, `a / b` | Arithmetic |
-| `a == b`, `a != b`, `a < b`, `a <= b`, `a > b`, `a >= b` | Comparison |
+| `a == b`, `a != b`, `a < b`, `a <= b`, `a > b`, `a >= b` | Comparison (can't be chained) |
+| `a and b`, `a or b`, `not a` | Logical operators |
 | `if c then a else b` | Conditional |
 | `min(a, b)`, `max(a, b)` | Built-in functions |
 | `abs(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Built-in functions |

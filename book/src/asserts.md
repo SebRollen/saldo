@@ -50,12 +50,17 @@ Assertion expressions support the same operators as entry amounts:
 |----------|---------|
 | `<`, `<=` | Less than, at most |
 | `>`, `>=` | Greater than, at least |
-| `==` | Equal |
+| `==`, `!=` | Equal, not equal |
+| `and`, `or`, `not` | Combine conditions (`not` binds tightest, then `and`, then `or`) |
 | `if … then … else …` | Conditional (both `then` and `else` are required) |
 | `min()`, `max()` | Built-in functions |
 
 Account references, param names, and aggregation suffixes (`.ytd`, `.qtd`,
 `.mtd`) all work inside assertion expressions.
+
+Comparisons can't be chained: write `0 <= x and x <= 100`, not
+`0 <= x <= 100`. The right side of `and` and `or` is only evaluated when
+needed.
 
 ## Examples
 
@@ -68,6 +73,9 @@ assert that jim_paycheck.retirement_contribution.ytd <= max_401k
 
 // Target retirement balance hit by a specific date
 assert 2026-12-31 that Assets:Retirement:Beth == 24_500
+
+// Cash stays within a band
+assert that Assets:Cash >= 1_000 and Assets:Cash <= 50_000
 
 // Sanity-check every quarter
 assert quarterly that Assets:Retirement:Seb >= 0

@@ -79,6 +79,8 @@ pub enum BinOp {
     GtEq,
     Eq,
     NotEq,
+    And,
+    Or,
 }
 
 impl std::fmt::Display for BinOp {
@@ -94,6 +96,8 @@ impl std::fmt::Display for BinOp {
             BinOp::GtEq => ">=",
             BinOp::Eq => "==",
             BinOp::NotEq => "!=",
+            BinOp::And => "and",
+            BinOp::Or => "or",
         })
     }
 }
@@ -104,6 +108,7 @@ pub enum Expr {
     Bool(bool),
     Ref(Path),
     Neg(SpannedExpr),
+    Not(SpannedExpr),
     Bin(SpannedExpr, BinOp, SpannedExpr),
     If {
         cond: SpannedExpr,

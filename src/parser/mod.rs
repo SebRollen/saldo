@@ -548,7 +548,7 @@ impl<'src> Parser<'src> {
 
     fn parse_expr(&mut self) -> Option<SpannedExpr> {
         let depth = self.depth;
-        let expr = self.nest().and_then(|()| self.parse_comparison());
+        let expr = self.nest().and_then(|()| self.parse_or());
         self.depth = depth;
         expr
     }
@@ -567,25 +567,69 @@ impl<'src> Parser<'src> {
         Some(())
     }
 
-    fn parse_comparison(&mut self) -> Option<SpannedExpr> {
-        let mut left = self.parse_sum()?;
-        loop {
-            let op = match self.peek() {
-                Token::LtEq => BinOp::LtEq,
-                Token::GtEq => BinOp::GtEq,
-                Token::EqEq => BinOp::Eq,
-                Token::Lt => BinOp::Lt,
-                Token::Gt => BinOp::Gt,
-                Token::NotEq => BinOp::NotEq,
-                _ => break,
-            };
-            self.advance();
+    fn parse_or(&mut self) -> Option<SpannedExpr> {
+        let mut left = self.parse_and()?;
+        while self.eat_keyword("or").is_some() {
             self.nest()?;
-            let right = self.parse_sum()?;
+            let right = self.parse_and()?;
             let span = Span::new(left.1.start, right.1.end);
-            left = (Box::new(Expr::Bin(left, op, right)), span);
+            left = (Box::new(Expr::Bin(left, BinOp::Or, right)), span);
         }
         Some(left)
+    }
+
+    fn parse_and(&mut self) -> Option<SpannedExpr> {
+        let mut left = self.parse_not()?;
+        while self.eat_keyword("and").is_some() {
+            self.nest()?;
+            let right = self.parse_not()?;
+            let span = Span::new(left.1.start, right.1.end);
+            left = (Box::new(Expr::Bin(left, BinOp::And, right)), span);
+        }
+        Some(left)
+    }
+
+    fn parse_not(&mut self) -> Option<SpannedExpr> {
+        if let Some(not_span) = self.eat_keyword("not") {
+            self.nest()?;
+            let inner = self.parse_not()?;
+            let span = Span::new(not_span.start, inner.1.end);
+            return Some((Box::new(Expr::Not(inner)), span));
+        }
+        self.parse_comparison()
+    }
+
+    fn comparison_op(&self) -> Option<BinOp> {
+        Some(match self.peek() {
+            Token::LtEq => BinOp::LtEq,
+            Token::GtEq => BinOp::GtEq,
+            Token::EqEq => BinOp::Eq,
+            Token::Lt => BinOp::Lt,
+            Token::Gt => BinOp::Gt,
+            Token::NotEq => BinOp::NotEq,
+            _ => return None,
+        })
+    }
+
+    /// Comparisons don't chain: `a < b < c` is an error rather than
+    /// comparing a bool with a number.
+    fn parse_comparison(&mut self) -> Option<SpannedExpr> {
+        let left = self.parse_sum()?;
+        let Some(op) = self.comparison_op() else {
+            return Some(left);
+        };
+        self.advance();
+        self.nest()?;
+        let right = self.parse_sum()?;
+        let span = Span::new(left.1.start, right.1.end);
+        if self.comparison_op().is_some() {
+            self.errors.push(Diagnostic::new(
+                Span::new(span.start, self.peek_span().end),
+                "comparisons can't be chained; combine them with `and`",
+            ));
+            return None;
+        }
+        Some((Box::new(Expr::Bin(left, op, right)), span))
     }
 
     fn parse_sum(&mut self) -> Option<SpannedExpr> {

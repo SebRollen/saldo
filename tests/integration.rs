@@ -1012,3 +1012,38 @@ fn keywords_are_lowercase_only() {
     );
     assert!(errors.is_err());
 }
+
+// --- logical operators ---
+
+fn assert_holds(condition: &str) {
+    let src = format!("assert that {condition}");
+    if let Err(errors) = run(&src, &opts("2025-01-01", "2025-01-01")) {
+        panic!("`{condition}` failed: {errors:?}");
+    }
+}
+
+#[test]
+fn logical_operators() {
+    assert_holds("1 < 2 and 2 < 3");
+    assert_holds("1 > 2 or 2 < 3");
+    assert_holds("not 1 > 2");
+    // `and` binds tighter than `or`; `not` tighter than both.
+    assert_holds("true or false and false");
+    assert_holds("not false and true");
+    assert_holds("(not (1 > 2)) == true");
+    // Short-circuiting: the right side would divide by zero.
+    assert_holds("not (false and 1 / 0 == 0)");
+    assert_holds("true or 1 / 0 == 0");
+}
+
+#[test]
+fn chained_comparisons_are_rejected() {
+    let errors = run("assert that 1 < 2 < 3", &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(&errors, "comparisons can't be chained"));
+}
+
+#[test]
+fn logical_operators_require_bools() {
+    let errors = run("assert that 1 and true", &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(&errors, "operands of `and` must be bools"));
+}
