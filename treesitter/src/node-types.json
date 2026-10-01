@@ -50,6 +50,10 @@
             "named": true
           },
           {
+            "type": "not_expr",
+            "named": true
+          },
+          {
             "type": "parenthesized_expr",
             "named": true
           },
@@ -168,6 +172,11 @@
     "fields": {}
   },
   {
+    "type": "and_operator",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "assert_decl",
     "named": true,
     "fields": {
@@ -205,6 +214,10 @@
           },
           {
             "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
             "named": true
           },
           {
@@ -270,6 +283,10 @@
             "named": true
           },
           {
+            "type": "not_expr",
+            "named": true
+          },
+          {
             "type": "parenthesized_expr",
             "named": true
           },
@@ -288,11 +305,19 @@
             "named": true
           },
           {
+            "type": "and_operator",
+            "named": true
+          },
+          {
             "type": "comparison_operator",
             "named": true
           },
           {
             "type": "multiplicative_operator",
+            "named": true
+          },
+          {
+            "type": "or_operator",
             "named": true
           }
         ]
@@ -331,6 +356,10 @@
           },
           {
             "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
             "named": true
           },
           {
@@ -392,6 +421,10 @@
           },
           {
             "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
             "named": true
           },
           {
@@ -474,6 +507,10 @@
         },
         {
           "type": "integer",
+          "named": true
+        },
+        {
+          "type": "not_expr",
           "named": true
         },
         {
@@ -753,6 +790,10 @@
             "named": true
           },
           {
+            "type": "not_expr",
+            "named": true
+          },
+          {
             "type": "parenthesized_expr",
             "named": true
           },
@@ -819,6 +860,10 @@
             "named": true
           },
           {
+            "type": "not_expr",
+            "named": true
+          },
+          {
             "type": "parenthesized_expr",
             "named": true
           },
@@ -865,6 +910,10 @@
             "named": true
           },
           {
+            "type": "not_expr",
+            "named": true
+          },
+          {
             "type": "parenthesized_expr",
             "named": true
           },
@@ -908,6 +957,10 @@
           },
           {
             "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
             "named": true
           },
           {
@@ -983,6 +1036,10 @@
             "named": true
           },
           {
+            "type": "not_expr",
+            "named": true
+          },
+          {
             "type": "parenthesized_expr",
             "named": true
           },
@@ -1045,6 +1102,10 @@
             "named": true
           },
           {
+            "type": "not_expr",
+            "named": true
+          },
+          {
             "type": "parenthesized_expr",
             "named": true
           },
@@ -1065,6 +1126,62 @@
     "type": "multiplicative_operator",
     "named": true,
     "fields": {}
+  },
+  {
+    "type": "not_expr",
+    "named": true,
+    "fields": {
+      "operand": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "agg_expr",
+            "named": true
+          },
+          {
+            "type": "binary_expr",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expr",
+            "named": true
+          },
+          {
+            "type": "colon_path",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "if_expr",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "unary_minus",
+            "named": true
+          }
+        ]
+      }
+    }
   },
   {
     "type": "on_clause",
@@ -1187,6 +1304,10 @@
           "named": true
         },
         {
+          "type": "not_expr",
+          "named": true
+        },
+        {
           "type": "parenthesized_expr",
           "named": true
         },
@@ -1274,6 +1395,10 @@
           "named": true
         },
         {
+          "type": "not_expr",
+          "named": true
+        },
+        {
           "type": "parenthesized_expr",
           "named": true
         },
@@ -1322,6 +1447,10 @@
           },
           {
             "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
             "named": true
           },
           {
@@ -1473,6 +1602,10 @@
           },
           {
             "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
             "named": true
           },
           {
@@ -1815,6 +1948,10 @@
     "named": false
   },
   {
+    "type": "not",
+    "named": false
+  },
+  {
     "type": "nov",
     "named": false
   },
@@ -1833,6 +1970,10 @@
   {
     "type": "on",
     "named": false
+  },
+  {
+    "type": "or_operator",
+    "named": true
   },
   {
     "type": "ordinal_suffix",

@@ -319,6 +319,7 @@ module.exports = grammar({
       choice(
         $.if_expr,
         $.binary_expr,
+        $.not_expr,
         $.unary_minus,
         $.call_expr,
         $.agg_expr,
@@ -342,43 +343,39 @@ module.exports = grammar({
         ),
       ),
 
-    binary_expr: ($) =>
-      choice(
+    // Precedence, loosest first: or, and, not, comparisons, + -, * /, unary -.
+    binary_expr: ($) => {
+      const level = (precedence, operator) =>
         prec.left(
-          1,
+          precedence,
           seq(
             field("left", $._expr),
-            field("operator", $.comparison_operator),
+            field("operator", operator),
             field("right", $._expr),
           ),
-        ),
-        prec.left(
-          2,
-          seq(
-            field("left", $._expr),
-            field("operator", $.additive_operator),
-            field("right", $._expr),
-          ),
-        ),
-        prec.left(
-          3,
-          seq(
-            field("left", $._expr),
-            field("operator", $.multiplicative_operator),
-            field("right", $._expr),
-          ),
-        ),
-      ),
+        );
+      return choice(
+        level(1, $.or_operator),
+        level(2, $.and_operator),
+        level(4, $.comparison_operator),
+        level(5, $.additive_operator),
+        level(6, $.multiplicative_operator),
+      );
+    },
 
+    or_operator: (_) => "or",
+    and_operator: (_) => "and",
     comparison_operator: (_) => choice("==", "!=", "<", ">", "<=", ">="),
     additive_operator: (_) => choice("+", "-"),
     multiplicative_operator: (_) => choice("*", "/"),
 
-    unary_minus: ($) => prec(4, seq("-", field("operand", $._expr))),
+    not_expr: ($) => prec(3, seq("not", field("operand", $._expr))),
+
+    unary_minus: ($) => prec(7, seq("-", field("operand", $._expr))),
 
     call_expr: ($) =>
       prec(
-        5,
+        8,
         seq(
           field("function", $.identifier),
           "(",
@@ -394,7 +391,7 @@ module.exports = grammar({
 
     agg_expr: ($) =>
       prec(
-        6,
+        9,
         choice(
           seq(
             field("flow", $.identifier),
@@ -456,7 +453,8 @@ module.exports = grammar({
     // Terminals
     // -----------------------------------------------------------------------
 
-    identifier: (_) => /[a-zA-Z_][a-zA-Z0-9_]*/,
+    // Letters and digits from any script.
+    identifier: (_) => /[\p{L}_][\p{L}\p{N}_]*/,
 
     date: (_) => token(/\d{4}-\d{2}-\d{2}/),
 

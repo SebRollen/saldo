@@ -59,6 +59,13 @@
   "else"
 ] @keyword.control
 
+; Logical operators
+[
+  "and"
+  "or"
+  "not"
+] @keyword.operator
+
 ; Operators
 [
   "="
