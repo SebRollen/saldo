@@ -85,7 +85,9 @@ pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
         .map_err(|d| vec![Error::Diagnostic(d)])?;
 
     let accounts = model.stocks.keys().cloned().collect();
-    let warnings = model.missed_aggregate_warnings(first_day);
+    let mut warnings = model.missed_aggregate_warnings(first_day);
+    warnings.extend(program.missed_fill_warnings(first_day));
+    warnings.sort_by_key(|d| d.span.start);
 
     Ok(Output {
         accounts,

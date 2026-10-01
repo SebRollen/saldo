@@ -1,5 +1,7 @@
 use crate::ast::schedule::Share;
-use crate::ast::{AggKind, BinOp, Expr, ParamBody, Path, PostingAmount, Span, SpannedExpr};
+use crate::ast::{
+    AggKind, BinOp, Expr, ParamBody, Path, PostingAmount, Span, SpannedExpr, TimeUnit,
+};
 use crate::compile::{Amount, Builtin, ExprKind, Function, Program, Stmt};
 use crate::errors::Diagnostic;
 use crate::resolver::{Model, walk_expr};
@@ -151,6 +153,38 @@ impl Model {
     }
 }
 
+impl Program {
+    /// Warns about `fill`s that can't know what their posting posted earlier
+    /// in a period, because the simulation starts partway through it.
+    pub fn missed_fill_warnings(&self, first_day: NaiveDate) -> Vec<Diagnostic> {
+        self.fills
+            .iter()
+            .filter_map(|fill| {
+                let entry = &self.entries[fill.entry];
+                let period_start = fill.unit.period_start(first_day);
+                let missed = period_start
+                    .iter_days()
+                    .take_while(|d| *d < first_day)
+                    .find(|d| entry.schedule.matches(*d))?;
+                Some(
+                    Diagnostic::new(
+                        fill.span,
+                        format!("`fill` is missing what was posted before {first_day}"),
+                    )
+                    .with_note(
+                        fill.span,
+                        format!(
+                            "`{}` would have fired on {missed}; simulate from {period_start} \
+                             (or open an account by then) to include it",
+                            entry.label
+                        ),
+                    ),
+                )
+            })
+            .collect()
+    }
+}
+
 /// A param's value for the current day.
 enum ParamValue {
     Value(Decimal),
@@ -181,6 +215,9 @@ struct State<'p> {
     totals: Vec<[Decimal; 3]>,
     /// The entry whose postings are being evaluated.
     firing: Option<usize>,
+    /// For each `fill`, the start of the period it last posted in and what
+    /// its posting has posted since.
+    fills: Vec<(NaiveDate, Decimal)>,
 }
 
 impl Program {
@@ -203,6 +240,7 @@ impl Program {
             legs_today: vec![Decimal::ZERO; self.legs.len()],
             totals: vec![[Decimal::ZERO; 3]; self.legs.len()],
             firing: None,
+            fills: vec![(NaiveDate::MIN, Decimal::ZERO); self.fills.len()],
         };
         let equity: Arc<Path> = Arc::new(Path(vec![
             "Equity".to_string(),
@@ -390,6 +428,19 @@ impl State<'_> {
             if let Some(leg) = posting.leg {
                 self.legs_today[leg] = amount;
             }
+            for &fill in &posting.fills {
+                let start = program.fills[fill].unit.period_start(self.date);
+                let (period, posted) = &mut self.fills[fill];
+                if *period != start {
+                    (*period, *posted) = (start, Decimal::ZERO);
+                }
+                *posted = posted.checked_add(amount).ok_or_else(|| {
+                    Diagnostic::new(
+                        program.fills[fill].span,
+                        "running total of `fill` overflowed",
+                    )
+                })?;
+            }
             amounts.push((posting.account, amount));
         }
 
@@ -522,23 +573,7 @@ impl State<'_> {
                 self.check_open(*account, span)?;
                 Ok(Value::Num(self.balance(*account)))
             }
-            ExprKind::Param(param) => match &self.params[*param] {
-                ParamValue::Value(v) => Ok(Value::Num(*v)),
-                ParamValue::Error(d) => Err(d.clone().with_note(
-                    span,
-                    format!(
-                        "while evaluating param `{}`",
-                        self.program.params[*param].name
-                    ),
-                )),
-                ParamValue::Inactive => Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "param `{}` has no value on {}: none of its intervals cover this date",
-                        self.program.params[*param].name, self.date
-                    ),
-                )),
-            },
+            ExprKind::Param(param) => self.param(*param, span),
             ExprKind::Leg(leg) => Ok(Value::Num(self.legs_today[*leg])),
             ExprKind::Local(slot) => Ok(Value::Num(locals[*slot])),
             ExprKind::Total(leg, kind) => Ok(Value::Num(self.totals[*leg][period_index(*kind)])),
@@ -581,18 +616,7 @@ impl State<'_> {
                     "condition in `if` expression must be a bool",
                 )),
             },
-            ExprKind::Builtin(builtin, args) => {
-                let arg = |i: usize| self.numeric_arg(&args[i], builtin.name(), locals);
-                let n = match builtin {
-                    Builtin::Min => arg(0)?.min(arg(1)?),
-                    Builtin::Max => arg(0)?.max(arg(1)?),
-                    Builtin::Abs => arg(0)?.abs(),
-                    Builtin::Floor => arg(0)?.floor(),
-                    Builtin::Ceil => arg(0)?.ceil(),
-                    Builtin::Round => arg(0)?.round(),
-                };
-                Ok(Value::Num(n))
-            }
+            ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, locals, span),
             ExprKind::Call(index, args) => {
                 let function = &self.program.fns[*index];
                 let mut frame = vec![Decimal::ZERO; function.slots];
@@ -602,18 +626,100 @@ impl State<'_> {
                 self.call(function, frame, span)
             }
             ExprKind::Per(e, _) => self.eval(e, locals),
+            ExprKind::Fill(e, unit, fill) => {
+                let target = self.eval_num(e, locals)?;
+                self.fill(target, *unit, *fill, span).map(Value::Num)
+            }
             ExprKind::Spread(e, unit) => {
                 let amount = self.eval_num(e, locals)?;
-                let entry = self.firing.expect("only postings spread amounts");
-                let share = self.program.entries[entry].schedule.share(*unit, self.date);
-                spread(amount, share).map(Value::Num).ok_or_else(|| {
-                    Diagnostic::new(
-                        span,
-                        format!("arithmetic overflow spreading {amount} per {unit}"),
-                    )
-                })
+                self.spread(amount, *unit, span).map(Value::Num)
             }
         }
+    }
+
+    // `eval` recurses once per level of nesting, so its arms with much to do
+    // call these to keep its stack frame small.
+
+    fn param(&self, param: usize, span: Span) -> Result<Value, Diagnostic> {
+        match &self.params[param] {
+            ParamValue::Value(v) => Ok(Value::Num(*v)),
+            ParamValue::Error(d) => Err(d.clone().with_note(
+                span,
+                format!(
+                    "while evaluating param `{}`",
+                    self.program.params[param].name
+                ),
+            )),
+            ParamValue::Inactive => Err(Diagnostic::new(
+                span,
+                format!(
+                    "param `{}` has no value on {}: none of its intervals cover this date",
+                    self.program.params[param].name, self.date
+                ),
+            )),
+        }
+    }
+
+    fn builtin(
+        &self,
+        builtin: Builtin,
+        args: &[crate::compile::Expr],
+        locals: &[Decimal],
+        span: Span,
+    ) -> Result<Value, Diagnostic> {
+        let arg = |i: usize| self.numeric_arg(&args[i], builtin.name(), locals);
+        let n = match builtin {
+            Builtin::Min => arg(0)?.min(arg(1)?),
+            Builtin::Max => arg(0)?.max(arg(1)?),
+            Builtin::Abs => arg(0)?.abs(),
+            Builtin::Floor => arg(0)?.floor(),
+            Builtin::Ceil => arg(0)?.ceil(),
+            Builtin::Round => arg(0)?.round(),
+            Builtin::Fill => {
+                return Err(Diagnostic::new(
+                    span,
+                    "`fill` can only be the amount a posting posts",
+                ));
+            }
+        };
+        Ok(Value::Num(n))
+    }
+
+    /// The firing entry's share of `amount` per `unit`.
+    fn spread(&self, amount: Decimal, unit: TimeUnit, span: Span) -> Result<Decimal, Diagnostic> {
+        let entry = self.firing.expect("only postings spread amounts");
+        let share = self.program.entries[entry].schedule.share(unit, self.date);
+        spread(amount, share).ok_or_else(|| {
+            Diagnostic::new(
+                span,
+                format!("arithmetic overflow spreading {amount} per {unit}"),
+            )
+        })
+    }
+
+    /// What's left of `target` this `unit`, split over the firings left in it.
+    fn fill(
+        &self,
+        target: Decimal,
+        unit: TimeUnit,
+        fill: usize,
+        span: Span,
+    ) -> Result<Decimal, Diagnostic> {
+        let entry = self.firing.expect("only postings fill");
+        let start = unit.period_start(self.date);
+        let posted = match self.fills[fill] {
+            (period, posted) if period == start => posted,
+            _ => Decimal::ZERO,
+        };
+        // The schedule fires today, so this is at least 1.
+        let left = self.program.entries[entry]
+            .schedule
+            .firings_left(unit, self.date);
+        target
+            .checked_sub(posted)
+            .and_then(|rest| rest.checked_div(left.into()))
+            .map(|amount| amount.round_dp(2))
+            .ok_or_else(|| Diagnostic::new(span, format!("arithmetic overflow filling {target}")))
     }
 
     fn numeric_arg(
@@ -725,6 +831,7 @@ pub const BUILTINS: &[(&str, usize)] = &[
     ("floor", 1),
     ("ceil", 1),
     ("round", 1),
+    ("fill", 1),
 ];
 
 fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagnostic> {

@@ -177,6 +177,7 @@ Assertions are checked after flows run each day. Simulation aborts with an error
 | `a and b`, `a or b`, `not a` | Logical operators |
 | `if c then a else b` | Conditional |
 | `min(a, b)`, `max(a, b)` | Built-in functions |
+| `fill(24_500 per year)` | What's left of a period's amount, split over the firings left in it |
 | `abs(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Built-in functions |
 | `net(gross, 0.3)` | User-defined function call |
 

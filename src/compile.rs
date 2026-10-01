@@ -21,6 +21,16 @@ pub struct Program {
     pub entries: Vec<Entry>,
     pub asserts: Vec<(Schedule, Expr)>,
     pub legs: Vec<Leg>,
+    /// Each `fill` in a posting. The units pass adds these.
+    pub fills: Vec<Fill>,
+}
+
+/// A `fill` in one of `entry`'s postings, which tracks what the posting has
+/// posted in the current `unit`.
+pub struct Fill {
+    pub entry: usize,
+    pub unit: TimeUnit,
+    pub span: Span,
 }
 
 pub struct Param {
@@ -75,6 +85,8 @@ pub struct Posting {
     pub account_span: Span,
     pub amount: Amount,
     pub leg: Option<usize>,
+    /// The `fill`s in `amount`, which count what this posting posts.
+    pub fills: Vec<usize>,
 }
 
 pub enum Amount {
@@ -118,6 +130,10 @@ pub enum ExprKind {
     /// The firing entry's share of an amount per period. The units pass adds
     /// these where postings use rates.
     Spread(Box<Expr>, TimeUnit),
+    /// `fill(x)`: what's left of `x` for the current period, split over the
+    /// firings left in it. The units pass turns `fill` calls into these; the
+    /// `usize` indexes `Program::fills`.
+    Fill(Box<Expr>, TimeUnit, usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +144,7 @@ pub enum Builtin {
     Floor,
     Ceil,
     Round,
+    Fill,
 }
 
 impl Builtin {
@@ -139,6 +156,7 @@ impl Builtin {
             "floor" => Builtin::Floor,
             "ceil" => Builtin::Ceil,
             "round" => Builtin::Round,
+            "fill" => Builtin::Fill,
             _ => return None,
         })
     }
@@ -151,6 +169,7 @@ impl Builtin {
             Builtin::Floor => "floor",
             Builtin::Ceil => "ceil",
             Builtin::Round => "round",
+            Builtin::Fill => "fill",
         }
     }
 }
@@ -270,6 +289,7 @@ pub fn compile(model: &Model) -> Program {
                                 .leg_name
                                 .as_deref()
                                 .map(|leg| names.legs[&(entry.key.as_str(), leg)]),
+                            fills: Vec::new(),
                         })
                         .collect(),
                     span: entry.span,
@@ -282,6 +302,7 @@ pub fn compile(model: &Model) -> Program {
             .map(|(schedule, e)| (schedule.clone(), names.lower(e, &global)))
             .collect(),
         legs,
+        fills: Vec::new(),
     }
 }
 

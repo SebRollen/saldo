@@ -1513,3 +1513,128 @@ fn dividing_by_a_per_points_at_its_precedence() {
         "{d:?}"
     );
 }
+
+// --- fill ---
+
+#[test]
+fn fill_reaches_a_yearly_target_after_a_midyear_start() {
+    let src = "
+        account Assets:Cash
+        account Assets:Retirement
+        account Income:Salary
+        account Income:OldSalary
+        param salary   = 150_000 per year
+        param max_401k = 24_500 per year
+        param old_contribution {
+          from 2026-01-01 to 2026-07-01 = 1_000 per month
+          from 2026-07-01               = 0
+        }
+        entry monthly \"Old job\" {
+          Assets:Retirement = old_contribution as contribution
+          Income:OldSalary
+        } as old_job
+        entry every second friday from 2026-07-10 \"New job\" {
+          Assets:Retirement = fill(max_401k - old_job.contribution.ytd) as contribution
+          Assets:Cash       = salary - contribution
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2027-12-31")).unwrap();
+    let new_job: Vec<Decimal> = output
+        .log
+        .transactions
+        .iter()
+        .filter(|tx| &*tx.label == "New job")
+        .map(|tx| tx.postings[0].1)
+        .collect();
+    // 18_500 left after the old job, over the 13 paydays left in 2026.
+    assert_eq!(new_job[0], usd("1423.08"));
+    assert_eq!(new_job[..13].iter().sum::<Decimal>(), usd("18500.00"));
+    // A full year: 26 paydays.
+    assert_eq!(new_job[13], usd("942.31"));
+    for year in [2026, 2027] {
+        assert_eq!(
+            posted_in(&output, "Assets:Retirement", year),
+            usd("24500.00")
+        );
+    }
+    // The salary is still spread, so half a year's worth arrives in 2026.
+    assert_eq!(posted_in(&output, "Income:Salary", 2026), usd("-75000.00"));
+}
+
+#[test]
+fn fill_makes_up_for_firings_held_back() {
+    let src = "
+        account Assets:Retirement
+        account Income:Salary
+        param cap {
+          from 2026-01-01 to 2026-07-01 = 500
+          from 2026-07-01               = 10_000
+        }
+        entry monthly \"Paycheck\" {
+          Assets:Retirement = min(fill(24_000 per year), cap)
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
+    let contributions = postings_to(&output, "Assets:Retirement");
+    assert_eq!(contributions[..6], [usd("500.00"); 6]);
+    // (24_000 - 3_000) / 6 months left
+    assert_eq!(contributions[6..], [usd("3500.00"); 6]);
+}
+
+#[test]
+fn fill_has_to_be_what_a_posting_posts() {
+    let cases = [
+        (
+            "param x = fill(max_401k)",
+            "`fill` can only be the amount a posting posts",
+        ),
+        (
+            "entry monthly \"A\" {\n Assets:Cash = fill(max_401k) + 100\n Income:Salary }",
+            "`fill` can only be the amount a posting posts",
+        ),
+        (
+            "entry monthly \"A\" {\n Assets:Cash = fill(500)\n Income:Salary }",
+            "`fill` needs an amount per period",
+        ),
+        (
+            "entry monthly \"A\" {\n Assets:Cash = fill(max_401k - paid.ytd) as paid\n Income:Salary }",
+            "`fill` already subtracts what this posting has posted",
+        ),
+        (
+            "fn f(x) { fill(x) }\nentry monthly \"A\" {\n Assets:Cash = f(max_401k)\n Income:Salary }",
+            "`fill` can only be the amount a posting posts",
+        ),
+    ];
+    for (decl, message) in cases {
+        let src = format!(
+            "account Assets:Cash
+             account Income:Salary
+             param max_401k = 24_500 per year
+             {decl}"
+        );
+        let errors = run(&src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
+        assert!(has_error(&errors, message), "{decl}: {errors:?}");
+    }
+}
+
+#[test]
+fn fill_warns_when_the_simulation_starts_partway_through_its_period() {
+    let src = "
+        account Assets:Retirement
+        account Income:Salary
+        entry monthly \"Paycheck\" {
+          Assets:Retirement = fill(24_000 per year)
+          Income:Salary
+        }
+    ";
+    let output = run(src, &opts("2026-03-15", "2026-12-31")).unwrap();
+    assert_eq!(output.warnings.len(), 1);
+    assert_eq!(
+        output.warnings[0].message,
+        "`fill` is missing what was posted before 2026-03-15"
+    );
+    let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
+    assert!(output.warnings.is_empty());
+}

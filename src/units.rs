@@ -6,9 +6,14 @@
 //! it in [`ExprKind::Spread`] to give each firing its share (see [`Schedule::share`](crate::ast::Schedule::share)). Anywhere else,
 //! mixing a rate with an amount is an error, except with a total over the same
 //! period: a per-year limit minus a `.ytd` total is what's left of the limit.
+//!
+//! It also turns `fill(x)` calls into [`ExprKind::Fill`], giving each its own
+//! slot in [`Program::fills`].
 
 use crate::ast::{BinOp, Span, TimeUnit};
-use crate::compile::{Amount, Builtin, Expr, ExprKind, Function, Param, ParamBody, Program, Stmt};
+use crate::compile::{
+    Amount, Builtin, Expr, ExprKind, Fill, Function, Param, ParamBody, Program, Stmt,
+};
 use crate::errors::Diagnostic;
 use std::collections::HashMap;
 use std::fmt;
@@ -38,17 +43,46 @@ impl fmt::Display for Kind {
     }
 }
 
+/// What combines two operands, for error messages.
+#[derive(Clone, Copy)]
+enum Combiner {
+    Op(BinOp),
+    Builtin(Builtin),
+    If,
+}
+
+impl Combiner {
+    /// Whether it picks one operand, rather than computing from both.
+    fn picks(self) -> bool {
+        !matches!(self, Combiner::Op(_))
+    }
+}
+
+impl fmt::Display for Combiner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Combiner::Op(op) => write!(f, "`{op}`"),
+            Combiner::Builtin(builtin) => write!(f, "`{}`", builtin.name()),
+            Combiner::If => f.write_str("this `if`"),
+        }
+    }
+}
+
 /// Where an expression appears.
 #[derive(Clone, Copy)]
 struct Cx<'a> {
     /// In a posting, where rates are spread over the entry's firings.
     posting: bool,
+    /// The amount a posting posts: the whole expression, or what `min`, `max`
+    /// and `if` pick from it. Only these can `fill`.
+    posted: bool,
     /// Kinds of the current function's parameters and `let` bindings.
     locals: &'a [Option<Kind>],
 }
 
 const GLOBAL: Cx = Cx {
     posting: false,
+    posted: false,
     locals: &[],
 };
 
@@ -59,6 +93,9 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
         params: Vec::with_capacity(program.params.len()),
         instances: HashMap::new(),
         calls: Vec::new(),
+        posting: None,
+        fills: Vec::new(),
+        posting_fills: Vec::new(),
         diags: Vec::new(),
     };
     // Each param comes after the params it reads.
@@ -76,22 +113,30 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
     }
     let in_posting = Cx {
         posting: true,
+        posted: true,
         locals: &[],
     };
-    for entry in &mut program.entries {
+    for (index, entry) in program.entries.iter_mut().enumerate() {
         for posting in &mut entry.postings {
+            checker.posting = Some((index, posting.leg));
             if let Amount::Expr(e) = &mut posting.amount
                 && let Some(kind) = checker.kind(e, in_posting)
             {
                 spread(e, kind);
             }
+            posting.fills = std::mem::take(&mut checker.posting_fills);
         }
     }
+    checker.posting = None;
     for (_, e) in &mut program.asserts {
         checker.kind(e, GLOBAL);
     }
-    checker.diags.sort_by_key(|d| d.span.start);
-    checker.diags
+    let Checker {
+        mut diags, fills, ..
+    } = checker;
+    program.fills = fills;
+    diags.sort_by_key(|d| d.span.start);
+    diags
 }
 
 struct Checker<'p> {
@@ -103,6 +148,11 @@ struct Checker<'p> {
     instances: HashMap<(usize, Vec<Kind>), Option<Kind>>,
     /// The calls whose function bodies are being checked, innermost last.
     calls: Vec<(usize, Span)>,
+    /// The entry whose posting is being checked, and the posting's leg.
+    posting: Option<(usize, Option<usize>)>,
+    fills: Vec<Fill>,
+    /// The `fill`s found so far in the posting being checked.
+    posting_fills: Vec<usize>,
     diags: Vec<Diagnostic>,
 }
 
@@ -162,59 +212,39 @@ impl Checker<'_> {
 
     /// The kind of `e`, or `None` if it has an error (already reported).
     fn kind(&mut self, e: &mut Expr, cx: Cx) -> Option<Kind> {
+        if let ExprKind::Builtin(Builtin::Fill, _) = e.kind {
+            return self.fill(e, cx);
+        }
         let span = e.span;
+        // Operands are only what's posted if `min`, `max` or `if` picks them.
+        let below = Cx {
+            posted: false,
+            ..cx
+        };
         match &mut e.kind {
             ExprKind::Num(_) | ExprKind::Bool(_) => Some(Kind::Number),
             ExprKind::Account(_) | ExprKind::Leg(_) | ExprKind::Spread(..) => Some(Kind::Amount),
             ExprKind::Param(param) => self.params.get(*param).copied().flatten(),
             ExprKind::Local(slot) => cx.locals[*slot],
             ExprKind::Total(_, agg) => Some(Kind::Total(agg.unit())),
-            ExprKind::Neg(x) => self.kind(x, cx),
+            ExprKind::Neg(x) => self.kind(x, below),
             ExprKind::Per(x, unit) => {
-                let unit = *unit;
-                let found = self.kind(x, cx)?;
-                let message = match found {
-                    Kind::Number | Kind::Amount => return Some(Kind::Rate(unit)),
-                    Kind::Rate(from) => match from.conversion_to(unit) {
-                        // Function bodies are shared by every call, so they
-                        // can't convert a rate that's only per month in some.
-                        Some((mul, div)) if self.calls.is_empty() => {
-                            scale(x, mul, div);
-                            return Some(Kind::Rate(unit));
-                        }
-                        Some(_) => format!(
-                            "can't convert {found} to per {unit} inside a function; \
-                             convert it before passing it in"
-                        ),
-                        None => {
-                            let (short, long) = (from.min(unit), from.max(unit));
-                            format!(
-                                "can't convert {found} to per {unit}: \
-                                 a {long} isn't a fixed number of {short}s"
-                            )
-                        }
-                    },
-                    Kind::Total(_) => format!(
-                        "`per {unit}` can't apply to {found}, which is an amount so far, \
-                         not per period"
-                    ),
-                };
-                self.error(Diagnostic::new(span, message));
-                None
+                let found = self.kind(x, below)?;
+                self.per(x, found, *unit, span)
             }
             ExprKind::Not(x) => {
-                self.kind(x, cx);
+                self.kind(x, below);
                 Some(Kind::Number)
             }
             ExprKind::Bin(a, op, b) => {
-                let (ka, kb) = (self.kind(a, cx), self.kind(b, cx));
+                let (ka, kb) = (self.kind(a, below), self.kind(b, below));
                 let (ka, kb) = (ka?, kb?);
                 match op {
                     BinOp::And | BinOp::Or => Some(Kind::Number),
                     BinOp::Mul => self.multiply(ka, kb, span),
                     BinOp::Div => self.divide(ka, b, kb, span),
                     BinOp::Add | BinOp::Sub => {
-                        self.combine(a, ka, b, kb, &format!("`{op}`"), false, span, cx)
+                        self.combine(a, ka, b, kb, Combiner::Op(*op), span, cx)
                     }
                     BinOp::Lt
                     | BinOp::LtEq
@@ -222,15 +252,15 @@ impl Checker<'_> {
                     | BinOp::GtEq
                     | BinOp::Eq
                     | BinOp::NotEq => {
-                        self.combine(a, ka, b, kb, &format!("`{op}`"), false, span, cx)?;
+                        self.combine(a, ka, b, kb, Combiner::Op(*op), span, cx)?;
                         Some(Kind::Number)
                     }
                 }
             }
             ExprKind::If(cond, then, else_) => {
-                self.kind(cond, cx);
+                self.kind(cond, below);
                 let (kt, ke) = (self.kind(then, cx), self.kind(else_, cx));
-                self.combine(then, kt?, else_, ke?, "this `if`", true, span, cx)
+                self.combine(then, kt?, else_, ke?, Combiner::If, span, cx)
             }
             ExprKind::Builtin(builtin, args) => match builtin {
                 Builtin::Min | Builtin::Max => {
@@ -238,24 +268,110 @@ impl Checker<'_> {
                         unreachable!("the resolver checks arity");
                     };
                     let (ka, kb) = (self.kind(a, cx), self.kind(b, cx));
-                    let what = format!("`{}`", builtin.name());
-                    self.combine(a, ka?, b, kb?, &what, true, span, cx)
+                    let combiner = Combiner::Builtin(*builtin);
+                    self.combine(a, ka?, b, kb?, combiner, span, cx)
                 }
                 Builtin::Abs | Builtin::Floor | Builtin::Ceil | Builtin::Round => {
-                    self.kind(&mut args[0], cx)
+                    self.kind(&mut args[0], below)
                 }
+                Builtin::Fill => unreachable!("handled above"),
             },
+            ExprKind::Fill(..) => Some(Kind::Amount),
             ExprKind::Call(f, args) => {
-                let kinds: Vec<Option<Kind>> = args.iter_mut().map(|a| self.kind(a, cx)).collect();
+                let kinds: Vec<Option<Kind>> =
+                    args.iter_mut().map(|a| self.kind(a, below)).collect();
                 let kinds = kinds.into_iter().collect::<Option<Vec<_>>>()?;
                 self.call(*f, kinds, span)
             }
         }
     }
 
-    /// The kind of combining `a` and `b`, which must measure the same thing:
-    /// the operands of `+`, `-` and comparisons, or the values that `min`,
-    /// `max` and `if` pick between (`picks`). `what` names the operation.
+    /// The kind of `x per unit`, where `x` is of kind `found`, converting `x`
+    /// if it's a rate per another unit.
+    fn per(&mut self, x: &mut Expr, found: Kind, unit: TimeUnit, span: Span) -> Option<Kind> {
+        let message = match found {
+            Kind::Number | Kind::Amount => return Some(Kind::Rate(unit)),
+            Kind::Rate(from) => match from.conversion_to(unit) {
+                // Function bodies are shared by every call, so they can't
+                // convert a rate that's only per month in some.
+                Some((mul, div)) if self.calls.is_empty() => {
+                    scale(x, mul, div);
+                    return Some(Kind::Rate(unit));
+                }
+                Some(_) => format!(
+                    "can't convert {found} to per {unit} inside a function; \
+                     convert it before passing it in"
+                ),
+                None => {
+                    let (short, long) = (from.min(unit), from.max(unit));
+                    format!(
+                        "can't convert {found} to per {unit}: \
+                         a {long} isn't a fixed number of {short}s"
+                    )
+                }
+            },
+            Kind::Total(_) => format!(
+                "`per {unit}` can't apply to {found}, which is an amount so far, \
+                 not per period"
+            ),
+        };
+        self.error(Diagnostic::new(span, message));
+        None
+    }
+
+    /// Checks `fill(target)` and turns it into an [`ExprKind::Fill`].
+    fn fill(&mut self, e: &mut Expr, cx: Cx) -> Option<Kind> {
+        let span = e.span;
+        let ExprKind::Builtin(_, args) = &mut e.kind else {
+            unreachable!("only called on `fill`");
+        };
+        // The target is an amount for the whole period, not what's posted, so
+        // its rates aren't spread.
+        let as_target = Cx {
+            posting: false,
+            posted: false,
+            ..cx
+        };
+        let found = self.kind(&mut args[0], as_target)?;
+        let (true, Some((entry, leg))) = (cx.posted, self.posting) else {
+            self.error(Diagnostic::new(
+                span,
+                "`fill` can only be the amount a posting posts, \
+                 or what `min`, `max` or `if` pick for it",
+            ));
+            return None;
+        };
+        let (Kind::Rate(unit) | Kind::Total(unit)) = found else {
+            self.error(Diagnostic::new(
+                args[0].span,
+                format!(
+                    "`fill` needs an amount per period, like `24_500 per year`, \
+                     or a total like `x.ytd`, but this is {found}"
+                ),
+            ));
+            return None;
+        };
+        if let Some(leg) = leg
+            && reads_total(&args[0], leg)
+        {
+            self.error(Diagnostic::new(
+                args[0].span,
+                "`fill` already subtracts what this posting has posted, \
+                 so this subtracts it twice",
+            ));
+            return None;
+        }
+        let target = args.pop().expect("the resolver checks arity");
+        let slot = self.fills.len();
+        self.fills.push(Fill { entry, unit, span });
+        self.posting_fills.push(slot);
+        e.kind = ExprKind::Fill(Box::new(target), unit, slot);
+        Some(Kind::Amount)
+    }
+
+    /// The kind of combining `a` and `b` with `what`, where they must measure
+    /// the same thing: the operands of `+`, `-` and comparisons, or the values
+    /// that `min`, `max` and `if` pick between.
     #[allow(clippy::too_many_arguments)]
     fn combine(
         &mut self,
@@ -263,8 +379,7 @@ impl Checker<'_> {
         ka: Kind,
         b: &mut Expr,
         kb: Kind,
-        what: &str,
-        picks: bool,
+        what: Combiner,
         span: Span,
         cx: Cx,
     ) -> Option<Kind> {
@@ -275,9 +390,9 @@ impl Checker<'_> {
             _ if ka == kb => Some(ka),
             // In a posting, `min`, `max` and `if` pick the amount to post, so
             // a rate among the choices is the firing's share of it.
-            (Rate(_), _) | (_, Rate(_)) if cx.posting && picks => {
+            (Rate(_), _) | (_, Rate(_)) if cx.posting && what.picks() => {
                 let (ka, kb) = spread_both(a, b);
-                self.combine(a, ka, b, kb, what, picks, span, cx)
+                self.combine(a, ka, b, kb, what, span, cx)
             }
             // Both measure the current period, so the rate counts in full: a
             // per-year limit minus a `.ytd` total is what's left of the limit.
@@ -285,7 +400,7 @@ impl Checker<'_> {
             // In a posting, a rate is the firing's share of it.
             (Rate(_), _) | (_, Rate(_)) if cx.posting => {
                 let (ka, kb) = spread_both(a, b);
-                self.combine(a, ka, b, kb, what, picks, span, cx)
+                self.combine(a, ka, b, kb, what, span, cx)
             }
             (Amount | Total(_), Amount | Total(_)) => Some(Amount),
             _ => {
@@ -365,6 +480,7 @@ impl Checker<'_> {
         for stmt in &mut body {
             let cx = Cx {
                 posting: false,
+                posted: false,
                 locals: &locals,
             };
             match stmt {
@@ -379,6 +495,28 @@ impl Checker<'_> {
         self.fns[f].body = body;
         self.instances.insert(key, result);
         result
+    }
+}
+
+/// Whether `e` reads a `.ytd`, `.qtd` or `.mtd` total of `leg`.
+fn reads_total(e: &Expr, leg: usize) -> bool {
+    let reads = |e: &Expr| reads_total(e, leg);
+    match &e.kind {
+        ExprKind::Total(total, _) => *total == leg,
+        ExprKind::Num(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Account(_)
+        | ExprKind::Param(_)
+        | ExprKind::Leg(_)
+        | ExprKind::Local(_) => false,
+        ExprKind::Neg(x)
+        | ExprKind::Not(x)
+        | ExprKind::Per(x, _)
+        | ExprKind::Spread(x, _)
+        | ExprKind::Fill(x, ..) => reads(x),
+        ExprKind::Bin(a, _, b) => reads(a) || reads(b),
+        ExprKind::If(c, t, f) => reads(c) || reads(t) || reads(f),
+        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => args.iter().any(reads),
     }
 }
 

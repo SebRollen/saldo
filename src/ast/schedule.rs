@@ -353,6 +353,18 @@ impl Schedule {
         share
     }
 
+    /// How many times the schedule fires from `t` to the end of `t`'s
+    /// period, including on `t`.
+    pub fn firings_left(&self, unit: TimeUnit, t: NaiveDate) -> u32 {
+        let start = unit.period_start(t);
+        std::iter::successors(Some(t), |d| d.succ_opt())
+            .take_while(|d| unit.period_start(*d) == start)
+            .filter(|d| self.matches(*d))
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
+
     /// The last day before `t` that fits the schedule's pattern, if there's one
     /// in the few centuries before it.
     fn previous_match(&self, t: NaiveDate) -> Option<NaiveDate> {
@@ -1204,6 +1216,17 @@ mod tests {
             .map(|s| s.carried + 1)
             .collect();
             assert_eq!(days, [31, 28, 31]);
+        }
+
+        #[test]
+        fn firings_left_respect_from() {
+            let schedule = schedule("every month from 2026-07-01");
+            assert_eq!(schedule.firings_left(TimeUnit::Year, date(2026, 7, 31)), 6);
+            assert_eq!(schedule.firings_left(TimeUnit::Year, date(2026, 12, 31)), 1);
+            assert_eq!(
+                schedule.firings_left(TimeUnit::Quarter, date(2026, 8, 31)),
+                2
+            );
         }
 
         #[test]

@@ -157,7 +157,9 @@ In detail:
 - **The schedule's pattern decides the split, not its `from` date.** An
   entry `every month from 2026-07-01` posts a twelfth of a yearly rate each
   month, so half of it in 2026. Firings before the simulation starts count
-  too, so you see the same paychecks whatever `--from` you choose.
+  too, so you see the same paychecks whatever `--from` you choose. To post
+  the whole amount over the firings that are left, use
+  [`fill`](#filling-a-target).
 - **A period without a firing rolls into the next one.** A `quarterly` entry
   posts three months of a rate per month, and an `every second friday`
   entry posts two weeks of a rate per week.
@@ -169,6 +171,41 @@ more. Declare the salary per week:
 ```
 param salary = (130_000 / 52) per week
 ```
+
+### Filling a target
+
+A rate spreads evenly, like a salary. Some amounts are targets instead: you
+want a year's 401(k) contributions to reach the limit, however many
+paychecks are left. `fill` posts what's left of the period's amount,
+divided by the firings left in the period:
+
+```
+param salary   = 150_000 per year
+param max_401k = 24_500 per year
+
+entry every second friday from 2026-07-10 "New job" {
+  Assets:Retirement = fill(max_401k) as contribution
+  Assets:Cash       = salary - contribution
+  Income:Salary
+}
+```
+
+The job starts in July, so its 13 paydays in 2026 contribute 24,500 between
+them, while the salary, which is spread, pays half a year. From 2027 there
+are 26 paydays, and each contributes a 26th.
+
+What's left is the amount minus what the posting has already posted this
+period, so if an earlier firing posts less, later ones make up the
+difference. `min(fill(max_401k), cap)` contributes as much as `cap` allows
+and catches up when it can. To count contributions from elsewhere, subtract
+them from the target, for example `fill(max_401k - old_job.contribution.ytd)`.
+Don't subtract the posting's own total: `fill` already does.
+
+The period comes from the target: a rate's unit, or a total's period, like
+the year of a `.ytd`. `fill` can only be the amount a posting posts, or
+what `min`, `max` or `if` choose for it. Like a `.ytd` total, it only knows
+what was posted since the simulation started, so saldo warns if it starts
+partway through a period after the entry would have fired.
 
 ## Complete example
 
