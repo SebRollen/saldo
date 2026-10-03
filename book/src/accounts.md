@@ -119,8 +119,9 @@ earlier ones. Within a single entry, every posting is evaluated against the
 balances from before that entry fired, so one posting never sees another
 posting from the same entry.
 
-Params are evaluated at the start of each day, so a param that reads an account
-sees the balance before any entries fire that day.
+Params are evaluated again after each entry fires, so a param that reads an
+account sees the same balance as an account reference in the entry reading
+the param.
 
 ## Declaration order
 

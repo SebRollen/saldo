@@ -31,13 +31,14 @@ Every simulated day runs these steps in order:
 3. Accounts whose opening date is today get their opening balance, in
    declaration order. If any account opened, params are evaluated again so
    they can see it.
-4. Entries whose schedule matches today fire, in declaration order. A later
-   entry sees the balances left by earlier ones. Within one entry, every
-   posting is evaluated against the balances from before that entry fired.
+4. Entries whose schedule matches today fire, in declaration order. Params
+   are evaluated again after each one, so a later entry, directly or through
+   a param, sees the balances and `.ytd` totals left by earlier ones. Within
+   one entry, every posting is evaluated against the balances from before
+   that entry fired, and its own legs' totals don't include the firing in
+   progress.
 5. Assertions whose schedule matches today are checked against the balances
-   after all entries fired.
-6. Named legs from today's entries are added to their period totals. So a
-   `.ytd` read during an entry doesn't include that day's amount.
+   and params after all entries fired.
 
 The first failing assertion or evaluation error stops the simulation.
 

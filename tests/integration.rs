@@ -594,6 +594,58 @@ fn param_can_read_an_account_once_it_opens() {
 }
 
 #[test]
+fn param_sees_earlier_entries_that_day() {
+    let src = "
+        account Assets:Cash = 100 @ 2025-01-01
+        account Assets:Savings
+        account Income:Salary
+        param half = Assets:Cash / 2
+        entry 2025-01-02 \"Paycheck\" {
+          Assets:Cash = 1_000
+          Income:Salary
+        }
+        entry 2025-01-02 \"Save half\" {
+          Assets:Savings = half
+          Assets:Cash
+        }
+        assert 2025-01-02 that half >= 275
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-02")).unwrap();
+    assert_eq!(postings_to(&output, "Assets:Savings"), [usd("550")]);
+}
+
+#[test]
+fn totals_include_earlier_entries_that_day() {
+    let src = "
+        account Assets:Cash
+        account Assets:Retirement
+        account Expense:Tax
+        account Expense:Fees
+        account Income:Salary
+        entry monthly \"Paycheck\" {
+          Assets:Retirement = 100 as k401
+          Assets:Cash       = 900
+          Income:Salary
+        } as paycheck
+        param deducted = paycheck.k401.ytd
+        entry monthly \"Year end\" {
+          Expense:Tax  = deducted
+          Expense:Fees = paycheck.k401.ytd
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-02-28")).unwrap();
+    assert_eq!(
+        postings_to(&output, "Expense:Tax"),
+        [usd("100"), usd("200")]
+    );
+    assert_eq!(
+        postings_to(&output, "Expense:Fees"),
+        [usd("100"), usd("200")]
+    );
+}
+
+#[test]
 fn account_opening_after_start_gets_an_opening_transaction() {
     let src = "account Assets:Cash = 1000 @ 2025-01-02";
     let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();

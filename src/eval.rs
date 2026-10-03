@@ -211,7 +211,8 @@ struct State<'p> {
     params: Vec<ParamValue>,
     /// Each leg's amount in the current day's firing (zero if it hasn't fired).
     legs_today: Vec<Decimal>,
-    /// Each leg's year/quarter/month-to-date totals, excluding today.
+    /// Each leg's year/quarter/month-to-date totals, excluding today; see
+    /// `total` for what an expression reads.
     totals: Vec<[Decimal; 3]>,
     /// The entry whose postings are being evaluated.
     firing: Option<usize>,
@@ -295,8 +296,13 @@ impl Program {
                     .extend(opening_transaction(t, opened, &equity)?);
             }
             for (i, entry) in self.entries.iter().enumerate() {
-                if entry.schedule.matches(t)
-                    && let Some(tx) = state.fire(i)?
+                if !entry.schedule.matches(t) {
+                    continue;
+                }
+                let tx = state.fire(i)?;
+                // Later entries and today's assertions see what this one posted.
+                state.evaluate_params();
+                if let Some(tx) = tx
                     && report
                 {
                     log.transactions.push(tx);
@@ -470,6 +476,7 @@ impl State<'_> {
             }
             None => {}
         }
+        self.firing = None;
 
         for &(account, amount) in &amounts {
             let balance = self.balance(account);
@@ -576,7 +583,7 @@ impl State<'_> {
             ExprKind::Param(param) => self.param(*param, span),
             ExprKind::Leg(leg) => Ok(Value::Num(self.legs_today[*leg])),
             ExprKind::Local(slot) => Ok(Value::Num(locals[*slot])),
-            ExprKind::Total(leg, kind) => Ok(Value::Num(self.totals[*leg][period_index(*kind)])),
+            ExprKind::Total(leg, kind) => self.total(*leg, *kind, span).map(Value::Num),
             ExprKind::Neg(x) => match self.eval(x, locals)? {
                 Value::Num(n) => Ok(Value::Num(-n)),
                 _ => Err(Diagnostic::new(
@@ -639,6 +646,24 @@ impl State<'_> {
 
     // `eval` recurses once per level of nesting, so its arms with much to do
     // call these to keep its stack frame small.
+
+    /// What `leg` has posted so far this `kind` of period: earlier days, plus
+    /// today unless its entry is the one firing.
+    fn total(&self, leg: usize, kind: AggKind, span: Span) -> Result<Decimal, Diagnostic> {
+        let earlier = self.totals[leg][period_index(kind)];
+        if self.firing == Some(self.program.legs[leg].entry) {
+            return Ok(earlier);
+        }
+        earlier.checked_add(self.legs_today[leg]).ok_or_else(|| {
+            Diagnostic::new(
+                span,
+                format!(
+                    "running total of leg `{}` overflowed",
+                    self.program.legs[leg].name
+                ),
+            )
+        })
+    }
 
     fn param(&self, param: usize, span: Span) -> Result<Value, Diagnostic> {
         match &self.params[param] {

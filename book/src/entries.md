@@ -78,7 +78,8 @@ entry semi_monthly "Jim's paycheck" {
 ```
 
 `retirement_contribution.ytd` is the running year-to-date sum of every
-`retirement_contribution` leg across all firings so far this year. Once a
+`retirement_contribution` leg across all firings so far this year, including
+earlier ones today but not the firing in progress. Once a
 leg name is established, you can reference it in the same entry on
 subsequent posting lines (as `retirement_contribution` above, without `.ytd`),
 which gives you the value from the *current* firing.
