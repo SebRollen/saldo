@@ -276,6 +276,14 @@ impl<'src> Parser<'src> {
             self.advance();
             return Some(Ordinal::First);
         }
+        // A bare 1 is a day, as in `jan 1`. `try_parse_nth` doesn't take it,
+        // because as a count (`every 1 week`) it means nothing.
+        if let Token::Number(n) = self.peek()
+            && *n == Decimal::ONE
+        {
+            self.advance();
+            return Some(Ordinal::First);
+        }
         if let Token::Ident(s) = self.peek() {
             if *s == "first" {
                 self.advance();
@@ -752,6 +760,31 @@ mod tests {
             }
             parse("monthly on the 31st, 5th friday, 23rd weekday");
             parse("yearly on feb 29th");
+        }
+
+        #[test]
+        fn bare_numbers_are_days() {
+            let Schedule::Periodic(periodic) = parse("yearly on jan 1, jul 31") else {
+                panic!("not periodic")
+            };
+            assert_eq!(
+                Period::Year {
+                    on: vec![
+                        (Month::January, Ordinal::First),
+                        (Month::July, Ordinal::Nth(Nth::new(31))),
+                    ]
+                },
+                periodic.period
+            );
+            let Schedule::Periodic(periodic) = parse("monthly on the 1") else {
+                panic!("not periodic")
+            };
+            assert_eq!(
+                Period::Month {
+                    on: vec![MonthOccurrence::Day(Ordinal::First)]
+                },
+                periodic.period
+            );
         }
 
         #[test]
