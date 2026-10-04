@@ -19,17 +19,20 @@ param max_401k = 24_500 per year
 A `%` after a value divides it by 100, so `5%` is `0.05`. `per year` makes
 the value a rate (see [Rates](#rates)).
 
-The expression is re-evaluated at the start of each simulated day. For
-expressions built from numbers and other constant params, the value never
-changes. A param that reads an account balance follows that balance as it
-changes.
+The expression is evaluated at the start of each simulated day and again
+after each entry fires. For expressions built from numbers and other constant
+params, the value never changes. A param that reads an account balance follows
+that balance as it changes.
 
 ## Time-varying params
 
+A param can take different values on different days. Write its *arms* in
+braces, each a condition and a value:
+
 ```
 param <name> {
-  from <date> [to <date>] = <expression>
-  from <date> [to <date>] = <expression>
+  <condition> = <expression>
+  <condition> = <expression>
   ...
 }
 ```
@@ -41,24 +44,59 @@ param salary {
 }
 ```
 
-Each interval specifies a `from` date (inclusive) and an optional `to`
-date (exclusive). The simulator uses whichever interval covers the current
-day. Intervals must not overlap. An interval without a `to` clause extends
-indefinitely.
+On each day, the first arm whose condition covers that day gives the value.
+So put an exception above the arms it's an exception to:
 
-On a day that no interval covers (before the first interval, in a gap
-between intervals, or after the last one ends), the param has no value.
-Using it on such a day is an error, so add an interval with the value you
-want, for example `= 0`, to cover those days.
+```
+param daycare {
+  in jan 2027     = 0      // closed for renovation
+  in jul, aug     = 0      // summer break
+  from 2027-09-01 = 2_100
+  else            = 1_950
+}
+```
+
+### Conditions
+
+| Condition | Covers |
+|-----------|--------|
+| `from 2026-04-01` | that day and every day after |
+| `from 2026-01-01 to 2026-04-01` | from the first date up to, but not including, the second |
+| `from 2027`, `from jul 2027`, `from q3 2027` | the start of that year, month or quarter and every day after |
+| `in may` | May, every year |
+| `in q2` | April through June, every year |
+| `in jul through apr` | July through April, every year |
+| `in 2026` | all of 2026 |
+| `in mar 2028`, `in q2 2028` | that month or quarter, once |
+| `in 2026 through 2028` | the start of 2026 to the end of 2028 |
+| `else` | every day |
+
+`in` takes a list, like `in jul, aug` or `in q2, dec 2028`, and covers the
+days of any of them. A month or quarter without a year comes every year, and
+one with a year comes once. Both ends of a `through` need a year, or neither.
+Write years in full.
+
+An arm that the arms above it already cover entirely, like one after `else`,
+is an error, since it would never apply.
+
+On a day that no arm covers, the param has no value. Using it on such a day is
+an error, so end with `else`, or add an arm with the value you want, like
+`= 0`, for those days.
+
+A param's arms must agree on what kind of value it is, like a rate per year
+(see [Rates](#rates)). A rate in an arm for some months is still a rate:
+`in jul, aug = 60_000 per year` posts a twelfth of 60,000 in each of July and
+August from a monthly entry, not half of it. For what a month costs, write
+`per month` or a plain amount.
 
 A more complete example:
 
 ```
 param beth_salary {
-  from 2026-01-01 to 2027-01-01 = 160_000 per year
-  from 2027-01-01 to 2028-01-01 = 190_000 per year
-  from 2028-01-01 to 2029-01-01 = 225_000 per year
-  from 2029-01-01 to 2030-01-01 = 255_000 per year
+  in 2026 = 160_000 per year
+  in 2027 = 190_000 per year
+  in 2028 = 225_000 per year
+  in 2029 = 255_000 per year
 }
 ```
 

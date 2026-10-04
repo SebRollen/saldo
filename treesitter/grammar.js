@@ -44,8 +44,11 @@ module.exports = grammar({
     // -----------------------------------------------------------------------
     // Param declaration
     //   param interest_rate = 5%
-    //   param jim_salary {
-    //     from 2025-12-31 to 2026-04-01 = 115_000 per year
+    //   param daycare {
+    //     in jan 2027     = 0
+    //     in jul, aug     = 0
+    //     from 2027-09-01 = 2_100
+    //     else            = 1_950
     //   }
     // -----------------------------------------------------------------------
 
@@ -53,26 +56,60 @@ module.exports = grammar({
       seq(
         "param",
         field("name", $.identifier),
-        choice($.const_body, $.schedule_body),
+        choice($.const_body, $.arms_body),
       ),
 
     const_body: ($) => seq("=", $._expr),
 
-    schedule_body: ($) =>
+    arms_body: ($) =>
       seq(
         "{",
-        repeat($.interval),
+        repeat($.arm),
         "}",
       ),
 
-    interval: ($) =>
+    arm: ($) =>
       seq(
-        "from",
-        field("from", $.date),
-        optional(seq("to", field("to", $.date))),
+        field("when", choice($.from_condition, $.in_condition, "else")),
         "=",
         field("value", $._expr),
       ),
+
+    from_condition: ($) =>
+      seq(
+        "from",
+        field("from", choice($.date, $._dated_period)),
+        optional(seq("to", field("to", $.date))),
+      ),
+
+    // in jul, aug / in jul through apr / in q2 2028 / in 2026 through 2028
+    in_condition: ($) =>
+      seq(
+        "in",
+        $.calendar_range,
+        repeat(seq($._list_separator, $.calendar_range)),
+      ),
+
+    calendar_range: ($) =>
+      seq(
+        $._calendar_period,
+        optional(seq("through", $._calendar_period)),
+      ),
+
+    // A month or quarter, every year, or with a year, once; or a year.
+    _calendar_period: ($) =>
+      choice(
+        seq(choice($.month_name, $.quarter), optional($.integer)),
+        $.integer,
+      ),
+
+    _dated_period: ($) =>
+      choice(
+        seq(choice($.month_name, $.quarter), $.integer),
+        $.integer,
+      ),
+
+    quarter: (_) => choice("q1", "q2", "q3", "q4"),
 
     // -----------------------------------------------------------------------
     // Schedule declaration

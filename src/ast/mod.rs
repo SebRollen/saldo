@@ -2,7 +2,7 @@ pub mod schedule;
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-pub use schedule::Schedule;
+pub use schedule::{Schedule, When, Window};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Span {
@@ -252,10 +252,10 @@ pub enum ScheduleRef {
     Named(String, Span),
 }
 
+/// A time-varying param's value on the days `when` covers.
 #[derive(Clone, Debug)]
-pub struct Interval {
-    pub from: NaiveDate,
-    pub to: Option<NaiveDate>,
+pub struct Arm {
+    pub when: When,
     pub value: SpannedExpr,
     pub span: Span,
 }
@@ -280,7 +280,8 @@ pub struct Posting {
 #[derive(Clone, Debug)]
 pub enum ParamBody {
     Const(SpannedExpr),
-    Schedule(Vec<Interval>),
+    /// Arms, of which the first that covers a day gives the value.
+    Arms(Vec<Arm>),
 }
 
 #[derive(Clone, Debug)]

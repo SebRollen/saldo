@@ -46,9 +46,9 @@ pub fn check(program: &Program, fns: &HashMap<String, FnDef>) -> Vec<Diagnostic>
             } => checker.expect(e, Ty::Num, "an opening balance"),
             Decl::Param { body, .. } => match body {
                 ParamBody::Const(e) => checker.expect(e, Ty::Num, "a param"),
-                ParamBody::Schedule(intervals) => {
-                    for iv in intervals {
-                        checker.expect(&iv.value, Ty::Num, "a param");
+                ParamBody::Arms(arms) => {
+                    for arm in arms {
+                        checker.expect(&arm.value, Ty::Num, "a param");
                     }
                 }
             },

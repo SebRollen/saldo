@@ -14,10 +14,12 @@
 
 "return" @keyword.return
 
-; Temporal / interval keywords
+; Temporal keywords
 [
   "from"
   "to"
+  "in"
+  "through"
 ] @keyword
 
 ; Schedule period keywords
@@ -36,8 +38,9 @@
 ; Day-of-week names
 (day_of_week) @keyword
 
-; Month names
+; Month names and quarters
 (month_name) @keyword
+(quarter) @keyword
 
 ; Ordinal words (first, last, second, …)
 (ordinal_word) @keyword

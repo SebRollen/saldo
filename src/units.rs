@@ -169,12 +169,12 @@ impl Checker<'_> {
         let name = &param.name;
         match &mut param.body {
             ParamBody::Const(e) => self.kind(e, GLOBAL),
-            ParamBody::Intervals(intervals) => {
-                let found: Vec<(Option<Kind>, Span)> = intervals
+            ParamBody::Arms(arms) => {
+                let found: Vec<(Option<Kind>, Span)> = arms
                     .iter_mut()
-                    .map(|iv| (self.kind(&mut iv.value, GLOBAL), iv.value.span))
+                    .map(|arm| (self.kind(&mut arm.value, GLOBAL), arm.value.span))
                     .collect();
-                // The param is whatever its intervals agree on.
+                // The param is whatever its arms agree on.
                 let mut agreed = Kind::Number;
                 let mut first: Option<(Kind, Span)> = None;
                 for (found, span) in found {
@@ -186,12 +186,12 @@ impl Checker<'_> {
                             Kind::Amount
                         }
                         _ => {
-                            let (first, first_span) = first.expect("an earlier interval set it");
+                            let (first, first_span) = first.expect("an earlier arm set it");
                             self.error(
                                 Diagnostic::new(
                                     span,
                                     format!(
-                                        "param `{name}` is {first} in one interval \
+                                        "param `{name}` is {first} in one arm \
                                          but {found} in another"
                                     ),
                                 )

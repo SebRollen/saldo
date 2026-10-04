@@ -185,6 +185,103 @@
     "fields": {}
   },
   {
+    "type": "arm",
+    "named": true,
+    "fields": {
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "agg_expr",
+            "named": true
+          },
+          {
+            "type": "binary_expr",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expr",
+            "named": true
+          },
+          {
+            "type": "colon_path",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "if_expr",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
+            "type": "unary_minus",
+            "named": true
+          }
+        ]
+      },
+      "when": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "else",
+            "named": false
+          },
+          {
+            "type": "from_condition",
+            "named": true
+          },
+          {
+            "type": "in_condition",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "arms_body",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "arm",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "assert_decl",
     "named": true,
     "fields": {
@@ -410,6 +507,29 @@
     "type": "boolean",
     "named": true,
     "fields": {}
+  },
+  {
+    "type": "calendar_range",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "month_name",
+          "named": true
+        },
+        {
+          "type": "quarter",
+          "named": true
+        }
+      ]
+    }
   },
   {
     "type": "call_expr",
@@ -880,6 +1000,44 @@
     }
   },
   {
+    "type": "from_condition",
+    "named": true,
+    "fields": {
+      "from": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "date",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "month_name",
+            "named": true
+          },
+          {
+            "type": "quarter",
+            "named": true
+          }
+        ]
+      },
+      "to": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "date",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "if_expr",
     "named": true,
     "fields": {
@@ -1076,87 +1234,18 @@
     }
   },
   {
-    "type": "interval",
+    "type": "in_condition",
     "named": true,
-    "fields": {
-      "from": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "date",
-            "named": true
-          }
-        ]
-      },
-      "to": {
-        "multiple": false,
-        "required": false,
-        "types": [
-          {
-            "type": "date",
-            "named": true
-          }
-        ]
-      },
-      "value": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "agg_expr",
-            "named": true
-          },
-          {
-            "type": "binary_expr",
-            "named": true
-          },
-          {
-            "type": "boolean",
-            "named": true
-          },
-          {
-            "type": "call_expr",
-            "named": true
-          },
-          {
-            "type": "colon_path",
-            "named": true
-          },
-          {
-            "type": "float",
-            "named": true
-          },
-          {
-            "type": "if_expr",
-            "named": true
-          },
-          {
-            "type": "integer",
-            "named": true
-          },
-          {
-            "type": "not_expr",
-            "named": true
-          },
-          {
-            "type": "parenthesized_expr",
-            "named": true
-          },
-          {
-            "type": "per_expr",
-            "named": true
-          },
-          {
-            "type": "percent_expr",
-            "named": true
-          },
-          {
-            "type": "unary_minus",
-            "named": true
-          }
-        ]
-      }
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "calendar_range",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -1367,11 +1456,11 @@
       "required": true,
       "types": [
         {
-          "type": "const_body",
+          "type": "arms_body",
           "named": true
         },
         {
-          "type": "schedule_body",
+          "type": "const_body",
           "named": true
         }
       ]
@@ -1678,6 +1767,11 @@
     }
   },
   {
+    "type": "quarter",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "return_stmt",
     "named": true,
     "fields": {
@@ -1739,21 +1833,6 @@
           }
         ]
       }
-    }
-  },
-  {
-    "type": "schedule_body",
-    "named": true,
-    "fields": {},
-    "children": {
-      "multiple": true,
-      "required": false,
-      "types": [
-        {
-          "type": "interval",
-          "named": true
-        }
-      ]
     }
   },
   {
@@ -2146,6 +2225,10 @@
     "named": false
   },
   {
+    "type": "in",
+    "named": false
+  },
+  {
     "type": "integer",
     "named": true
   },
@@ -2266,6 +2349,22 @@
     "named": false
   },
   {
+    "type": "q1",
+    "named": false
+  },
+  {
+    "type": "q2",
+    "named": false
+  },
+  {
+    "type": "q3",
+    "named": false
+  },
+  {
+    "type": "q4",
+    "named": false
+  },
+  {
     "type": "qtd",
     "named": false
   },
@@ -2355,6 +2454,10 @@
   },
   {
     "type": "third",
+    "named": false
+  },
+  {
+    "type": "through",
     "named": false
   },
   {

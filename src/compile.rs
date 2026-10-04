@@ -2,8 +2,8 @@
 //! anything up by name: accounts, params, legs, functions and function locals
 //! all become indices.
 
-use crate::ast::Schedule;
 use crate::ast::{self, AggKind, BinOp, Path, Span, TimeUnit};
+use crate::ast::{Schedule, When};
 use crate::resolver::Model;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -40,19 +40,13 @@ pub struct Param {
 
 pub enum ParamBody {
     Const(Expr),
-    Intervals(Vec<Interval>),
+    /// Arms, of which the first that covers a day gives the value.
+    Arms(Vec<Arm>),
 }
 
-pub struct Interval {
-    pub from: NaiveDate,
-    pub to: Option<NaiveDate>,
+pub struct Arm {
+    pub when: When,
     pub value: Expr,
-}
-
-impl Interval {
-    pub fn contains(&self, t: NaiveDate) -> bool {
-        t >= self.from && self.to.is_none_or(|to| t < to)
-    }
 }
 
 pub struct Function {
@@ -244,13 +238,11 @@ pub fn compile(model: &Model) -> Program {
                 name: name.clone(),
                 body: match body {
                     ast::ParamBody::Const(e) => ParamBody::Const(names.lower(e, &global)),
-                    ast::ParamBody::Schedule(intervals) => ParamBody::Intervals(
-                        intervals
-                            .iter()
-                            .map(|iv| Interval {
-                                from: iv.from,
-                                to: iv.to,
-                                value: names.lower(&iv.value, &global),
+                    ast::ParamBody::Arms(arms) => ParamBody::Arms(
+                        arms.iter()
+                            .map(|arm| Arm {
+                                when: arm.when.clone(),
+                                value: names.lower(&arm.value, &global),
                             })
                             .collect(),
                     ),

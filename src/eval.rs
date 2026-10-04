@@ -96,9 +96,9 @@ impl Model {
         for body in self.params.values() {
             match body {
                 ParamBody::Const(e) => collect(e, None),
-                ParamBody::Schedule(intervals) => {
-                    for iv in intervals {
-                        collect(&iv.value, None);
+                ParamBody::Arms(arms) => {
+                    for arm in arms {
+                        collect(&arm.value, None);
                     }
                 }
             }
@@ -377,10 +377,10 @@ impl State<'_> {
         for param in &self.program.params {
             let expr = match &param.body {
                 crate::compile::ParamBody::Const(e) => Some(e),
-                crate::compile::ParamBody::Intervals(intervals) => intervals
+                crate::compile::ParamBody::Arms(arms) => arms
                     .iter()
-                    .find(|iv| iv.contains(self.date))
-                    .map(|iv| &iv.value),
+                    .find(|arm| arm.when.contains(self.date))
+                    .map(|arm| &arm.value),
             };
             let value = match expr {
                 Some(e) => match self.eval_num(e, &[]) {
@@ -678,7 +678,7 @@ impl State<'_> {
             ParamValue::Inactive => Err(Diagnostic::new(
                 span,
                 format!(
-                    "param `{}` has no value on {}: none of its intervals cover this date",
+                    "param `{}` has no value on {}: none of its arms cover this date",
                     self.program.params[param].name, self.date
                 ),
             )),

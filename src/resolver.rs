@@ -1,7 +1,7 @@
 use crate::ast::schedule::{Period, Periodic};
 use crate::ast::{
-    Decl, Expr, ParamBody, Path, Posting, PostingAmount, Program, Schedule, ScheduleRef, Span,
-    SpannedExpr, Stmt,
+    Arm, Decl, Expr, ParamBody, Path, Posting, PostingAmount, Program, Schedule, ScheduleRef, Span,
+    SpannedExpr, Stmt, When, Window,
 };
 use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
@@ -155,36 +155,10 @@ impl<'a> Resolver<'a> {
                             self.params
                                 .insert(name.clone(), ParamBody::Const(e.clone()));
                         }
-                        ParamBody::Schedule(intervals) => {
-                            let mut sorted = intervals.clone();
-                            sorted.sort_by_key(|i| i.from);
-                            for win in sorted.windows(2) {
-                                let a = &win[0];
-                                let b = &win[1];
-                                let a_end = a.to.unwrap_or(chrono::NaiveDate::MAX);
-                                if a_end > b.from {
-                                    self.diags.push(
-                                        Diagnostic::new(
-                                            b.span,
-                                            format!("param `{name}` has overlapping intervals"),
-                                        )
-                                        .with_note(a.span, "overlaps this interval"),
-                                    );
-                                    break;
-                                }
-                            }
-                            for i in &sorted {
-                                if let Some(to) = i.to
-                                    && to <= i.from
-                                {
-                                    self.diags.push(Diagnostic::new(
-                                        i.span,
-                                        "interval must end after it starts",
-                                    ));
-                                }
-                            }
+                        ParamBody::Arms(arms) => {
+                            self.check_arms(name, arms);
                             self.params
-                                .insert(name.clone(), ParamBody::Schedule(sorted));
+                                .insert(name.clone(), ParamBody::Arms(arms.clone()));
                         }
                     }
                     self.param_spans.insert(name.clone(), *span);
@@ -313,6 +287,44 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Reports `from … to …` ranges that end before they start, and arms that
+    /// never apply because the arms above cover all their days.
+    fn check_arms(&mut self, name: &str, arms: &[Arm]) {
+        for (i, arm) in arms.iter().enumerate() {
+            if let When::Windows(windows) = &arm.when
+                && windows
+                    .iter()
+                    .any(|w| matches!(*w, Window::Dates(from, Some(to)) if to <= from))
+            {
+                self.diags
+                    .push(Diagnostic::new(arm.span, "`to` must come after `from`"));
+                continue;
+            }
+            let above = &arms[..i];
+            if let Some(otherwise) = above.iter().find(|a| a.when == When::Always) {
+                self.diags.push(
+                    Diagnostic::new(
+                        arm.span,
+                        format!(
+                            "this arm of param `{name}` comes after `else`, so it never applies"
+                        ),
+                    )
+                    .with_note(otherwise.span, "`else` is here"),
+                );
+            } else if arm
+                .when
+                .is_shadowed_by(&above.iter().map(|a| &a.when).collect::<Vec<_>>())
+            {
+                self.diags.push(Diagnostic::new(
+                    arm.span,
+                    format!(
+                        "this arm of param `{name}` never applies: the arms above cover all its days"
+                    ),
+                ));
+            }
+        }
+    }
+
     /// Looks up a named schedule, or validates a literal one. Named schedules
     /// were already validated where they were declared.
     fn resolve_schedule_ref(&mut self, r: &ScheduleRef, decl_span: Span) -> Option<Schedule> {
@@ -354,9 +366,9 @@ impl<'a> Resolver<'a> {
                     ParamBody::Const(e) => {
                         self.check_expr(e, None, &no_extra, &stock_set, &param_set);
                     }
-                    ParamBody::Schedule(intervals) => {
-                        for i in intervals {
-                            self.check_expr(&i.value, None, &no_extra, &stock_set, &param_set);
+                    ParamBody::Arms(arms) => {
+                        for arm in arms {
+                            self.check_expr(&arm.value, None, &no_extra, &stock_set, &param_set);
                         }
                     }
                 },
@@ -569,9 +581,9 @@ fn collect_param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> 
     };
     match &body {
         ParamBody::Const(e) => walk_expr(e, &mut visitor),
-        ParamBody::Schedule(intervals) => {
-            for iv in intervals {
-                walk_expr(&iv.value, &mut visitor);
+        ParamBody::Arms(arms) => {
+            for arm in arms {
+                walk_expr(&arm.value, &mut visitor);
             }
         }
     }

@@ -417,6 +417,91 @@ trait PeriodEnd: Datelike {
 
 impl PeriodEnd for NaiveDate {}
 
+/// The days a param arm covers.
+#[derive(Clone, Debug, PartialEq)]
+pub enum When {
+    /// `else`: every day.
+    Always,
+    /// `from … to …` or `in …`: the days in any of these windows.
+    Windows(Vec<Window>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Window {
+    /// From the first date up to, but not including, the second.
+    Dates(NaiveDate, Option<NaiveDate>),
+    /// These months every year, a bit each with January in bit 0.
+    Months(u16),
+}
+
+impl Window {
+    pub fn contains(self, t: NaiveDate) -> bool {
+        match self {
+            Window::Dates(from, to) => t >= from && to.is_none_or(|to| t < to),
+            Window::Months(months) => months & (1 << t.month0()) != 0,
+        }
+    }
+}
+
+impl When {
+    pub fn contains(&self, t: NaiveDate) -> bool {
+        match self {
+            When::Always => true,
+            When::Windows(windows) => windows.iter().any(|w| w.contains(t)),
+        }
+    }
+
+    /// Whether `earlier` already cover every day this covers.
+    pub fn is_shadowed_by(&self, earlier: &[&When]) -> bool {
+        // Coverage only changes where a window starts or ends and at the start
+        // of a month, so those days stand for the rest. Before the first date
+        // a window starts or ends on, no `Dates` window has started; from the
+        // last one on, each has started or ended. So a year either side of
+        // them stands for every year beyond.
+        let edges: Vec<NaiveDate> = std::iter::once(self)
+            .chain(earlier.iter().copied())
+            .flat_map(When::edges)
+            .collect();
+        let any_year = NaiveDate::from_ymd_opt(2000, 1, 1).expect("a valid date");
+        let first = edges.iter().min().copied().unwrap_or(any_year);
+        let last = edges.iter().max().copied().unwrap_or(any_year);
+        let year = chrono::Months::new(12);
+        let start = month_start(first).checked_sub_months(year).unwrap_or(first);
+        let end = month_start(last)
+            .checked_add_months(year)
+            .unwrap_or(NaiveDate::MAX);
+        let mut days: Vec<NaiveDate> = std::iter::successors(Some(start), |t| {
+            t.checked_add_months(chrono::Months::new(1))
+        })
+        .take_while(|t| *t <= end)
+        .chain(edges)
+        .collect();
+        days.sort();
+        days.dedup();
+        days.into_iter()
+            .all(|t| !self.contains(t) || earlier.iter().any(|w| w.contains(t)))
+    }
+
+    /// The dates its `Dates` windows start and end on.
+    fn edges(&self) -> Vec<NaiveDate> {
+        let When::Windows(windows) = self else {
+            return Vec::new();
+        };
+        windows
+            .iter()
+            .flat_map(|w| match *w {
+                Window::Dates(from, to) => [Some(from), to],
+                Window::Months(_) => [None, None],
+            })
+            .flatten()
+            .collect()
+    }
+}
+
+fn month_start(t: NaiveDate) -> NaiveDate {
+    t.with_day(1).expect("every month has a first day")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1271,6 +1356,50 @@ mod tests {
             // The first date has no earlier one to carry from.
             let found = shares(src, TimeUnit::Month, date(2026, 1, 1), date(2026, 12, 31));
             assert_eq!(found, [share(0, 1, 1), share(1, 1, 1), share(2, 1, 1)]);
+        }
+    }
+
+    mod when {
+        use super::*;
+
+        fn months(list: &[u32]) -> When {
+            When::Windows(vec![Window::Months(
+                list.iter().map(|m| 1 << (m - 1)).sum(),
+            )])
+        }
+
+        fn from(from: NaiveDate, to: Option<NaiveDate>) -> When {
+            When::Windows(vec![Window::Dates(from, to)])
+        }
+
+        #[test]
+        fn shadowed_when_the_arms_above_cover_every_day() {
+            let q2 = months(&[4, 5, 6]);
+            assert!(months(&[5]).is_shadowed_by(&[&q2]));
+            assert!(!q2.is_shadowed_by(&[&months(&[5])]));
+
+            let open = from(date(2025, 1, 1), None);
+            assert!(from(date(2025, 6, 1), None).is_shadowed_by(&[&open]));
+            assert!(!from(date(2024, 6, 1), None).is_shadowed_by(&[&open]));
+
+            let all_months = months(&(1..=12).collect::<Vec<_>>());
+            assert!(When::Always.is_shadowed_by(&[&all_months]));
+            assert!(!When::Always.is_shadowed_by(&[&q2]));
+        }
+
+        #[test]
+        fn every_year_beats_any_range_of_dates() {
+            // May recurs before and after the range, so the range can't cover it.
+            let range = from(date(2026, 1, 1), Some(date(2028, 1, 1)));
+            assert!(!months(&[5]).is_shadowed_by(&[&range]));
+            let open = from(date(2027, 1, 1), None);
+            assert!(!months(&[5]).is_shadowed_by(&[&open]));
+            // A range is covered by months together with other ranges.
+            let may_2027 = from(date(2027, 5, 1), Some(date(2027, 6, 1)));
+            let rest = from(date(2027, 6, 1), Some(date(2027, 7, 1)));
+            let target = from(date(2027, 4, 1), Some(date(2027, 7, 1)));
+            assert!(!target.is_shadowed_by(&[&may_2027, &rest]));
+            assert!(target.is_shadowed_by(&[&may_2027, &rest, &months(&[4])]));
         }
     }
 }

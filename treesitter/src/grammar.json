@@ -121,7 +121,7 @@
             },
             {
               "type": "SYMBOL",
-              "name": "schedule_body"
+              "name": "arms_body"
             }
           ]
         }
@@ -140,7 +140,7 @@
         }
       ]
     },
-    "schedule_body": {
+    "arms_body": {
       "type": "SEQ",
       "members": [
         {
@@ -151,7 +151,7 @@
           "type": "REPEAT",
           "content": {
             "type": "SYMBOL",
-            "name": "interval"
+            "name": "arm"
           }
         },
         {
@@ -160,7 +160,45 @@
         }
       ]
     },
-    "interval": {
+    "arm": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "when",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "from_condition"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "in_condition"
+              },
+              {
+                "type": "STRING",
+                "value": "else"
+              }
+            ]
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "="
+        },
+        {
+          "type": "FIELD",
+          "name": "value",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_expr"
+          }
+        }
+      ]
+    },
+    "from_condition": {
       "type": "SEQ",
       "members": [
         {
@@ -171,8 +209,17 @@
           "type": "FIELD",
           "name": "from",
           "content": {
-            "type": "SYMBOL",
-            "name": "date"
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "date"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "_dated_period"
+              }
+            ]
           }
         },
         {
@@ -199,18 +246,156 @@
               "type": "BLANK"
             }
           ]
+        }
+      ]
+    },
+    "in_condition": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "in"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "calendar_range"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "_list_separator"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "calendar_range"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "calendar_range": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_calendar_period"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "through"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "_calendar_period"
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        }
+      ]
+    },
+    "_calendar_period": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "month_name"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "quarter"
+                }
+              ]
+            },
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "integer"
+                },
+                {
+                  "type": "BLANK"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "SYMBOL",
+          "name": "integer"
+        }
+      ]
+    },
+    "_dated_period": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "month_name"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "quarter"
+                }
+              ]
+            },
+            {
+              "type": "SYMBOL",
+              "name": "integer"
+            }
+          ]
+        },
+        {
+          "type": "SYMBOL",
+          "name": "integer"
+        }
+      ]
+    },
+    "quarter": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "q1"
         },
         {
           "type": "STRING",
-          "value": "="
+          "value": "q2"
         },
         {
-          "type": "FIELD",
-          "name": "value",
-          "content": {
-            "type": "SYMBOL",
-            "name": "_expr"
-          }
+          "type": "STRING",
+          "value": "q3"
+        },
+        {
+          "type": "STRING",
+          "value": "q4"
         }
       ]
     },

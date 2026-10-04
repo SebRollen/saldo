@@ -2,8 +2,8 @@ mod schedule;
 
 use crate::Span;
 use crate::ast::{
-    AggKind, BinOp, Decl, Expr, Interval, ParamBody, Path, Posting, PostingAmount, Program,
-    ScheduleRef, SpannedExpr, Stmt, TimeUnit,
+    AggKind, Arm, BinOp, Decl, Expr, ParamBody, Path, Posting, PostingAmount, Program, ScheduleRef,
+    SpannedExpr, Stmt, TimeUnit,
 };
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
@@ -288,16 +288,12 @@ impl<'src> Parser<'src> {
         let body = if self.eat(&Token::Eq).is_some() {
             ParamBody::Const(self.parse_expr()?)
         } else if self.eat(&Token::LBrace).is_some() {
-            let mut intervals = Vec::new();
+            let mut arms = Vec::new();
             while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
-                if let Some(iv) = self.parse_interval() {
-                    intervals.push(iv);
-                } else {
-                    break;
-                }
+                arms.push(self.parse_arm()?);
             }
             self.expect(&Token::RBrace)?;
-            ParamBody::Schedule(intervals)
+            ParamBody::Arms(arms)
         } else {
             let span = self.peek_span();
             self.errors.push(Diagnostic::new(
@@ -468,23 +464,13 @@ impl<'src> Parser<'src> {
         Some(ScheduleRef::Named(name.to_string(), span))
     }
 
-    fn parse_interval(&mut self) -> Option<Interval> {
-        let start = self.eat_keyword("from")?;
-        let from = self.parse_date()?;
-        let to = if self.eat_keyword("to").is_some() {
-            Some(self.parse_date()?)
-        } else {
-            None
-        };
+    fn parse_arm(&mut self) -> Option<Arm> {
+        let start = self.peek_span();
+        let when = self.parse_when()?;
         self.expect(&Token::Eq)?;
         let value = self.parse_expr()?;
         let span = Span::new(start.start, self.last_span.end);
-        Some(Interval {
-            from,
-            to,
-            value,
-            span,
-        })
+        Some(Arm { when, value, span })
     }
 
     /// Reports a unit annotation in the old `param x : usd/year = …` style,
@@ -870,7 +856,7 @@ pub fn parse(tokens: Vec<(Token<'_>, Span)>) -> Result<Program, Vec<Diagnostic>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::schedule::Schedule;
+    use crate::ast::schedule::{Schedule, When, Window};
     use chrono::NaiveDate;
 
     fn parse_prog(src: &str) -> Program {
@@ -928,25 +914,55 @@ mod tests {
     }
 
     #[test]
-    fn parses_param_schedule() {
+    fn parses_param_arms() {
         let prog = parse_prog(
-            "param salary_rate { from 2026-01-01 to 2026-04-01 = 100_000 per year\nfrom 2026-04-01 = 110_000 per year }",
+            "param p {
+               from 2026-01-01 to 2026-04-01 = 1
+               from 2026-04-01               = 2
+               from jul 2027                 = 3
+               in jul, aug                   = 4
+               in jul through apr            = 5
+               in q2, q4 2027                = 6
+               in 2026 through 2027          = 7
+               in mar 2028                   = 8
+               else                          = 9
+             }",
         );
-        match &prog.decls[0].0 {
-            Decl::Param { name, body } => {
-                assert_eq!(name, "salary_rate");
-                let ParamBody::Schedule(intervals) = body else {
-                    panic!("Not a schedule body")
-                };
-                assert_eq!(intervals.len(), 2);
-                assert_eq!(
-                    intervals[0].from,
-                    NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
-                );
-                assert!(intervals[1].to.is_none());
-            }
-            _ => panic!(),
-        }
+        let Decl::Param {
+            body: ParamBody::Arms(arms),
+            ..
+        } = &prog.decls[0].0
+        else {
+            panic!("not a param with arms")
+        };
+        let date = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        let whens: Vec<When> = arms.iter().map(|arm| arm.when.clone()).collect();
+        assert_eq!(
+            whens,
+            [
+                When::Windows(vec![Window::Dates(
+                    date(2026, 1, 1),
+                    Some(date(2026, 4, 1))
+                )]),
+                When::Windows(vec![Window::Dates(date(2026, 4, 1), None)]),
+                When::Windows(vec![Window::Dates(date(2027, 7, 1), None)]),
+                When::Windows(vec![Window::Months(0b0000_1100_0000)]),
+                When::Windows(vec![Window::Months(0b1111_1100_1111)]),
+                When::Windows(vec![
+                    Window::Months(0b0000_0011_1000),
+                    Window::Dates(date(2027, 10, 1), Some(date(2028, 1, 1))),
+                ]),
+                When::Windows(vec![Window::Dates(
+                    date(2026, 1, 1),
+                    Some(date(2028, 1, 1))
+                )]),
+                When::Windows(vec![Window::Dates(
+                    date(2028, 3, 1),
+                    Some(date(2028, 4, 1))
+                )]),
+                When::Always,
+            ]
+        );
     }
 
     #[test]

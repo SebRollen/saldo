@@ -1,6 +1,8 @@
 use super::Parser;
 use crate::Span;
-use crate::ast::schedule::{Dow, Month, MonthOccurrence, Nth, Ordinal, Period, Periodic, Schedule};
+use crate::ast::schedule::{
+    Dow, Month, MonthOccurrence, Nth, Ordinal, Period, Periodic, Schedule, When, Window,
+};
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
 use chrono::NaiveDate;
@@ -396,6 +398,197 @@ impl<'src> Parser<'src> {
             None
         }
     }
+
+    /// The days a param arm covers: `else`, `from <start> [to <date>]`, or
+    /// `in` and a list of months, quarters and years.
+    pub(super) fn parse_when(&mut self) -> Option<When> {
+        if self.eat_keyword("else").is_some() {
+            return Some(When::Always);
+        }
+        if self.eat_keyword("from").is_some() {
+            let from = self.parse_start()?;
+            let to = if self.eat_keyword("to").is_some() {
+                Some(self.parse_date()?)
+            } else {
+                None
+            };
+            return Some(When::Windows(vec![Window::Dates(from, to)]));
+        }
+        if self.eat_keyword("in").is_some() {
+            let listed = self.parse_comma_list(
+                "a month, quarter or year (like `may`, `q2` or `2026`)",
+                |p| p.try_parse_window(),
+            );
+            if listed.is_empty() {
+                return None;
+            }
+            // Every year's months go in one window, first.
+            let months = listed.iter().fold(0, |mask, w| match w {
+                Window::Months(m) => mask | m,
+                Window::Dates(..) => mask,
+            });
+            let windows = (months != 0)
+                .then_some(Window::Months(months))
+                .into_iter()
+                .chain(
+                    listed
+                        .into_iter()
+                        .filter(|w| matches!(w, Window::Dates(..))),
+                )
+                .collect();
+            return Some(When::Windows(windows));
+        }
+        let span = self.peek_span();
+        self.errors
+            .push(Diagnostic::new(span, "expected `from`, `in` or `else`"));
+        None
+    }
+
+    /// A `from`'s first day: a date, or the start of a year, or of a month or
+    /// quarter in one.
+    fn parse_start(&mut self) -> Option<NaiveDate> {
+        if let Token::Date(_) = self.peek() {
+            return self.parse_date();
+        }
+        let start = self.peek_span();
+        match self.try_parse_calendar_period()? {
+            CalendarPeriod::Once(from, _) => Some(from),
+            CalendarPeriod::Yearly(..) => {
+                let span = Span::new(start.start, self.last_span.end);
+                self.errors.push(Diagnostic::new(
+                    span,
+                    "`from` needs a year, like `from jul 2027`",
+                ));
+                None
+            }
+        }
+    }
+
+    /// `<period>` or `<period> through <period>`.
+    fn try_parse_window(&mut self) -> Option<Window> {
+        let start = self.peek_span();
+        let first = self.try_parse_calendar_period()?;
+        let last = if self.eat_keyword("through").is_some() {
+            let Some(last) = self.try_parse_calendar_period() else {
+                let span = self.peek_span();
+                self.errors.push(Diagnostic::new(
+                    span,
+                    "expected a month, quarter or year after `through`",
+                ));
+                return None;
+            };
+            last
+        } else {
+            first
+        };
+        let span = Span::new(start.start, self.last_span.end);
+        match (first, last) {
+            (CalendarPeriod::Yearly(first, _), CalendarPeriod::Yearly(_, last)) => {
+                Some(Window::Months(month_mask(first, last)))
+            }
+            (CalendarPeriod::Once(from, _), CalendarPeriod::Once(_, to)) if from < to => {
+                Some(Window::Dates(from, Some(to)))
+            }
+            (CalendarPeriod::Once(..), CalendarPeriod::Once(..)) => {
+                self.errors
+                    .push(Diagnostic::new(span, "this ends before it starts"));
+                None
+            }
+            _ => {
+                self.errors.push(Diagnostic::new(
+                    span,
+                    "both ends of `through` need a year, or neither",
+                ));
+                None
+            }
+        }
+    }
+
+    /// A month or quarter, which comes every year, or a year, or a month or
+    /// quarter in one.
+    fn try_parse_calendar_period(&mut self) -> Option<CalendarPeriod> {
+        let (first, last) = if let Some(month) = self.try_parse_month_name() {
+            (month as u32, month as u32)
+        } else if let Some(quarter) = self.try_parse_quarter_name() {
+            (quarter * 3 - 2, quarter * 3)
+        } else {
+            let year = self.try_parse_full_year()?;
+            return Some(CalendarPeriod::Once(
+                first_of(year, 1),
+                first_of(year + 1, 1),
+            ));
+        };
+        if !matches!(self.peek(), Token::Number(_)) {
+            return Some(CalendarPeriod::Yearly(first, last));
+        }
+        let year = self.try_parse_full_year()?;
+        let end = match last {
+            12 => first_of(year + 1, 1),
+            _ => first_of(year, last + 1),
+        };
+        Some(CalendarPeriod::Once(first_of(year, first), end))
+    }
+
+    fn try_parse_quarter_name(&mut self) -> Option<u32> {
+        let Token::Ident(s) = self.peek() else {
+            return None;
+        };
+        let quarter = match *s {
+            "q1" => 1,
+            "q2" => 2,
+            "q3" => 3,
+            "q4" => 4,
+            _ => return None,
+        };
+        self.advance();
+        Some(quarter)
+    }
+
+    /// A year written in full, like `2026`.
+    fn try_parse_full_year(&mut self) -> Option<i32> {
+        let Token::Number(n) = self.peek() else {
+            return None;
+        };
+        let year = (n.fract().is_zero())
+            .then(|| i32::try_from(n.mantissa()).ok())
+            .flatten()
+            .filter(|y| (1000..=9999).contains(y) && n.scale() == 0);
+        let span = self.peek_span();
+        self.advance();
+        if year.is_none() {
+            self.errors.push(Diagnostic::new(
+                span,
+                "expected a year written in full, like `2026`",
+            ));
+        }
+        year
+    }
+}
+
+/// What `try_parse_calendar_period` read.
+#[derive(Clone, Copy)]
+enum CalendarPeriod {
+    /// A first and last month, from 1 for January, every year.
+    Yearly(u32, u32),
+    /// From a first day up to, but not including, a second.
+    Once(NaiveDate, NaiveDate),
+}
+
+/// The months from `first` through `last`, wrapping past December.
+fn month_mask(first: u32, last: u32) -> u16 {
+    let mut mask = 0;
+    let mut month = first;
+    loop {
+        mask |= 1 << (month - 1);
+        if month == last {
+            return mask;
+        }
+        month = month % 12 + 1;
+    }
+}
+
+fn first_of(year: i32, month: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, 1).expect("years are four digits")
 }
 
 #[cfg(test)]

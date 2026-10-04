@@ -875,12 +875,12 @@ fn resolver_errors_point_at_the_offending_text() {
         ),
         (
             "param p {\n from 2025-01-01 = 1\n from 2025-06-01 = 2\n}",
-            "overlapping intervals",
+            "never applies",
             "from 2025-06-01 = 2",
         ),
         (
             "param p {\n from 2025-06-01 to 2025-01-01 = 1\n}",
-            "must end after it starts",
+            "`to` must come after `from`",
             "from 2025-06-01 to 2025-01-01 = 1",
         ),
         (
@@ -895,6 +895,118 @@ fn resolver_errors_point_at_the_offending_text() {
         let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
         assert_eq!(highlighted(src, &errors, needle), expected, "{src}");
     }
+}
+
+#[test]
+fn param_arm_errors_point_at_the_offending_text() {
+    let cases = [
+        (
+            "param p {\n in jul 2027 through 2026 = 1\n}",
+            "ends before it starts",
+            "jul 2027 through 2026",
+        ),
+        (
+            "param p {\n in may through 2027 = 1\n}",
+            "both ends of `through`",
+            "may through 2027",
+        ),
+        ("param p {\n from may = 1\n}", "`from` needs a year", "may"),
+        ("param p {\n in 26 = 1\n}", "year written in full", "26"),
+        (
+            "param p {\n during may = 1\n}",
+            "expected `from`, `in` or `else`",
+            "during",
+        ),
+        (
+            "param p {\n else = 1\n in may = 2\n}",
+            "comes after `else`",
+            "in may = 2",
+        ),
+        (
+            "param p {\n in q2 = 1\n in may = 2\n}",
+            "never applies",
+            "in may = 2",
+        ),
+        (
+            "param p {\n in 2027 = 1\n from 2027-03-01 to 2027-04-01 = 2\n}",
+            "never applies",
+            "from 2027-03-01 to 2027-04-01 = 2",
+        ),
+        (
+            "param p {\n in jan through jun, jul through dec = 1\n else = 2\n}",
+            "never applies",
+            "else = 2",
+        ),
+    ];
+    for (src, needle, expected) in cases {
+        let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+        assert_eq!(highlighted(src, &errors, needle), expected, "{src}");
+    }
+}
+
+#[test]
+fn param_arms_repeat_every_year_and_the_first_match_wins() {
+    let src = "
+        account Assets:Cash
+        account Expense:Tuition
+        param tuition {
+          in jan 2027     = 0
+          in jul, aug     = 0
+          from 2027-09-01 = 2_100
+          else            = 1_950
+        }
+        entry monthly on the 1st \"Tuition\" {
+          Expense:Tuition = tuition
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2026-10-01", "2027-10-31")).unwrap();
+    let paid: Vec<(NaiveDate, Decimal)> = output
+        .log
+        .transactions
+        .iter()
+        .map(|tx| (tx.date, tx.postings[0].1))
+        .collect();
+    let mut expected: Vec<(NaiveDate, Decimal)> = [
+        "2026-10-01",
+        "2026-11-01",
+        "2026-12-01",
+        "2027-02-01",
+        "2027-03-01",
+        "2027-04-01",
+        "2027-05-01",
+        "2027-06-01",
+    ]
+    .into_iter()
+    .map(|date| (d(date), usd("1950")))
+    .collect();
+    expected.extend(
+        ["2027-09-01", "2027-10-01"]
+            .into_iter()
+            .map(|date| (d(date), usd("2100"))),
+    );
+    assert_eq!(paid, expected);
+}
+
+#[test]
+fn param_arms_take_quarters_years_and_month_ranges() {
+    let src = "
+        account Assets:Cash
+        account Expense:Power
+        param power {
+          in q3 2027         = 300 per month
+          in dec through feb = 900 per month
+          in 2026            = 100 per month
+          else               = 400 per month
+        }
+        entry monthly \"Power\" {
+          Expense:Power = power
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2026-11-01", "2027-10-31")).unwrap();
+    let expected = [100, 900, 900, 900, 400, 400, 400, 400, 300, 300, 300, 400].map(Decimal::from);
+    assert_eq!(postings_to(&output, "Expense:Power"), expected);
 }
 
 #[test]
@@ -1528,7 +1640,7 @@ fn rates_and_amounts_dont_mix_outside_postings() {
         ),
         (
             "param x { from 2026-01-01 to 2026-02-01 = salary\n from 2026-02-01 = Assets:Cash }",
-            "param `x` is an amount per year in one interval but an amount in another",
+            "param `x` is an amount per year in one arm but an amount in another",
         ),
         (
             "fn f(a, b) { a - b }\nparam x = f(salary, Assets:Cash)",
