@@ -49,6 +49,9 @@ pub fn check(program: &Program, fns: &HashMap<String, FnDef>) -> Vec<Diagnostic>
                 ParamBody::Arms(arms) => {
                     for arm in arms {
                         checker.expect(&arm.value, Ty::Num, "a param");
+                        if let Some(growth) = &arm.growth {
+                            checker.expect(&growth.by, Ty::Num, "a growth rate");
+                        }
                     }
                 }
             },

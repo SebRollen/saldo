@@ -496,6 +496,22 @@ impl Window {
 }
 
 impl When {
+    /// The first day it covers, if it covers days of particular years only.
+    pub fn start(&self) -> Option<NaiveDate> {
+        let When::Windows(windows) = self else {
+            return None;
+        };
+        windows
+            .iter()
+            .map(|w| match *w {
+                Window::Dates(from, _) => Some(from),
+                Window::Months(_) => None,
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .min()
+    }
+
     pub fn contains(&self, t: NaiveDate) -> bool {
         match self {
             When::Always => true,

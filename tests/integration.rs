@@ -1146,6 +1146,166 @@ fn schedule_in_errors_point_at_the_offending_text() {
 }
 
 #[test]
+fn compounding_steps_up_on_each_anniversary_of_the_arms_start() {
+    let src = "
+        account Assets:Cash
+        account Expense:Tuition
+        account Expense:Other
+        param tuition {
+          from jul 2026 = 1_000 compounding 10% every year
+        }
+        param inflation = 3%
+        param prices {
+          from 2026 = 1 compounding inflation every year
+        }
+        entry yearly on jun 30, jul 1 \"Tuition\" {
+          Expense:Tuition = tuition
+          Assets:Cash
+        }
+        entry yearly on dec 31 \"Other\" {
+          Expense:Other = 10_000 * prices
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2026-07-01", "2028-12-31")).unwrap();
+    assert_eq!(
+        postings_to(&output, "Expense:Tuition"),
+        ["1000", "1000", "1100", "1100", "1210"].map(usd)
+    );
+    assert_eq!(
+        postings_to(&output, "Expense:Other"),
+        ["10000", "10300", "10609"].map(usd)
+    );
+}
+
+#[test]
+fn adding_steps_up_by_the_same_amount_in_the_values_unit() {
+    let src = "
+        account Assets:Cash
+        account Expense:Rent
+        account Expense:Parking
+        param rent {
+          from jan 2027 = 1_000 per month adding 100 per month every year
+        }
+        param parking {
+          from jan 2027 = 200 per month adding 10 every year
+        }
+        entry monthly on the 1st \"Rent\" {
+          Expense:Rent    = rent
+          Expense:Parking = parking
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2027-11-01", "2029-01-31")).unwrap();
+    assert_eq!(
+        postings_to(&output, "Expense:Rent"),
+        [
+            1_000, 1_000, 1_100, 1_100, 1_100, 1_100, 1_100, 1_100, 1_100, 1_100, 1_100, 1_100,
+            1_100, 1_100, 1_200
+        ]
+        .map(Decimal::from)
+    );
+    assert_eq!(postings_to(&output, "Expense:Parking")[2], usd("210"));
+}
+
+#[test]
+fn each_step_compounds_at_the_rate_on_its_day() {
+    let src = "
+        account Assets:Cash
+        account Expense:Other
+        param inflation {
+          in 2027 = 10%
+          else    = 5%
+        }
+        param prices {
+          from 2026 = 1_000 compounding inflation every year
+        }
+        entry yearly on dec 31 \"Other\" {
+          Expense:Other = prices
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2029-12-31")).unwrap();
+    assert_eq!(
+        postings_to(&output, "Expense:Other"),
+        ["1000", "1100", "1155", "1212.75"].map(usd)
+    );
+}
+
+#[test]
+fn growth_errors_point_at_the_offending_text() {
+    let cases = [
+        (
+            "param p {\n else = 1 compounding 3% every year\n}",
+            "needs an arm with a start",
+            "compounding 3% every year",
+        ),
+        (
+            "param p {\n in may = 1 adding 1 every year\n}",
+            "needs an arm with a start",
+            "adding 1 every year",
+        ),
+        (
+            "param p {\n from 2026 = 1 compounding 3% per year every year\n}",
+            "takes a plain number",
+            "3% per year",
+        ),
+        (
+            "param p {\n from 2026 = 1 per month adding 1 per year every year\n}",
+            "`adding` adds an amount per year to an amount per month",
+            "1 per year",
+        ),
+        (
+            "account A = 1 @ 2026-01-01\nparam p {\n from 2026 = 1 compounding A every year\n}",
+            "can only use numbers",
+            "A",
+        ),
+        (
+            "param p {\n from 2026 = 1 compounding 3%\n}",
+            "expected `every`",
+            "}",
+        ),
+        (
+            "param p {\n from 2026 = 1 adding 1 every fortnight\n}",
+            "expected `day`, `week`",
+            "fortnight",
+        ),
+    ];
+    for (src, needle, expected) in cases {
+        let errors = run(src, &opts("2026-01-01", "2026-01-01")).unwrap_err();
+        assert_eq!(highlighted(src, &errors, needle), expected, "{src}");
+    }
+}
+
+#[test]
+fn growth_steps_count_as_changes_in_periods_without_a_firing() {
+    let monthly = "
+        account Assets:Cash
+        account Expense:Fee
+        param fee {
+          from 2027 = 100 per month adding 10 per month every month
+        }
+        entry quarterly \"Fee\" {
+          Expense:Fee = fee
+          Assets:Cash
+        }
+    ";
+    let errors = run(monthly, &opts("2027-01-01", "2027-03-31")).unwrap_err();
+    assert_eq!(
+        highlighted(monthly, &errors, "changes during the months"),
+        "fee"
+    );
+    // Yearly steps fall on January 1st, which a quarterly entry's firings
+    // never straddle.
+    let yearly = monthly.replace("every month", "every year");
+    let output = run(&yearly, &opts("2027-01-01", "2028-06-30")).unwrap();
+    assert_eq!(
+        postings_to(&output, "Expense:Fee"),
+        [300, 300, 300, 300, 330, 330].map(Decimal::from)
+    );
+}
+
+#[test]
 fn named_schedule_missing_from_is_reported_once() {
     let src = "
         schedule biweekly = every 2 weeks

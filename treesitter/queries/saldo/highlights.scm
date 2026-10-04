@@ -20,6 +20,8 @@
   "to"
   "in"
   "through"
+  "compounding"
+  "adding"
 ] @keyword
 
 ; Schedule period keywords

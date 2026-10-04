@@ -198,6 +198,16 @@
     "type": "arm",
     "named": true,
     "fields": {
+      "growth": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "growth",
+            "named": true
+          }
+        ]
+      },
       "value": {
         "multiple": false,
         "required": true,
@@ -1052,6 +1062,94 @@
           {
             "type": "date",
             "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "growth",
+    "named": true,
+    "fields": {
+      "by": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "agg_expr",
+            "named": true
+          },
+          {
+            "type": "binary_expr",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expr",
+            "named": true
+          },
+          {
+            "type": "colon_path",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "if_expr",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "not_expr",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expr",
+            "named": true
+          },
+          {
+            "type": "per_expr",
+            "named": true
+          },
+          {
+            "type": "percent_expr",
+            "named": true
+          },
+          {
+            "type": "unary_minus",
+            "named": true
+          }
+        ]
+      },
+      "every": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "time_unit",
+            "named": true
+          }
+        ]
+      },
+      "kind": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "adding",
+            "named": false
+          },
+          {
+            "type": "compounding",
+            "named": false
           }
         ]
       }
@@ -2104,6 +2202,10 @@
     "named": false
   },
   {
+    "type": "adding",
+    "named": false
+  },
+  {
     "type": "all",
     "named": false
   },
@@ -2143,6 +2245,10 @@
     "type": "comment",
     "named": true,
     "extra": true
+  },
+  {
+    "type": "compounding",
+    "named": false
   },
   {
     "type": "daily",

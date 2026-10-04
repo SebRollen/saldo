@@ -145,6 +145,43 @@ impl TimeUnit {
         }
     }
 
+    /// The date `n` of these after `anchor`, on its day of the month where
+    /// the month has it and on the month's last day where it doesn't.
+    pub fn after(self, anchor: NaiveDate, n: u32) -> Option<NaiveDate> {
+        let months = |per: u32| anchor.checked_add_months(chrono::Months::new(n.checked_mul(per)?));
+        match self {
+            TimeUnit::Day => anchor.checked_add_days(chrono::Days::new(n.into())),
+            TimeUnit::Week => anchor.checked_add_days(chrono::Days::new(u64::from(n) * 7)),
+            TimeUnit::Month => months(1),
+            TimeUnit::Quarter => months(3),
+            TimeUnit::Year => months(12),
+        }
+    }
+
+    /// How many of these have passed from `anchor` to `t`: the largest `n`
+    /// with `after(anchor, n)` no later than `t`.
+    pub fn steps(self, anchor: NaiveDate, t: NaiveDate) -> u32 {
+        use chrono::Datelike;
+        if t <= anchor {
+            return 0;
+        }
+        let months = (i64::from(t.year()) - i64::from(anchor.year())) * 12 + i64::from(t.month())
+            - i64::from(anchor.month());
+        // Never fewer than the steps that have passed.
+        let most = match self {
+            TimeUnit::Day => (t - anchor).num_days(),
+            TimeUnit::Week => (t - anchor).num_days() / 7,
+            TimeUnit::Month => months,
+            TimeUnit::Quarter => months / 3,
+            TimeUnit::Year => months / 12,
+        };
+        let mut n = u32::try_from(most).unwrap_or(u32::MAX);
+        while n > 0 && self.after(anchor, n).is_none_or(|d| d > t) {
+            n -= 1;
+        }
+        n
+    }
+
     /// The days of the period starting on `start`.
     pub fn days(self, start: NaiveDate) -> impl Iterator<Item = NaiveDate> {
         std::iter::successors(Some(start), |d| d.succ_opt())
@@ -260,7 +297,34 @@ pub enum ScheduleRef {
 pub struct Arm {
     pub when: When,
     pub value: SpannedExpr,
+    pub growth: Option<Growth>,
     pub span: Span,
+}
+
+/// How an arm's value grows, a step every `every` from the arm's start:
+/// `compounding 3% every year` or `adding 25 every year`.
+#[derive(Clone, Debug)]
+pub struct Growth {
+    pub kind: GrowthKind,
+    /// The rate it compounds at, or what it adds, each step.
+    pub by: SpannedExpr,
+    pub every: TimeUnit,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GrowthKind {
+    Compounding,
+    Adding,
+}
+
+impl GrowthKind {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            GrowthKind::Compounding => "compounding",
+            GrowthKind::Adding => "adding",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -355,6 +419,25 @@ mod tests {
         for (unit, start) in starts {
             assert_eq!(unit.period_start(t), start, "{unit}");
         }
+    }
+
+    #[test]
+    fn counts_steps_from_an_anchor() {
+        use TimeUnit::*;
+        let jan_31 = date(2026, 1, 31);
+        assert_eq!(Month.after(jan_31, 1), Some(date(2026, 2, 28)));
+        assert_eq!(Month.after(jan_31, 2), Some(date(2026, 3, 31)));
+        assert_eq!(Month.steps(jan_31, date(2026, 2, 27)), 0);
+        assert_eq!(Month.steps(jan_31, date(2026, 2, 28)), 1);
+        assert_eq!(Month.steps(jan_31, date(2026, 3, 30)), 1);
+        assert_eq!(Month.steps(jan_31, date(2026, 3, 31)), 2);
+        let jul_1 = date(2026, 7, 1);
+        assert_eq!(Year.steps(jul_1, date(2027, 6, 30)), 0);
+        assert_eq!(Year.steps(jul_1, date(2027, 7, 1)), 1);
+        assert_eq!(Year.steps(jul_1, date(2030, 1, 1)), 3);
+        assert_eq!(Quarter.steps(jul_1, date(2026, 12, 31)), 1);
+        assert_eq!(Week.steps(jul_1, date(2026, 7, 14)), 1);
+        assert_eq!(Day.steps(jul_1, date(2026, 6, 1)), 0);
     }
 
     #[test]

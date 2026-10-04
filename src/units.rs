@@ -10,9 +10,9 @@
 //! It also turns `fill(x)` calls into [`ExprKind::Fill`], giving each its own
 //! slot in [`Program::fills`].
 
-use crate::ast::{BinOp, Span, TimeUnit};
+use crate::ast::{BinOp, GrowthKind, Span, TimeUnit};
 use crate::compile::{
-    Amount, Builtin, Expr, ExprKind, Fill, Function, Param, ParamBody, Program, Stmt,
+    Amount, Builtin, Expr, ExprKind, Fill, Function, Growth, Param, ParamBody, Program, Stmt,
 };
 use crate::errors::Diagnostic;
 use std::collections::HashMap;
@@ -174,6 +174,11 @@ impl Checker<'_> {
                     .iter_mut()
                     .map(|arm| (self.kind(&mut arm.value, GLOBAL), arm.value.span))
                     .collect();
+                for (arm, (value, _)) in arms.iter_mut().zip(&found) {
+                    if let Some(growth) = &mut arm.growth {
+                        self.growth(growth, (*value)?)?;
+                    }
+                }
                 // The param is whatever its arms agree on.
                 let mut agreed = Kind::Number;
                 let mut first: Option<(Kind, Span)> = None;
@@ -208,6 +213,27 @@ impl Checker<'_> {
                 Some(agreed)
             }
         }
+    }
+
+    /// Checks that a growth rate is a plain number and that what `adding`
+    /// adds is the same kind as the `value` it adds to.
+    fn growth(&mut self, growth: &mut Growth, value: Kind) -> Option<()> {
+        let by = self.kind(&mut growth.by, GLOBAL)?;
+        let fits = match growth.kind {
+            GrowthKind::Compounding => by == Kind::Number,
+            GrowthKind::Adding => by == Kind::Number || by == value,
+        };
+        if !fits {
+            let message = match growth.kind {
+                GrowthKind::Compounding => {
+                    format!("`compounding` takes a plain number, like `4%`, not {by}")
+                }
+                GrowthKind::Adding => format!("`adding` adds {by} to {value}"),
+            };
+            self.error(Diagnostic::new(growth.by.span, message));
+            return None;
+        }
+        Some(())
     }
 
     /// The kind of `e`, or `None` if it has an error (already reported).

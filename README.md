@@ -122,7 +122,7 @@ param jim_salary {
 }
 ```
 
-Parameters are named scalars used inside flow expressions. A parameter can be a constant, or take different values over time: by date range, or by month, quarter or year, like `in jul, aug = 0` for a summer break. `per year` (or `per day`, `week`, `month`, `quarter`) after a value makes it a rate: entries spread it over their firings, so each year's paychecks add up to exactly the yearly salary.
+Parameters are named scalars used inside flow expressions. A parameter can be a constant, or take different values over time: by date range, or by month, quarter or year, like `in jul, aug = 0` for a summer break, and grow, like `from 2026 = 1 compounding 3% every year`. `per year` (or `per day`, `week`, `month`, `quarter`) after a value makes it a rate: entries spread it over their firings, so each year's paychecks add up to exactly the yearly salary.
 
 ### Entries
 

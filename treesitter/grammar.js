@@ -47,7 +47,7 @@ module.exports = grammar({
     //   param daycare {
     //     in jan 2027     = 0
     //     in jul, aug     = 0
-    //     from 2027-09-01 = 2_100
+    //     from 2027-09-01 = 2_100 compounding 3% every year
     //     else            = 1_950
     //   }
     // -----------------------------------------------------------------------
@@ -73,6 +73,16 @@ module.exports = grammar({
         field("when", choice($.from_condition, $.in_condition, "else")),
         "=",
         field("value", $._expr),
+        optional(field("growth", $.growth)),
+      ),
+
+    // compounding 4% every year / adding 100 per month every year
+    growth: ($) =>
+      seq(
+        field("kind", choice("compounding", "adding")),
+        field("by", $._expr),
+        "every",
+        field("every", $.time_unit),
       ),
 
     from_condition: ($) =>

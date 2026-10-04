@@ -195,6 +195,64 @@
             "type": "SYMBOL",
             "name": "_expr"
           }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "growth",
+              "content": {
+                "type": "SYMBOL",
+                "name": "growth"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        }
+      ]
+    },
+    "growth": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "kind",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "compounding"
+              },
+              {
+                "type": "STRING",
+                "value": "adding"
+              }
+            ]
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "by",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_expr"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "every"
+        },
+        {
+          "type": "FIELD",
+          "name": "every",
+          "content": {
+            "type": "SYMBOL",
+            "name": "time_unit"
+          }
         }
       ]
     },

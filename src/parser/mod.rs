@@ -2,8 +2,8 @@ mod schedule;
 
 use crate::Span;
 use crate::ast::{
-    AggKind, Arm, BinOp, Decl, Expr, ParamBody, Path, Posting, PostingAmount, Program, ScheduleRef,
-    SpannedExpr, Stmt, TimeUnit,
+    AggKind, Arm, BinOp, Decl, Expr, Growth, GrowthKind, ParamBody, Path, Posting, PostingAmount,
+    Program, ScheduleRef, SpannedExpr, Stmt, TimeUnit,
 };
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
@@ -469,8 +469,58 @@ impl<'src> Parser<'src> {
         let when = self.parse_when()?;
         self.expect(&Token::Eq)?;
         let value = self.parse_expr()?;
+        let growth = self.parse_growth()?;
         let span = Span::new(start.start, self.last_span.end);
-        Some(Arm { when, value, span })
+        Some(Arm {
+            when,
+            value,
+            growth,
+            span,
+        })
+    }
+
+    /// `compounding <rate> every <unit>` or `adding <amount> every <unit>`
+    /// after an arm's value: `Some(None)` if there's neither, and `None` if
+    /// there's an error.
+    fn parse_growth(&mut self) -> Option<Option<Growth>> {
+        let start = self.peek_span();
+        let kind = if self.eat_keyword("compounding").is_some() {
+            GrowthKind::Compounding
+        } else if self.eat_keyword("adding").is_some() {
+            GrowthKind::Adding
+        } else {
+            return Some(None);
+        };
+        let by = self.parse_expr()?;
+        if self.eat_keyword("every").is_none() {
+            self.errors.push(Diagnostic::new(
+                self.peek_span(),
+                format!(
+                    "expected `every` and how often to step after `{}`, like `every year`",
+                    kind.keyword()
+                ),
+            ));
+            return None;
+        }
+        let every = match self.peek() {
+            Token::Ident(name) => TimeUnit::from_name(name),
+            _ => None,
+        };
+        let Some(every) = every else {
+            self.errors.push(Diagnostic::new(
+                self.peek_span(),
+                "expected `day`, `week`, `month`, `quarter` or `year` after `every`",
+            ));
+            return None;
+        };
+        self.advance();
+        let span = Span::new(start.start, self.last_span.end);
+        Some(Some(Growth {
+            kind,
+            by,
+            every,
+            span,
+        }))
     }
 
     /// Reports a unit annotation in the old `param x : usd/year = …` style,
@@ -961,6 +1011,36 @@ mod tests {
                     Some(date(2028, 4, 1))
                 )]),
                 When::Always,
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_growth_after_an_arms_value() {
+        let prog = parse_prog(
+            "param p {
+               from jul 2026 = 5 compounding 4% every year
+               in 2027       = 1 per month adding 2 every month
+               else          = 3
+             }",
+        );
+        let Decl::Param {
+            body: ParamBody::Arms(arms),
+            ..
+        } = &prog.decls[0].0
+        else {
+            panic!("not a param with arms")
+        };
+        let growth: Vec<Option<(GrowthKind, TimeUnit)>> = arms
+            .iter()
+            .map(|arm| arm.growth.as_ref().map(|g| (g.kind, g.every)))
+            .collect();
+        assert_eq!(
+            growth,
+            [
+                Some((GrowthKind::Compounding, TimeUnit::Year)),
+                Some((GrowthKind::Adding, TimeUnit::Month)),
+                None,
             ]
         );
     }

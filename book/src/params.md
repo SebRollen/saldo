@@ -113,6 +113,43 @@ param beth_salary {
 }
 ```
 
+### Growth
+
+An arm's value can grow from the arm's start, a step at a time:
+
+```
+param inflation = 3%
+
+param prices {
+  from 2026 = 1 compounding inflation every year      // 1, 1.03, 1.0609…
+}
+
+param tuition {
+  from jul 2026 = 1_950 compounding 4% every year     // up 4% each July 1st
+}
+
+param rent {
+  from jan 2027 = 3_000 per month adding 100 per month every year
+}
+```
+
+`compounding` multiplies the value by one plus its rate at each step, and
+`adding` adds its amount. `every` says how often it steps, a `day`, `week`,
+`month`, `quarter` or `year` at a time from the arm's start, so `from jul
+2026` steps up every July 1st. Only an arm with a start can grow: one with
+`from`, or `in` with years.
+
+`compounding` takes a plain number, like `4%`. What `adding` adds is the same
+kind as the value, like an amount `per month`, or a plain number, which takes
+on the value's kind.
+
+Each step uses the rate or amount on the day it's taken, so a rate that
+changes over time compounds each year at that year's rate. That's why it can
+only use numbers, and params made of numbers.
+
+A param that grows from 1, like `prices` above, is an index: multiply other
+amounts by it, like `80_000 per year * prices`, to have them rise with it.
+
 ## Rates
 
 `per day`, `per week`, `per month`, `per quarter` or `per year` after a

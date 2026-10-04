@@ -1,14 +1,14 @@
 use crate::ast::schedule::Share;
 use crate::ast::{
-    AggKind, BinOp, Expr, ParamBody, Path, PostingAmount, Span, SpannedExpr, TimeUnit,
+    AggKind, BinOp, Expr, GrowthKind, ParamBody, Path, PostingAmount, Span, SpannedExpr, TimeUnit,
 };
-use crate::compile::{Amount, Builtin, ExprKind, Function, Program, Stmt};
+use crate::compile::{Amount, Builtin, ExprKind, Function, Growth, Program, Stmt};
 use crate::errors::Diagnostic;
 use crate::resolver::{Model, walk_expr};
 use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -219,6 +219,9 @@ struct State<'p> {
     /// For each `fill`, the start of the period it last posted in and what
     /// its posting has posted since.
     fills: Vec<(NaiveDate, Decimal)>,
+    /// For each growing arm, by param and arm, how many steps it has taken
+    /// and what they come to.
+    grown: HashMap<(usize, usize), (u32, Decimal)>,
 }
 
 impl Program {
@@ -242,6 +245,7 @@ impl Program {
             totals: vec![[Decimal::ZERO; 3]; self.legs.len()],
             firing: None,
             fills: vec![(NaiveDate::MIN, Decimal::ZERO); self.fills.len()],
+            grown: HashMap::new(),
         };
         let equity: Arc<Path> = Arc::new(Path(vec![
             "Equity".to_string(),
@@ -374,22 +378,113 @@ impl State<'_> {
     /// returned, so they only abort the simulation if the param is actually read.
     fn evaluate_params(&mut self) {
         self.params.clear();
-        for param in &self.program.params {
-            let expr = match &param.body {
-                crate::compile::ParamBody::Const(e) => Some(e),
+        let program = self.program;
+        for (index, param) in program.params.iter().enumerate() {
+            let value = match &param.body {
+                crate::compile::ParamBody::Const(e) => Some(self.eval_num(e, &[])),
                 crate::compile::ParamBody::Arms(arms) => arms
                     .iter()
-                    .find(|arm| arm.when.contains(self.date))
-                    .map(|arm| &arm.value),
+                    .position(|arm| arm.when.contains(self.date))
+                    .map(|i| {
+                        let base = self.eval_num(&arms[i].value, &[])?;
+                        match &arms[i].growth {
+                            Some(growth) => self.grow((index, i), growth, base),
+                            None => Ok(base),
+                        }
+                    }),
             };
-            let value = match expr {
-                Some(e) => match self.eval_num(e, &[]) {
-                    Ok(v) => ParamValue::Value(v),
-                    Err(d) => ParamValue::Error(d),
-                },
+            self.params.push(match value {
+                Some(Ok(v)) => ParamValue::Value(v),
+                Some(Err(d)) => ParamValue::Error(d),
                 None => ParamValue::Inactive,
-            };
-            self.params.push(value);
+            });
+        }
+    }
+
+    /// `base` grown by the steps `growth` has taken by today. Days only move
+    /// forward, so each arm's steps so far are kept and only new ones taken.
+    fn grow(
+        &mut self,
+        arm: (usize, usize),
+        growth: &Growth,
+        base: Decimal,
+    ) -> Result<Decimal, Diagnostic> {
+        let steps = growth.every.steps(growth.anchor, self.date);
+        let (taken, total) = match self.grown.get(&arm) {
+            Some(&(taken, total)) if taken <= steps => (taken, total),
+            _ => (0, no_growth(growth)),
+        };
+        let total = self.take_steps(growth, taken, steps, total)?;
+        self.grown.insert(arm, (steps, total));
+        apply_growth(growth, base, total)
+    }
+
+    /// `total` after `growth`'s steps after the `taken`th up to the `steps`th,
+    /// each at the rate on the day it's taken.
+    fn take_steps(
+        &self,
+        growth: &Growth,
+        taken: u32,
+        steps: u32,
+        mut total: Decimal,
+    ) -> Result<Decimal, Diagnostic> {
+        for n in taken + 1..=steps {
+            let on = growth
+                .every
+                .after(growth.anchor, n)
+                .expect("a step that's been taken has a date");
+            let by = self.value_on(&growth.by, on)?;
+            total = match growth.kind {
+                GrowthKind::Compounding => Decimal::ONE
+                    .checked_add(by)
+                    .and_then(|f| f.checked_mul(total)),
+                GrowthKind::Adding => total.checked_add(by),
+            }
+            .ok_or_else(|| {
+                Diagnostic::new(growth.by.span, "arithmetic overflow growing a param")
+            })?;
+        }
+        Ok(total)
+    }
+
+    /// The value on `date` of `e`, which the resolver checks only uses
+    /// numbers and params made of numbers.
+    fn value_on(&self, e: &crate::compile::Expr, date: NaiveDate) -> Result<Decimal, Diagnostic> {
+        match &e.kind {
+            ExprKind::Num(n) => Ok(*n),
+            ExprKind::Neg(x) => Ok(-self.value_on(x, date)?),
+            ExprKind::Per(x, _) => self.value_on(x, date),
+            ExprKind::Bin(a, op, b) => {
+                let (a, b) = (self.value_on(a, date)?, self.value_on(b, date)?);
+                match apply_binop(*op, Value::Num(a), Value::Num(b), e.span)? {
+                    Value::Num(n) => Ok(n),
+                    Value::Bool(_) => unreachable!("the typechecker makes growth rates numbers"),
+                }
+            }
+            ExprKind::Param(param) => {
+                let name = &self.program.params[*param].name;
+                match &self.program.params[*param].body {
+                    crate::compile::ParamBody::Const(e) => self.value_on(e, date),
+                    crate::compile::ParamBody::Arms(arms) => {
+                        let Some(arm) = arms.iter().find(|arm| arm.when.contains(date)) else {
+                            return Err(Diagnostic::new(
+                                e.span,
+                                format!(
+                                    "param `{name}` has no value on {date}: none of its arms cover this date"
+                                ),
+                            ));
+                        };
+                        let base = self.value_on(&arm.value, date)?;
+                        let Some(growth) = &arm.growth else {
+                            return Ok(base);
+                        };
+                        let steps = growth.every.steps(growth.anchor, date);
+                        let total = self.take_steps(growth, 0, steps, no_growth(growth))?;
+                        apply_growth(growth, base, total)
+                    }
+                }
+            }
+            _ => unreachable!("the resolver checks growth rates only use numbers and params"),
         }
     }
 
@@ -746,7 +841,15 @@ impl State<'_> {
             let crate::compile::ParamBody::Arms(arms) = &self.program.params[param].body else {
                 continue;
             };
-            let arm = |t: NaiveDate| arms.iter().position(|arm| arm.when.contains(t));
+            // Which arm applies, and how many steps it has grown.
+            let arm = |t: NaiveDate| {
+                let i = arms.iter().position(|arm| arm.when.contains(t))?;
+                let steps = arms[i]
+                    .growth
+                    .as_ref()
+                    .map_or(0, |g| g.every.steps(g.anchor, t));
+                Some((i, steps))
+            };
             let today = arm(self.date);
             let changes = carried
                 .iter()
@@ -899,6 +1002,23 @@ fn to_amount(value: Decimal) -> Decimal {
     } else {
         amount
     }
+}
+
+/// What no steps of `growth` come to: nothing added, or a factor of one.
+fn no_growth(growth: &Growth) -> Decimal {
+    match growth.kind {
+        GrowthKind::Compounding => Decimal::ONE,
+        GrowthKind::Adding => Decimal::ZERO,
+    }
+}
+
+/// `base` grown by `total`, what `growth`'s steps come to.
+fn apply_growth(growth: &Growth, base: Decimal, total: Decimal) -> Result<Decimal, Diagnostic> {
+    match growth.kind {
+        GrowthKind::Compounding => base.checked_mul(total),
+        GrowthKind::Adding => base.checked_add(total),
+    }
+    .ok_or_else(|| Diagnostic::new(growth.by.span, "arithmetic overflow growing a param"))
 }
 
 /// Adds the params `e` reads directly to `out`.

@@ -87,6 +87,7 @@ impl<'a> Resolver<'a> {
         validate_fn_bodies(&self.fns, &mut self.diags);
         self.validate_references();
         self.check_param_cycles();
+        self.check_growth_rates();
         if self.diags.is_empty() {
             // Types are only meaningful once every name and call resolves.
             self.diags = crate::typecheck::check(self.program, &self.fns);
@@ -292,6 +293,17 @@ impl<'a> Resolver<'a> {
     /// never apply because the arms above cover all their days.
     fn check_arms(&mut self, name: &str, arms: &[Arm]) {
         for (i, arm) in arms.iter().enumerate() {
+            if let Some(growth) = &arm.growth
+                && arm.when.start().is_none()
+            {
+                self.diags.push(Diagnostic::new(
+                    growth.span,
+                    format!(
+                        "`{}` needs an arm with a start to count steps from, like `from jul 2026`",
+                        growth.kind.keyword()
+                    ),
+                ));
+            }
             if let When::Windows(windows) = &arm.when
                 && windows
                     .iter()
@@ -323,6 +335,59 @@ impl<'a> Resolver<'a> {
                     ),
                 ));
             }
+        }
+    }
+
+    /// Reports growth rates that read anything but numbers and params made of
+    /// numbers, which have a value on any date without simulating it.
+    fn check_growth_rates(&mut self) {
+        let mut diags = Vec::new();
+        for body in self.params.values() {
+            let ParamBody::Arms(arms) = body else {
+                continue;
+            };
+            for growth in arms.iter().filter_map(|arm| arm.growth.as_ref()) {
+                if let Some(span) = self.first_non_number(&growth.by, &mut HashSet::new()) {
+                    diags.push(Diagnostic::new(
+                        span,
+                        format!(
+                            "`{}` can only use numbers, and params made of numbers",
+                            growth.kind.keyword()
+                        ),
+                    ));
+                }
+            }
+        }
+        self.diags.extend(diags);
+    }
+
+    /// The first part of `e` that isn't a number or a param made of numbers.
+    fn first_non_number(&self, e: &SpannedExpr, seen: &mut HashSet<String>) -> Option<Span> {
+        match e.0.as_ref() {
+            Expr::Num(_) => None,
+            Expr::Neg(x) | Expr::Per(x, _) => self.first_non_number(x, seen),
+            Expr::Bin(a, _, b) => self
+                .first_non_number(a, seen)
+                .or_else(|| self.first_non_number(b, seen)),
+            Expr::Ref(path) if path.0.len() == 1 && self.params.contains_key(&path.0[0]) => {
+                let name = &path.0[0];
+                // A param in a cycle is reported elsewhere.
+                if !seen.insert(name.clone()) {
+                    return None;
+                }
+                let numbers = match &self.params[name] {
+                    ParamBody::Const(e) => self.first_non_number(e, seen).is_none(),
+                    ParamBody::Arms(arms) => arms.iter().all(|arm| {
+                        self.first_non_number(&arm.value, seen).is_none()
+                            && arm
+                                .growth
+                                .as_ref()
+                                .is_none_or(|g| self.first_non_number(&g.by, seen).is_none())
+                    }),
+                };
+                (!numbers).then_some(e.1)
+            }
+            _ => Some(e.1),
         }
     }
 
@@ -370,6 +435,11 @@ impl<'a> Resolver<'a> {
                     ParamBody::Arms(arms) => {
                         for arm in arms {
                             self.check_expr(&arm.value, None, &no_extra, &stock_set, &param_set);
+                            if let Some(growth) = &arm.growth {
+                                self.check_expr(
+                                    &growth.by, None, &no_extra, &stock_set, &param_set,
+                                );
+                            }
                         }
                     }
                 },
@@ -586,6 +656,9 @@ fn collect_param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> 
         ParamBody::Arms(arms) => {
             for arm in arms {
                 walk_expr(&arm.value, &mut visitor);
+                if let Some(growth) = &arm.growth {
+                    walk_expr(&growth.by, &mut visitor);
+                }
             }
         }
     }

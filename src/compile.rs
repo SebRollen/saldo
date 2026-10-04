@@ -2,7 +2,7 @@
 //! anything up by name: accounts, params, legs, functions and function locals
 //! all become indices.
 
-use crate::ast::{self, AggKind, BinOp, Path, Span, TimeUnit};
+use crate::ast::{self, AggKind, BinOp, GrowthKind, Path, Span, TimeUnit};
 use crate::ast::{Schedule, When};
 use crate::resolver::Model;
 use chrono::NaiveDate;
@@ -47,6 +47,16 @@ pub enum ParamBody {
 pub struct Arm {
     pub when: When,
     pub value: Expr,
+    pub growth: Option<Growth>,
+}
+
+/// How an arm's value grows: a step every `every` from `anchor`, the arm's
+/// start, compounding at or adding `by`.
+pub struct Growth {
+    pub kind: GrowthKind,
+    pub by: Expr,
+    pub every: TimeUnit,
+    pub anchor: NaiveDate,
 }
 
 pub struct Function {
@@ -243,6 +253,15 @@ pub fn compile(model: &Model) -> Program {
                             .map(|arm| Arm {
                                 when: arm.when.clone(),
                                 value: names.lower(&arm.value, &global),
+                                growth: arm.growth.as_ref().map(|growth| Growth {
+                                    kind: growth.kind,
+                                    by: names.lower(&growth.by, &global),
+                                    every: growth.every,
+                                    anchor: arm
+                                        .when
+                                        .start()
+                                        .expect("the resolver checks a growing arm has a start"),
+                                }),
                             })
                             .collect(),
                     ),
