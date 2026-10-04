@@ -1010,6 +1010,58 @@ fn param_arms_take_quarters_years_and_month_ranges() {
 }
 
 #[test]
+fn a_param_changing_in_periods_without_a_firing_is_an_error() {
+    let src = "
+        account Assets:Cash
+        account Expense:Power
+        param power {
+          in jan = 100 per month
+          in feb = 200 per month
+          else   = 300 per month
+        }
+        entry quarterly \"Power bill\" {
+          Expense:Power = power
+          Assets:Cash
+        }
+    ";
+    let errors = run(src, &opts("2027-01-01", "2027-03-31")).unwrap_err();
+    assert_eq!(
+        highlighted(src, &errors, "changes during the months before 2027-03-01"),
+        "power"
+    );
+}
+
+#[test]
+fn a_param_may_change_where_every_period_has_a_firing() {
+    let src = "
+        account Assets:Cash
+        account Expense:Rent
+        account Expense:Insurance
+        param rent {
+          from 2027-03-10 = 2_000 per month
+          else            = 1_800 per month
+        }
+        param insurance {
+          in q1 = 300 per quarter
+          else  = 600 per quarter
+        }
+        entry monthly on the 15th \"Rent\" {
+          Expense:Rent = rent
+          Assets:Cash
+        }
+        entry quarterly \"Insurance\" {
+          Expense:Insurance = insurance
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2027-01-01", "2027-06-30")).unwrap();
+    let rent = [1_800, 1_800, 2_000, 2_000, 2_000, 2_000].map(Decimal::from);
+    assert_eq!(postings_to(&output, "Expense:Rent"), rent);
+    let insurance = [300, 600].map(Decimal::from);
+    assert_eq!(postings_to(&output, "Expense:Insurance"), insurance);
+}
+
+#[test]
 fn named_schedule_missing_from_is_reported_once() {
     let src = "
         schedule biweekly = every 2 weeks

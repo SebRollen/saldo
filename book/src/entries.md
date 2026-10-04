@@ -165,7 +165,9 @@ In detail:
   schedule's `from` date. A `quarterly` entry posts three months of a rate
   per month, an `every second friday` entry posts two weeks of a rate per
   week, and an entry `every month from 2026-03-17` first posts March 17 to
-  31 of a rate per day.
+  31 of a rate per day. Those periods get the rate's value on the day the
+  entry fires, so if a param it reads changes during them, that's an error
+  (see [Time-varying params](./params.md#time-varying-params)).
 
 The last rule gives you the other common way of paying a yearly salary
 biweekly: the same amount every payday, so that a year with 27 paydays pays

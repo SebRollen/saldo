@@ -89,6 +89,16 @@ A param's arms must agree on what kind of value it is, like a rate per year
 August from a monthly entry, not half of it. For what a month costs, write
 `per month` or a plain amount.
 
+An entry reads a param on the day it fires, so that's the day an arm's
+condition is checked, whatever the money is for. Rent for September paid on
+August 31 needs an arm that covers August 31.
+
+When an entry posts a rate for periods that have no firing of their own, like
+a `quarterly` entry posting an amount per month, each of those periods gets
+the value from the day it fires. If a param it reads changes during them,
+that would be wrong, so saldo stops with an error. Fire the entry at least
+once a period, here every month.
+
 A more complete example:
 
 ```

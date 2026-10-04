@@ -639,7 +639,7 @@ impl State<'_> {
             }
             ExprKind::Spread(e, unit) => {
                 let amount = self.eval_num(e, locals)?;
-                self.spread(amount, *unit, span).map(Value::Num)
+                self.spread(amount, e, *unit, span).map(Value::Num)
             }
         }
     }
@@ -710,16 +710,92 @@ impl State<'_> {
         Ok(Value::Num(n))
     }
 
-    /// The firing entry's share of `amount` per `unit`.
-    fn spread(&self, amount: Decimal, unit: TimeUnit, span: Span) -> Result<Decimal, Diagnostic> {
+    /// The firing entry's share of `amount`, the value of `expr`, per `unit`.
+    fn spread(
+        &self,
+        amount: Decimal,
+        expr: &crate::compile::Expr,
+        unit: TimeUnit,
+        span: Span,
+    ) -> Result<Decimal, Diagnostic> {
         let entry = self.firing.expect("only postings spread amounts");
         let share = self.program.entries[entry].schedule.share(unit, self.date);
+        if share.carried > 0 {
+            self.check_carried(expr, unit, share.carried, span)?;
+        }
         spread(amount, share).ok_or_else(|| {
             Diagnostic::new(
                 span,
                 format!("arithmetic overflow spreading {amount} per {unit}"),
             )
         })
+    }
+
+    /// Errors if a param `expr` reads takes a different arm on a day of the
+    /// `carried` periods before today's, which get its value today.
+    fn check_carried(
+        &self,
+        expr: &crate::compile::Expr,
+        unit: TimeUnit,
+        carried: u32,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let own = unit.period_start(self.date);
+        let first = unit.period_number(own) - i64::from(carried);
+        for param in self.params_read(expr) {
+            let crate::compile::ParamBody::Arms(arms) = &self.program.params[param].body else {
+                continue;
+            };
+            let arm = |t: NaiveDate| arms.iter().position(|arm| arm.when.contains(t));
+            let today = arm(self.date);
+            let changes = std::iter::successors(own.pred_opt(), |d| d.pred_opt())
+                .take_while(|d| unit.period_number(*d) >= first)
+                .any(|d| arm(d) != today);
+            if changes {
+                let entry = &self.program.entries[self.firing.expect("only postings spread")];
+                let unit = unit.name();
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "`{}` changes during the {unit}s before {} that `{}` covers, \
+                         but they'd all get its value on {}",
+                        self.program.params[param].name, own, entry.label, self.date
+                    ),
+                )
+                .with_note(
+                    entry.span,
+                    format!(
+                        "this fires less often than once a {unit}; fire it at least once a {unit}"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The params `expr` reads, directly or through other params.
+    fn params_read(&self, expr: &crate::compile::Expr) -> Vec<usize> {
+        let mut found = Vec::new();
+        params_in(expr, &mut found);
+        let mut i = 0;
+        while let Some(&param) = found.get(i) {
+            let mut more = Vec::new();
+            match &self.program.params[param].body {
+                crate::compile::ParamBody::Const(e) => params_in(e, &mut more),
+                crate::compile::ParamBody::Arms(arms) => {
+                    for arm in arms {
+                        params_in(&arm.value, &mut more);
+                    }
+                }
+            }
+            for p in more {
+                if !found.contains(&p) {
+                    found.push(p);
+                }
+            }
+            i += 1;
+        }
+        found
     }
 
     /// What's left of `target` this `unit`, split over the firings left in it.
@@ -822,6 +898,38 @@ fn to_amount(value: Decimal) -> Decimal {
         Decimal::ZERO
     } else {
         amount
+    }
+}
+
+/// Adds the params `e` reads directly to `out`.
+fn params_in(e: &crate::compile::Expr, out: &mut Vec<usize>) {
+    match &e.kind {
+        ExprKind::Param(param) => out.push(*param),
+        ExprKind::Num(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Account(_)
+        | ExprKind::Leg(_)
+        | ExprKind::Local(_)
+        | ExprKind::Total(..) => {}
+        ExprKind::Neg(x)
+        | ExprKind::Not(x)
+        | ExprKind::Per(x, _)
+        | ExprKind::Spread(x, _)
+        | ExprKind::Fill(x, ..) => params_in(x, out),
+        ExprKind::Bin(a, _, b) => {
+            params_in(a, out);
+            params_in(b, out);
+        }
+        ExprKind::If(c, t, f) => {
+            params_in(c, out);
+            params_in(t, out);
+            params_in(f, out);
+        }
+        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => {
+            for arg in args {
+                params_in(arg, out);
+            }
+        }
     }
 }
 
