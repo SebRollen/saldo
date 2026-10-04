@@ -188,6 +188,8 @@ pub enum Period {
 pub struct Periodic {
     pub nth: Option<Nth>,
     pub period: Period,
+    /// The days `in` keeps, or every day.
+    pub within: When,
     pub start: Option<NaiveDate>,
 }
 
@@ -211,6 +213,19 @@ impl Schedule {
     /// starts. The `from` date of an `every N …` schedule still picks which
     /// days fit, before it as well as after.
     fn matches_pattern(&self, t: NaiveDate) -> bool {
+        self.fits_rhythm(t) && self.within(t)
+    }
+
+    /// Whether `t` is among the days the schedule's `in` keeps.
+    fn within(&self, t: NaiveDate) -> bool {
+        match self {
+            Self::Periodic(periodic) => periodic.within.contains(t),
+            Self::Dates(_) => true,
+        }
+    }
+
+    /// Whether `t` fits the schedule's pattern before `in` leaves days out.
+    fn fits_rhythm(&self, t: NaiveDate) -> bool {
         let periodic = match self {
             Self::Dates(dates) => return dates.contains(&t),
             Self::Periodic(periodic) => periodic,
@@ -325,7 +340,7 @@ impl Schedule {
     /// date, so a schedule that starts partway through a period gets only part
     /// of it. Periods with no such days add their whole amount to the next day
     /// that fits, back to the period containing `from`, before which the
-    /// schedule doesn't cover anything.
+    /// schedule doesn't cover anything (see `carried_periods`).
     pub fn share(&self, unit: TimeUnit, t: NaiveDate) -> Share {
         let start = unit.period_start(t);
         let mut share = Share {
@@ -345,17 +360,54 @@ impl Schedule {
             }
             day = d.succ_opt();
         }
-        let own = unit.period_number(start);
+        share.carried = self
+            .carried_periods(unit, t)
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX);
+        share
+    }
+
+    /// The first days of the periods before `t`'s that add their whole amount
+    /// to the firing on `t`: those since the previous firing's, back to the
+    /// one containing `from`, except the ones `in` leaves out.
+    pub fn carried_periods(&self, unit: TimeUnit, t: NaiveDate) -> Vec<NaiveDate> {
+        let own = unit.period_start(t);
         let after_previous = self
-            .previous_match(start)
-            .map(|d| unit.period_number(d) + 1);
+            .previous_match(own)
+            .and_then(|d| unit.next_period_start(d));
         let from = match self {
-            Self::Periodic(periodic) => periodic.start.map(|d| unit.period_number(d)),
+            Self::Periodic(periodic) => periodic.start.map(|d| unit.period_start(d)),
             Self::Dates(_) => None,
         };
-        let first = after_previous.into_iter().chain(from).max().unwrap_or(own);
-        share.carried = (own - first).max(0).try_into().unwrap_or(u32::MAX);
-        share
+        let Some(first) = after_previous.into_iter().chain(from).max() else {
+            return Vec::new();
+        };
+        std::iter::successors(Some(first), |p| unit.next_period_start(*p))
+            .take_while(|p| *p < own)
+            .filter(|p| !self.leaves_out(unit, *p))
+            .collect()
+    }
+
+    /// Whether `in` leaves out the period starting on `start`: it keeps none
+    /// of its days, or none of the days the schedule would fire on in it.
+    fn leaves_out(&self, unit: TimeUnit, start: NaiveDate) -> bool {
+        let Self::Periodic(periodic) = self else {
+            return false;
+        };
+        if periodic.within == When::Always {
+            return false;
+        }
+        let (mut kept, mut fires, mut fires_kept) = (false, false, false);
+        for d in unit.days(start) {
+            let within = periodic.within.contains(d);
+            kept |= within;
+            if self.fits_rhythm(d) {
+                fires = true;
+                fires_kept |= within;
+            }
+        }
+        !kept || (fires && !fires_kept)
     }
 
     /// How many times the schedule fires from `t` to the end of `t`'s
@@ -548,6 +600,7 @@ mod tests {
                 Schedule::Periodic(Periodic {
                     nth: None,
                     period,
+                    within: When::Always,
                     start: None,
                 })
             }
@@ -891,6 +944,7 @@ mod tests {
                 Schedule::Periodic(Periodic {
                     nth: Some(Nth(nth)),
                     period,
+                    within: When::Always,
                     start: Some(start),
                 })
             }

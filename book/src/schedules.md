@@ -133,6 +133,30 @@ week containing the `from` date, so all the listed days of a week fire
 together. `every <n> <weekday>` counts occurrences of that day instead,
 starting with the first one on or after the `from` date.
 
+## Keeping some months
+
+`in` after a schedule keeps only the days in a list of months, quarters and
+years, the same list a param's arms take (see
+[Params](./params.md#conditions)). It goes after the days the schedule fires
+on, and before `from`:
+
+```
+monthly on the 1st in sep through jun          # the school year
+every friday in q2, q4                         # Fridays in two quarters
+yearly on jan 1st in 2027 through 2029         # three New Years
+every second friday in sep through jun from 2026-01-02
+```
+
+A counted schedule, like `every second friday`, keeps counting through the
+days `in` leaves out, so it picks up its rhythm where it would have been.
+
+The periods `in` leaves out don't roll into the next firing (see
+[Rates](./entries.md#rates)). An entry `monthly on the 1st in sep through jun`
+posts `1_000 per month` as 1,000 on September 1st, not 3,000, and splits
+`24_000 per year` over its ten firings, 2,400 each. A period is left out if
+`in` keeps none of its days, or none of the days the schedule would have
+fired on in it.
+
 ## Literal date lists
 
 A comma- or `and`-separated list of ISO dates fires on exactly those days:

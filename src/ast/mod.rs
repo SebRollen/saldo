@@ -133,19 +133,22 @@ impl TimeUnit {
         }
     }
 
-    /// Numbers periods consecutively, so subtracting the numbers of two dates
-    /// gives how many periods apart they are.
-    pub fn period_number(self, t: NaiveDate) -> i64 {
-        use chrono::Datelike;
-        let months = i64::from(t.year()) * 12 + i64::from(t.month0());
+    /// The first day of the period after the one containing `t`.
+    pub fn next_period_start(self, t: NaiveDate) -> Option<NaiveDate> {
+        let start = self.period_start(t);
         match self {
-            TimeUnit::Day => t.num_days_from_ce().into(),
-            // Day 1 of the common era was a Monday.
-            TimeUnit::Week => (i64::from(t.num_days_from_ce()) - 1).div_euclid(7),
-            TimeUnit::Month => months,
-            TimeUnit::Quarter => months.div_euclid(3),
-            TimeUnit::Year => t.year().into(),
+            TimeUnit::Day => start.succ_opt(),
+            TimeUnit::Week => start.checked_add_days(chrono::Days::new(7)),
+            TimeUnit::Month => start.checked_add_months(chrono::Months::new(1)),
+            TimeUnit::Quarter => start.checked_add_months(chrono::Months::new(3)),
+            TimeUnit::Year => start.checked_add_months(chrono::Months::new(12)),
         }
+    }
+
+    /// The days of the period starting on `start`.
+    pub fn days(self, start: NaiveDate) -> impl Iterator<Item = NaiveDate> {
+        std::iter::successors(Some(start), |d| d.succ_opt())
+            .take_while(move |d| self.period_start(*d) == start)
     }
 
     /// Converting an amount per `self` into an amount per `other` multiplies it
@@ -355,15 +358,26 @@ mod tests {
     }
 
     #[test]
-    fn period_numbers_count_periods_between_dates() {
-        let (sun, mon) = (date(2026, 8, 16), date(2026, 8, 17));
-        let week = |t| TimeUnit::Week.period_number(t);
-        assert_eq!(week(mon) - week(sun), 1);
-        assert_eq!(week(sun) - week(date(2026, 8, 10)), 0);
-        assert_eq!(week(date(1, 1, 7)) - week(date(1, 1, 1)), 0);
-        let quarter = |t| TimeUnit::Quarter.period_number(t);
-        assert_eq!(quarter(date(2027, 1, 1)) - quarter(date(2026, 12, 31)), 1);
-        assert_eq!(quarter(date(-1, 12, 31)) - quarter(date(0, 1, 1)), -1);
+    fn steps_through_periods() {
+        use TimeUnit::*;
+        // A Thursday.
+        let t = date(2026, 12, 31);
+        assert_eq!(Day.next_period_start(t), Some(date(2027, 1, 1)));
+        assert_eq!(Week.next_period_start(t), Some(date(2027, 1, 4)));
+        assert_eq!(
+            Month.next_period_start(date(2026, 1, 31)),
+            Some(date(2026, 2, 1))
+        );
+        assert_eq!(
+            Quarter.next_period_start(date(2026, 11, 15)),
+            Some(date(2027, 1, 1))
+        );
+        assert_eq!(
+            Year.next_period_start(date(2026, 2, 28)),
+            Some(date(2027, 1, 1))
+        );
+        assert_eq!(Month.days(date(2026, 2, 1)).count(), 28);
+        assert_eq!(Week.days(date(2026, 12, 28)).last(), Some(date(2027, 1, 3)));
     }
 
     #[test]

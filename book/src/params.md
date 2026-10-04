@@ -87,7 +87,10 @@ A param's arms must agree on what kind of value it is, like a rate per year
 (see [Rates](#rates)). A rate in an arm for some months is still a rate:
 `in jul, aug = 60_000 per year` posts a twelfth of 60,000 in each of July and
 August from a monthly entry, not half of it. For what a month costs, write
-`per month` or a plain amount.
+`per month` or a plain amount. To spread a yearly amount over just some
+months, leave the others out of the entry's schedule instead: `monthly on the
+1st in sep through jun` splits `24_000 per year` into ten firings of 2,400
+(see [Schedules](./schedules.md#keeping-some-months)).
 
 An entry reads a param on the day it fires, so that's the day an arm's
 condition is checked, whatever the money is for. Rent for September paid on

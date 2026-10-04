@@ -274,6 +274,7 @@ impl<'a> Resolver<'a> {
                         None => Schedule::Periodic(Periodic {
                             period: Period::Day,
                             nth: None,
+                            within: When::Always,
                             start: None,
                         }),
                         Some(r) => match self.resolve_schedule_ref(r, *span) {
@@ -551,6 +552,7 @@ fn check_periodic_schedule(schedule: &Schedule, span: Span, diags: &mut Vec<Diag
         nth: Some(_),
         start: None,
         period,
+        ..
     }) = schedule
     {
         let label = match period {

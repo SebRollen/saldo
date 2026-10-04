@@ -746,52 +746,10 @@
       ]
     },
     "adverbial_schedule": {
-      "type": "CHOICE",
+      "type": "SEQ",
       "members": [
         {
-          "type": "FIELD",
-          "name": "kind",
-          "content": {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "STRING",
-                "value": "daily"
-              },
-              {
-                "type": "STRING",
-                "value": "quarterly"
-              }
-            ]
-          }
-        },
-        {
-          "type": "SEQ",
-          "members": [
-            {
-              "type": "FIELD",
-              "name": "kind",
-              "content": {
-                "type": "STRING",
-                "value": "weekly"
-              }
-            },
-            {
-              "type": "CHOICE",
-              "members": [
-                {
-                  "type": "SYMBOL",
-                  "name": "weekday_on_clause"
-                },
-                {
-                  "type": "BLANK"
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "type": "SEQ",
+          "type": "CHOICE",
           "members": [
             {
               "type": "FIELD",
@@ -801,30 +759,93 @@
                 "members": [
                   {
                     "type": "STRING",
-                    "value": "monthly"
+                    "value": "daily"
                   },
                   {
                     "type": "STRING",
-                    "value": "yearly"
-                  },
-                  {
-                    "type": "STRING",
-                    "value": "annually"
+                    "value": "quarterly"
                   }
                 ]
               }
             },
             {
-              "type": "CHOICE",
+              "type": "SEQ",
               "members": [
                 {
-                  "type": "SYMBOL",
-                  "name": "on_clause"
+                  "type": "FIELD",
+                  "name": "kind",
+                  "content": {
+                    "type": "STRING",
+                    "value": "weekly"
+                  }
                 },
                 {
-                  "type": "BLANK"
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "weekday_on_clause"
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
                 }
               ]
+            },
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "FIELD",
+                  "name": "kind",
+                  "content": {
+                    "type": "CHOICE",
+                    "members": [
+                      {
+                        "type": "STRING",
+                        "value": "monthly"
+                      },
+                      {
+                        "type": "STRING",
+                        "value": "yearly"
+                      },
+                      {
+                        "type": "STRING",
+                        "value": "annually"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "on_clause"
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "within",
+              "content": {
+                "type": "SYMBOL",
+                "name": "in_condition"
+              }
+            },
+            {
+              "type": "BLANK"
             }
           ]
         }
@@ -860,6 +881,22 @@
             "type": "SYMBOL",
             "name": "_period_spec"
           }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "within",
+              "content": {
+                "type": "SYMBOL",
+                "name": "in_condition"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         },
         {
           "type": "CHOICE",

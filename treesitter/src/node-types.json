@@ -121,6 +121,16 @@
             "named": false
           }
         ]
+      },
+      "within": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "in_condition",
+            "named": true
+          }
+        ]
       }
     },
     "children": {
@@ -895,6 +905,16 @@
         "types": [
           {
             "type": "date",
+            "named": true
+          }
+        ]
+      },
+      "within": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "in_condition",
             "named": true
           }
         ]

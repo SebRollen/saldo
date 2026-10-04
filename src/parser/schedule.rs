@@ -33,12 +33,18 @@ impl<'src> Parser<'src> {
         self.eat_keyword("every")?;
         let nth = self.try_parse_nth();
         let period = self.parse_period()?;
+        let within = self.parse_within()?;
         let start = if self.eat_keyword("from").is_some() {
             Some(self.parse_date()?)
         } else {
             None
         };
-        Some(Schedule::Periodic(Periodic { nth, period, start }))
+        Some(Schedule::Periodic(Periodic {
+            nth,
+            period,
+            within,
+            start,
+        }))
     }
 
     fn parse_adverbial(&mut self) -> Option<Schedule> {
@@ -84,9 +90,11 @@ impl<'src> Parser<'src> {
             }
             _ => return None,
         };
+        let within = self.parse_within()?;
         Some(Schedule::Periodic(Periodic {
             nth: None,
             period,
+            within,
             start: None,
         }))
     }
@@ -414,34 +422,46 @@ impl<'src> Parser<'src> {
             };
             return Some(When::Windows(vec![Window::Dates(from, to)]));
         }
-        if self.eat_keyword("in").is_some() {
-            let listed = self.parse_comma_list(
-                "a month, quarter or year (like `may`, `q2` or `2026`)",
-                |p| p.try_parse_window(),
-            );
-            if listed.is_empty() {
-                return None;
-            }
-            // Every year's months go in one window, first.
-            let months = listed.iter().fold(0, |mask, w| match w {
-                Window::Months(m) => mask | m,
-                Window::Dates(..) => mask,
-            });
-            let windows = (months != 0)
-                .then_some(Window::Months(months))
-                .into_iter()
-                .chain(
-                    listed
-                        .into_iter()
-                        .filter(|w| matches!(w, Window::Dates(..))),
-                )
-                .collect();
-            return Some(When::Windows(windows));
+        if let Some(within) = self.try_parse_in() {
+            return within;
         }
         let span = self.peek_span();
         self.errors
             .push(Diagnostic::new(span, "expected `from`, `in` or `else`"));
         None
+    }
+
+    /// `in` and a list of months, quarters and years, if the next word is
+    /// `in`: `None` if it isn't, and `Some(None)` if the list has an error.
+    fn try_parse_in(&mut self) -> Option<Option<When>> {
+        self.eat_keyword("in")?;
+        let listed = self.parse_comma_list(
+            "a month, quarter or year (like `may`, `q2` or `2026`)",
+            |p| p.try_parse_window(),
+        );
+        if listed.is_empty() {
+            return Some(None);
+        }
+        // Every year's months go in one window, first.
+        let months = listed.iter().fold(0, |mask, w| match w {
+            Window::Months(m) => mask | m,
+            Window::Dates(..) => mask,
+        });
+        let windows = (months != 0)
+            .then_some(Window::Months(months))
+            .into_iter()
+            .chain(
+                listed
+                    .into_iter()
+                    .filter(|w| matches!(w, Window::Dates(..))),
+            )
+            .collect();
+        Some(Some(When::Windows(windows)))
+    }
+
+    /// The days a schedule keeps: an optional `in` list, or every day.
+    fn parse_within(&mut self) -> Option<When> {
+        self.try_parse_in().unwrap_or(Some(When::Always))
     }
 
     /// A `from`'s first day: a date, or the start of a year, or of a month or
@@ -953,6 +973,31 @@ mod tests {
             }
             parse("monthly on the 31st, 5th friday, 23rd weekday");
             parse("yearly on feb 29th");
+        }
+
+        #[test]
+        fn keeps_the_days_in_an_in_list() {
+            let Schedule::Periodic(monthly) = parse("monthly on the 1st in jul through apr") else {
+                panic!("not periodic")
+            };
+            assert_eq!(
+                When::Windows(vec![Window::Months(0b1111_1100_1111)]),
+                monthly.within
+            );
+            let Schedule::Periodic(every) = parse("every second friday in q2 2027 from 2027-01-01")
+            else {
+                panic!("not periodic")
+            };
+            let date = |m| NaiveDate::from_ymd_opt(2027, m, 1).unwrap();
+            assert_eq!(
+                When::Windows(vec![Window::Dates(date(4), Some(date(7)))]),
+                every.within
+            );
+            assert_eq!(Some(date(1)), every.start);
+            let Schedule::Periodic(daily) = parse("daily") else {
+                panic!("not periodic")
+            };
+            assert_eq!(When::Always, daily.within);
         }
 
         #[test]

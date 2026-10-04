@@ -1062,6 +1062,90 @@ fn a_param_may_change_where_every_period_has_a_firing() {
 }
 
 #[test]
+fn a_schedule_in_some_months_splits_a_yearly_rate_over_its_firings() {
+    let src = "
+        account Assets:Cash
+        account Expense:Tuition
+        entry monthly on the 1st in sep through jun \"Tuition\" {
+          Expense:Tuition = 24_000 per year
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2027-01-01", "2027-12-31")).unwrap();
+    let months: Vec<u32> = output
+        .log
+        .transactions
+        .iter()
+        .map(|tx| {
+            use chrono::Datelike;
+            tx.date.month()
+        })
+        .collect();
+    assert_eq!(months, [1, 2, 3, 4, 5, 6, 9, 10, 11, 12]);
+    assert_eq!(postings_to(&output, "Expense:Tuition"), [usd("2400"); 10]);
+}
+
+#[test]
+fn periods_a_schedule_leaves_out_dont_roll_into_the_next_firing() {
+    let src = "
+        account Assets:Cash
+        account Expense:Monthly
+        account Expense:Weekly
+        entry monthly on the 1st in sep through jun \"Monthly\" {
+          Expense:Monthly = 1_000 per month
+          Assets:Cash
+        }
+        // July 2 is a Friday, so the week of June 28 has days in June but
+        // its firing is left out.
+        entry every friday in sep through jun \"Weekly\" {
+          Expense:Weekly = 100 per week
+          Assets:Cash
+        }
+    ";
+    let output = run(src, &opts("2027-06-01", "2027-09-30")).unwrap();
+    let on = |date: &str, account: &str| {
+        let tx = output
+            .log
+            .transactions
+            .iter()
+            .position(|tx| tx.date == d(date) && tx.postings[0].0.to_string() == account)
+            .unwrap_or_else(|| panic!("nothing posted to {account} on {date}"));
+        posting(&output, tx, account)
+    };
+    assert_eq!(on("2027-09-01", "Expense:Monthly"), usd("1000"));
+    assert_eq!(on("2027-06-25", "Expense:Weekly"), usd("100"));
+    assert_eq!(on("2027-09-03", "Expense:Weekly"), usd("100"));
+}
+
+#[test]
+fn a_counted_schedule_keeps_its_rhythm_through_months_it_leaves_out() {
+    let src = "
+        account Assets:Cash
+        account Income:Pay
+        entry every second friday in sep through jun from 2027-01-01 \"Pay\" {
+          Assets:Cash = 100
+          Income:Pay
+        }
+    ";
+    let output = run(src, &opts("2027-06-01", "2027-09-30")).unwrap();
+    let dates: Vec<NaiveDate> = output.log.transactions.iter().map(|tx| tx.date).collect();
+    assert_eq!(
+        dates,
+        ["2027-06-04", "2027-06-18", "2027-09-10", "2027-09-24"].map(d)
+    );
+}
+
+#[test]
+fn schedule_in_errors_point_at_the_offending_text() {
+    let src = "account A\naccount B\nentry monthly in may through 2027 \"x\" {\n A = 1\n B\n}";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert_eq!(
+        highlighted(src, &errors, "both ends of `through`"),
+        "may through 2027"
+    );
+}
+
+#[test]
 fn named_schedule_missing_from_is_reported_once() {
     let src = "
         schedule biweekly = every 2 weeks

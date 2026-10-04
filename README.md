@@ -142,7 +142,8 @@ The string label (e.g. `"Jim's paycheck"`) is mandatory and appears in ledger ou
 
 Schedules determine when assertions and entries are triggered. They can
 be simple, like `daily` which triggers every day, or complex like
-`every 3rd month on the 17th and last day from 2024-01-01`. Schedules
+`every 3rd month on the 17th and last day from 2024-01-01`, and `in` keeps
+only some months, like `monthly on the 1st in sep through jun`. Schedules
 can be declared using the `schedule` keyword, or built inline.
 
 **Named legs** (`as <name>`) make a posting's value referenceable inside the same flow and via period aggregates.

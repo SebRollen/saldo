@@ -223,13 +223,16 @@ module.exports = grammar({
       ),
 
     adverbial_schedule: ($) =>
-      choice(
-        field("kind", choice("daily", "quarterly")),
-        seq(field("kind", "weekly"), optional($.weekday_on_clause)),
-        seq(
-          field("kind", choice("monthly", "yearly", "annually")),
-          optional($.on_clause),
+      seq(
+        choice(
+          field("kind", choice("daily", "quarterly")),
+          seq(field("kind", "weekly"), optional($.weekday_on_clause)),
+          seq(
+            field("kind", choice("monthly", "yearly", "annually")),
+            optional($.on_clause),
+          ),
         ),
+        optional(field("within", $.in_condition)),
       ),
 
     every_schedule: ($) =>
@@ -237,6 +240,7 @@ module.exports = grammar({
         "every",
         optional(field("nth", $._ordinal)),
         field("period", $._period_spec),
+        optional(field("within", $.in_condition)),
         optional(seq("from", field("start", $.date))),
       ),
 

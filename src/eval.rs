@@ -721,7 +721,7 @@ impl State<'_> {
         let entry = self.firing.expect("only postings spread amounts");
         let share = self.program.entries[entry].schedule.share(unit, self.date);
         if share.carried > 0 {
-            self.check_carried(expr, unit, share.carried, span)?;
+            self.check_carried(expr, unit, span)?;
         }
         spread(amount, share).ok_or_else(|| {
             Diagnostic::new(
@@ -732,27 +732,27 @@ impl State<'_> {
     }
 
     /// Errors if a param `expr` reads takes a different arm on a day of the
-    /// `carried` periods before today's, which get its value today.
+    /// periods that roll into today's firing, which get its value today.
     fn check_carried(
         &self,
         expr: &crate::compile::Expr,
         unit: TimeUnit,
-        carried: u32,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        let entry = &self.program.entries[self.firing.expect("only postings spread")];
+        let carried = entry.schedule.carried_periods(unit, self.date);
         let own = unit.period_start(self.date);
-        let first = unit.period_number(own) - i64::from(carried);
         for param in self.params_read(expr) {
             let crate::compile::ParamBody::Arms(arms) = &self.program.params[param].body else {
                 continue;
             };
             let arm = |t: NaiveDate| arms.iter().position(|arm| arm.when.contains(t));
             let today = arm(self.date);
-            let changes = std::iter::successors(own.pred_opt(), |d| d.pred_opt())
-                .take_while(|d| unit.period_number(*d) >= first)
+            let changes = carried
+                .iter()
+                .flat_map(|p| unit.days(*p))
                 .any(|d| arm(d) != today);
             if changes {
-                let entry = &self.program.entries[self.firing.expect("only postings spread")];
                 let unit = unit.name();
                 return Err(Diagnostic::new(
                     span,
