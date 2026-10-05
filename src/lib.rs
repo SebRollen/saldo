@@ -26,6 +26,7 @@ pub struct RunOpts {
 
 #[derive(Debug)]
 pub struct Output {
+    /// Every account, ordered by path.
     pub accounts: Vec<Path>,
     pub log: SimLog,
     /// Problems that don't stop the simulation but may make results wrong.
@@ -52,13 +53,14 @@ impl Output {
         emit_ledger(out, &self.accounts, &self.log)
     }
 
-    /// Writes the daily balance of every account as CSV.
+    /// Writes the daily balance of every account as CSV, read as each kind
+    /// reads: liabilities and income positive.
     pub fn write_csv(&self, out: &mut impl io::Write) -> io::Result<()> {
         emit_csv(out, &self.accounts, &self.log)
     }
 }
 
-/// Simulates a model given as text. It can't import other files; use
+/// Simulates a model given as text. It can't have modules in other files; use
 /// [`run_file`] for that.
 pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
     check_range(opts)?;
@@ -66,9 +68,9 @@ pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
     simulate(&program, opts)
 }
 
-/// Simulates the model in the file at `path`, reading the files it imports
-/// relative to the file that imports them. `sources` collects the text of every
-/// file read, for [`Sources::format_errors`] and [`Sources::format_warnings`].
+/// Simulates the model in the file at `path`, reading the files of its
+/// modules. `sources` collects the text of every file read, for
+/// [`Sources::format_errors`] and [`Sources::format_warnings`].
 pub fn run_file(
     path: impl AsRef<std::path::Path>,
     opts: &RunOpts,
@@ -104,8 +106,9 @@ fn simulate(program: &ast::Program, opts: &RunOpts) -> Result<Output, Vec<Error>
         .simulate(first_day, opts.from, opts.to)
         .map_err(|d| vec![Error::Diagnostic(d)])?;
 
-    let accounts = model.stocks.keys().cloned().collect();
-    let mut warnings = model.missed_aggregate_warnings(first_day);
+    let accounts = model.accounts.keys().cloned().collect();
+    let mut warnings = model.warnings.clone();
+    warnings.extend(model.missed_aggregate_warnings(first_day));
     warnings.extend(program.missed_fill_warnings(first_day));
     warnings.sort_by_key(|d| d.span.start);
 
@@ -141,7 +144,7 @@ fn emit_ledger(out: &mut impl io::Write, accounts: &[Path], log: &eval::SimLog) 
         let init = log.opening.get(path).copied().unwrap_or(Decimal::ZERO);
         equity -= init;
         if init != Decimal::ZERO {
-            opening.push((path.to_string(), init));
+            opening.push((path.ledger_name(), init));
         }
     }
     opening.push(("Equity:OpeningBalances".to_string(), equity));
@@ -151,7 +154,7 @@ fn emit_ledger(out: &mut impl io::Write, accounts: &[Path], log: &eval::SimLog) 
         let postings: Vec<(String, Decimal)> = tx
             .postings
             .iter()
-            .map(|(account, amt)| (account.to_string(), *amt))
+            .map(|(account, amt)| (account.ledger_name(), *amt))
             .collect();
         write_transaction(out, &format!("{} {}", tx.date, tx.label), &postings)?;
     }
@@ -182,14 +185,23 @@ fn write_transaction(
 
 fn emit_csv(out: &mut impl io::Write, accounts: &[Path], log: &eval::SimLog) -> io::Result<()> {
     write!(out, "\"date\"")?;
-    for name in accounts {
-        write!(out, ",\"{name}\"")?;
+    for path in accounts {
+        write!(out, ",\"{}\"", path.ledger_name())?;
     }
     writeln!(out)?;
 
+    let signs: Vec<Decimal> = accounts
+        .iter()
+        .map(|p| {
+            p.account_kind()
+                .map_or(Decimal::ONE, ast::AccountKind::sign)
+        })
+        .collect();
     for snap in &log.snapshots {
         write!(out, "{}", snap.date)?;
-        for v in &snap.balances {
+        for (v, sign) in snap.balances.iter().zip(&signs) {
+            // Avoid printing -0.00.
+            let v = if v.is_zero() { Decimal::ZERO } else { v * sign };
             write!(out, ",{v:.2}")?;
         }
         writeln!(out)?;
@@ -202,22 +214,20 @@ mod doc_tests {
     const DOCS: &[(&str, &str)] = &[
         ("README.md", include_str!("../README.md")),
         ("accounts.md", include_str!("../book/src/accounts.md")),
-        ("asserts.md", include_str!("../book/src/asserts.md")),
+        ("checks.md", include_str!("../book/src/checks.md")),
         ("entries.md", include_str!("../book/src/entries.md")),
         ("fns.md", include_str!("../book/src/fns.md")),
-        ("imports.md", include_str!("../book/src/imports.md")),
         ("intro.md", include_str!("../book/src/intro.md")),
-        ("params.md", include_str!("../book/src/params.md")),
+        ("modules.md", include_str!("../book/src/modules.md")),
         ("schedules.md", include_str!("../book/src/schedules.md")),
         ("simulation.md", include_str!("../book/src/simulation.md")),
+        ("values.md", include_str!("../book/src/values.md")),
     ];
 
-    const KEYWORDS: &[&str] = &[
-        "account", "assert", "entry", "fn", "import", "param", "schedule",
-    ];
+    const KEYWORDS: &[&str] = &["balances", "check", "entry", "fn", "let", "mod"];
 
     /// Fenced code blocks that look like saldo declarations, skipping syntax
-    /// templates such as `account <path>`.
+    /// templates such as `let <name> = <expression>`.
     fn declaration_blocks(doc: &str) -> Vec<&str> {
         doc.split("```")
             .skip(1)

@@ -1,160 +1,147 @@
 # Accounts
 
-An account is a named balance that the simulator tracks over time. Every
-account that appears in an entry or assertion must be declared.
+An account is a named balance that the simulator tracks over time.
 
-## Syntax
+## Names
 
-```
-account <path> [= <expression> @ <date>]
-```
-
-The path is one or more identifiers joined by colons:
+An account's name is a path of words joined by dots, starting with its kind:
 
 ```
-account Assets:Cash
-account Assets:Retirement:Jim
-account Liabilities:Loan
-account Income:Gross:Salary:Jim
-account Expenses:Rent
-```
-
-## Opening balance
-
-Without `= … @ …`, an account starts at zero and is available for the entire
-simulation. Supply an initial value and a date to give the account a known
-opening balance on a specific day:
-
-```
-account Assets:Cash             = 12_500    @ 2025-01-01
-account Liabilities:Loan        = -450_000  @ 2025-01-01
-account Assets:Retirement:Seb   = 87_340.22 @ 2024-07-01
-```
-
-The `= value` and `@ date` must always appear together — one without the other
-is a parse error.
-
-The expression is evaluated on the opening date. It can reference params and
-accounts that are already open, but not accounts that open later or leg
-aggregations.
-
-### Referencing accounts before their opening date
-
-Referencing an account (in an entry posting or an expression) before its
-`@ date` is a runtime error:
-
-```
-account Assets:Cash = 1000 @ 2025-06-01
-
-// This entry fires in January — before Assets:Cash opens — and will error:
-entry monthly "Paycheck" {
-  Assets:Cash = 500
-  Income:Salary
+entry paycheck @ last {
+  income.salary -> assets.cash : 8_000
+  assets.cash   -> assets.retirement.alex : 1_000
 }
 ```
 
-To avoid the error, ensure entry schedules start no earlier than the latest
-opening date of any account they reference, or set the opening date early
-enough to cover the simulation range.
+| Kind | Holds |
+|------|-------|
+| `assets` | Things you own: cash, retirement accounts, savings |
+| `liabilities` | Things you owe: loans, accrued interest, taxes payable |
+| `income` | Where money comes from |
+| `expenses` | Where money goes |
+| `equity` | What's left over |
+
+Accounts don't need declaring. An account exists because an entry moves money
+into or out of it, or because it has an opening balance. Reading an account
+that nothing moves money into or out of is an error, which catches typos:
+
+```
+check assets.csh >= 0   // error: no entry or balance moves money into or out of `assets.csh`
+```
+
+Two accounts next to each other whose names differ by a letter, like
+`assets.retirement` and `assets.retirment`, get a warning.
+
+In ledger output, each word is capitalized and `_` starts a new word, so
+`liabilities.taxes_payable` is `Liabilities:TaxesPayable`.
+
+## Groups
+
+A path with accounts under it is a group. Reading a group gives the sum of
+the accounts in it:
+
+```
+let monthly_return = 0.5%
+
+entry returns @ last {
+  income.investments -> assets.retirement.alex : assets.retirement.alex * monthly_return
+  income.investments -> assets.retirement.sam  : assets.retirement.sam * monthly_return
+}
+
+check assets.retirement >= 0
+```
+
+`assets.retirement` is the sum of `assets.retirement.alex` and
+`assets.retirement.sam`, and `assets` is every asset. An account either holds
+money or is a group: moving money into `assets.cash` and into
+`assets.cash.checking` is an error.
+
+## Kinds
+
+Every account reads positive the way you'd talk about it: what you own, what
+you owe, what you've earned, what you've spent.
+
+```
+balances @ 2026-01-01 {
+  assets.cash      = 1_000
+  liabilities.loan = 3_000   // you owe 3,000
+}
+
+entry pay @ 2026-01-15 { assets.cash -> liabilities.loan : 500 }
+
+check liabilities.loan == 2_500 @ 2026-01-31
+check assets - liabilities == -2_000 @ 2026-01-31
+```
+
+Ledger output keeps ledger's signs, which hledger and the like expect:
+liabilities, income and equity are negative there.
+
+## Opening balances
+
+Without an opening balance, an account starts at zero and is available for the
+entire simulation. `balances` gives accounts their balances on a date:
+
+```
+balances @ 2025-01-01 {
+  assets.cash      = 12_500
+  liabilities.loan = 450_000
+}
+
+balances @ 2024-07-01 {
+  assets.retirement.alex = 87_340.22
+}
+```
+
+The balances are amounts as the kind reads them, so a loan's is what's owed.
+Each can be an expression, evaluated on its date: it can use values, and
+accounts that are already open, but not accounts that open later.
+An account opens once, so it can only be in one `balances` block.
+
+### Referencing accounts before they open
+
+Reading or moving money into an account before its opening date is an error:
+
+```
+balances @ 2025-06-01 { assets.cash = 1_000 }
+
+// This entry fires in January, before `assets.cash` opens, and will error:
+entry paycheck @ last {
+  income.salary -> assets.cash : 500
+}
+```
+
+To avoid the error, make sure entries start no earlier than the accounts they
+use, or set the opening date early enough to cover the simulation. A group
+counts accounts that haven't opened yet as zero.
 
 ### Simulation start after opening date
 
-If your simulation start is later than an account's opening date, saldo
-automatically warms up the simulation from the opening date. All entries that
-fire during the warm-up period are processed normally — only their output
-(ledger transactions, CSV rows) is suppressed. The opening-balances entry in
-ledger output reflects the actual balance at your simulation start, after the
+If your simulation starts after an account's opening date, saldo warms up the
+simulation from the opening date. Entries that fire during the warm-up are
+processed normally; only their output is left out. The opening-balances entry
+in ledger output shows the balances at the start of your simulation, after the
 warm-up.
 
 ```
-account Assets:Cash = 1000 @ 2024-01-01
+balances @ 2024-01-01 { assets.cash = 1_000 }
 
-entry monthly "Paycheck" {
-  Assets:Cash = 500
-  Income:Salary
+entry paycheck @ last {
+  income.salary -> assets.cash : 500
 }
 
-// Running from 2025-01-01: Assets:Cash opens at 1000 on 2024-01-01, then
-// 12 monthly paycheck entries fire during warm-up, so the opening balance
-// shown in the ledger output is 7000 (1000 + 12 × 500).
+// Running from 2025-01-01: `assets.cash` opens at 1,000 on 2024-01-01, then
+// 12 monthly paychecks fire during warm-up, so the opening balance shown is
+// 7,000.
 ```
 
-## Naming conventions
+## Totals
 
-saldo does not enforce any particular hierarchy, but the double-entry
-conventions used throughout these docs are:
-
-| Root | Holds |
-|------|-------|
-| `Assets:…` | Things you own (cash, retirement, savings) |
-| `Liabilities:…` | Things you owe (loans, accrued interest) |
-| `Income:…` | Sources of income — carried as negative by convention |
-| `Expenses:…` | Spending categories |
-
-Income accounts are negative because every paycheck entry credits income
-(negative posting) and debits assets (positive posting), keeping the net
-of all postings at zero.
-
-## Using accounts in expressions
-
-Reference an account by its full path in any expression:
+`[year]`, `[quarter]` and `[month]` after an account give what has moved into
+it so far this period, read as its kind reads:
 
 ```
-// Current balance of a liability account
-Liabilities:Loan * interest_rate / 365
-
-// Assert cash never goes below a threshold
-assert that Assets:Cash >= 10_000
-
-// Compute daily interest on the outstanding balance
-entry daily "Interest accrual" {
-  Liabilities:AccruedInterest = Liabilities:Loan * interest_rate / 365
-  Expenses:Interest
-}
+check income.salary[year] <= 200_000
 ```
 
-An account reference in an entry reads the current balance. Entries that fire
-on the same day run in declaration order, so a later entry sees the postings of
-earlier ones. Within a single entry, every posting is evaluated against the
-balances from before that entry fired, so one posting never sees another
-posting from the same entry.
-
-Params are evaluated again after each entry fires, so a param that reads an
-account sees the same balance as an account reference in the entry reading
-the param.
-
-## Declaration order
-
-Accounts appear in the CSV output columns in the order they are declared.
-Declare them in the order you want to read them.
-
-## Complete example
-
-```
-account Assets:Cash             = 12_500   @ 2025-01-01
-account Assets:Retirement:Jim   = 45_000   @ 2025-01-01
-account Liabilities:Loan        = -320_000 @ 2025-01-01
-account Income:Gross:Salary:Jim
-account Expenses:Rent
-account Expenses:Interest
-
-param jim_salary     = 130_000 per year
-param interest_rate  = 6.5% per year
-
-entry monthly "Jim's paycheck" {
-  Assets:Cash           = jim_salary
-  Income:Gross:Salary:Jim
-}
-
-entry monthly "Rent" {
-  Expenses:Rent = 3_915
-  Assets:Cash
-}
-
-entry daily "Loan interest" {
-  Liabilities:Loan = Liabilities:Loan * interest_rate
-  Expenses:Interest
-}
-
-assert that Assets:Cash >= 0
-```
+They count every entry that fired today before the one reading them. See
+[Entries](./entries.md#tags-and-totals) for totals of particular moves.

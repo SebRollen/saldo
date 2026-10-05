@@ -2,9 +2,10 @@
 //! mistakes are reported before the simulation runs rather than on the day an
 //! expression is first evaluated.
 
-use crate::ast::{BinOp, Decl, Expr, ParamBody, PostingAmount, Program, SpannedExpr, Stmt};
+use crate::ast::{BinOp, EntryStmt, Expr, SpannedExpr, Stmt};
 use crate::errors::Diagnostic;
-use crate::resolver::FnDef;
+use crate::resolver::{FnDef, Model, ParamBody};
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -23,60 +24,63 @@ impl fmt::Display for Ty {
     }
 }
 
-/// Type-checks every expression in `program`. Expects names and call arities
-/// to have been validated already.
-pub fn check(program: &Program, fns: &HashMap<String, FnDef>) -> Vec<Diagnostic> {
+/// Type-checks every expression in `model`, whose names all resolve.
+pub fn check(model: &Model) -> Vec<Diagnostic> {
     let mut checker = Checker {
-        fns,
+        fns: &model.fns,
         returns: HashMap::new(),
+        locals: HashMap::new(),
         diags: Vec::new(),
     };
-
-    let mut fn_names: Vec<&str> = fns.keys().map(String::as_str).collect();
-    fn_names.sort();
-    for name in fn_names {
+    for name in model.fns.keys() {
         checker.fn_return(name);
     }
-
-    for (decl, _) in &program.decls {
-        match decl {
-            Decl::Account {
-                opening: Some((e, _)),
-                ..
-            } => checker.expect(e, Ty::Num, "an opening balance"),
-            Decl::Param { body, .. } => match body {
-                ParamBody::Const(e) => checker.expect(e, Ty::Num, "a param"),
-                ParamBody::Arms(arms) => {
-                    for arm in arms {
-                        checker.expect(&arm.value, Ty::Num, "a param");
-                        if let Some(growth) = &arm.growth {
-                            checker.expect(&growth.by, Ty::Num, "a growth rate");
-                        }
-                    }
-                }
-            },
-            Decl::Entry { postings, .. } => {
-                for posting in postings {
-                    if let Some(PostingAmount::Expr(e)) = &posting.amount {
-                        checker.expect(e, Ty::Num, "a posting amount");
+    for account in model.accounts.values() {
+        if let Some((e, _)) = &account.opening {
+            checker.expect(e, Ty::Num, "an opening balance");
+        }
+    }
+    for body in model.params.values() {
+        match body {
+            ParamBody::Const(e) => checker.expect(e, Ty::Num, "a value"),
+            ParamBody::Arms(arms) => {
+                for arm in arms {
+                    checker.expect(&arm.value, Ty::Num, "a value");
+                    if let Some(growth) = &arm.growth {
+                        checker.expect(&growth.by, Ty::Num, "a growth rate");
                     }
                 }
             }
-            Decl::Assert { asserted, .. } => checker.expect(asserted, Ty::Bool, "an assertion"),
-            Decl::Account { .. }
-            | Decl::Schedule { .. }
-            | Decl::Fn { .. }
-            | Decl::Import { .. } => {}
         }
     }
+    for entry in &model.entries {
+        checker.locals.clear();
+        for stmt in &entry.body {
+            match stmt {
+                EntryStmt::Let { name, value } => {
+                    if let Some(ty) = checker.type_of(value) {
+                        checker.locals.insert(name.0.clone(), ty);
+                    }
+                }
+                EntryStmt::Move(m) => checker.expect(&m.amount, Ty::Num, "an amount"),
+            }
+        }
+    }
+    checker.locals.clear();
+    for (_, e) in &model.checks {
+        checker.expect(e, Ty::Bool, "a check");
+    }
+    checker.diags.sort_by_key(|d| d.span.start);
     checker.diags
 }
 
 struct Checker<'a> {
-    fns: &'a HashMap<String, FnDef>,
+    fns: &'a IndexMap<String, FnDef>,
     /// Return types of user functions; `None` if the body has a type error
     /// (already reported) or is still being checked.
     returns: HashMap<&'a str, Option<Ty>>,
+    /// Types of the `let`s in scope.
+    locals: HashMap<String, Ty>,
     diags: Vec<Diagnostic>,
 }
 
@@ -100,13 +104,22 @@ impl<'a> Checker<'a> {
         }
         // Guards against recursion, which the resolver reports separately.
         self.returns.insert(name, None);
+        let outer = std::mem::take(&mut self.locals);
+        for param in &def.params {
+            self.locals.insert(param.clone(), Ty::Num);
+        }
         let mut ty = None;
         for stmt in &def.body {
             match stmt {
-                Stmt::Let { value, .. } => self.expect(value, Ty::Num, "a `let` binding"),
+                Stmt::Let { name, value } => {
+                    if let Some(found) = self.type_of(value) {
+                        self.locals.insert(name.clone(), found);
+                    }
+                }
                 Stmt::Return(e) => ty = self.type_of(e),
             }
         }
+        self.locals = outer;
         self.returns.insert(name, ty);
         ty
     }
@@ -114,14 +127,19 @@ impl<'a> Checker<'a> {
     /// The type of `e`, or `None` if it contains an error (already reported).
     fn type_of(&mut self, (expr, span): &SpannedExpr) -> Option<Ty> {
         match expr.as_ref() {
-            Expr::Num(_) | Expr::Ref(_) | Expr::ParamAgg(..) => Some(Ty::Num),
+            Expr::Num(_)
+            | Expr::Global(_)
+            | Expr::Balance(_)
+            | Expr::TagTotal { .. }
+            | Expr::AccountTotal(..) => Some(Ty::Num),
+            Expr::Local(name) => self.locals.get(name).copied(),
             Expr::Bool(_) => Some(Ty::Bool),
             Expr::Neg(x) => {
                 self.expect(x, Ty::Num, "the operand of `-`");
                 Some(Ty::Num)
             }
             Expr::Per(x, unit) => {
-                self.expect(x, Ty::Num, &format!("the operand of `per {unit}`"));
+                self.expect(x, Ty::Num, &format!("the operand of `/{unit}`"));
                 Some(Ty::Num)
             }
             Expr::Not(x) => {
@@ -151,6 +169,7 @@ impl<'a> Checker<'a> {
                     }
                     Some(Ty::Bool)
                 }
+                BinOp::Union | BinOp::Inter => unreachable!("the resolver rejects sets of days"),
             },
             Expr::If { cond, then, else_ } => {
                 self.expect(cond, Ty::Bool, "an `if` condition");
@@ -164,15 +183,19 @@ impl<'a> Checker<'a> {
                 }
                 Some(x)
             }
-            Expr::Call(name, args) => {
+            Expr::Call(callee, args) => {
                 for arg in args {
-                    self.expect(arg, Ty::Num, &format!("an argument to `{name}`"));
+                    self.expect(arg, Ty::Num, &format!("an argument to `{callee}`"));
                 }
-                if self.fns.contains_key(name) {
-                    self.fn_return(name)
+                let name = callee.join();
+                if self.fns.contains_key(&name) {
+                    self.fn_return(&name)
                 } else {
                     Some(Ty::Num) // builtins all return numbers
                 }
+            }
+            Expr::Ref(_) | Expr::Period(..) | Expr::Days(_) | Expr::Range { .. } => {
+                unreachable!("the resolver replaces these")
             }
         }
     }

@@ -1,18 +1,19 @@
 //! Checks how rates and amounts combine, and turns rates into amounts where
 //! entries post them.
 //!
-//! `per year` and the like make a value a rate. A posting moves an amount,
-//! not a rate, so wherever a posting uses a rate as an amount, this pass wraps
-//! it in [`ExprKind::Spread`] to give each firing its share (see [`Schedule::share`](crate::ast::Schedule::share)). Anywhere else,
-//! mixing a rate with an amount is an error, except with a total over the same
-//! period: a per-year limit minus a `.ytd` total is what's left of the limit.
+//! `/year` and the like make a value a rate. A move moves an amount, not a
+//! rate, so wherever a move uses a rate as an amount, this pass wraps it in
+//! [`ExprKind::Spread`] to give each firing its share (see
+//! [`Schedule::share`](crate::ast::Schedule::share)). Anywhere else, mixing a
+//! rate with an amount is an error, except with a total over the same period:
+//! a per-year limit minus a `[year]` total is what's left of the limit.
 //!
 //! It also turns `fill(x)` calls into [`ExprKind::Fill`], giving each its own
 //! slot in [`Program::fills`].
 
 use crate::ast::{BinOp, GrowthKind, Span, TimeUnit};
 use crate::compile::{
-    Amount, Builtin, Expr, ExprKind, Fill, Function, Growth, Param, ParamBody, Program, Stmt,
+    Builtin, EntryStmt, Expr, ExprKind, Fill, Function, Growth, Param, ParamBody, Program, Stmt,
 };
 use crate::errors::Diagnostic;
 use std::collections::HashMap;
@@ -24,9 +25,10 @@ enum Kind {
     /// A plain number, like a literal, which takes on the kind of whatever
     /// it's combined with.
     Number,
-    /// An amount, like a balance or a posting.
+    /// An amount, like a balance or what a move moves.
     Amount,
-    /// A `.ytd`, `.qtd` or `.mtd` total: the amount so far this period.
+    /// A `[year]`, `[quarter]` or `[month]` total: the amount so far this
+    /// period.
     Total(TimeUnit),
     /// An amount per period, like a salary `per year`.
     Rate(TimeUnit),
@@ -71,12 +73,12 @@ impl fmt::Display for Combiner {
 /// Where an expression appears.
 #[derive(Clone, Copy)]
 struct Cx<'a> {
-    /// In a posting, where rates are spread over the entry's firings.
+    /// In an entry, where rates are spread over the entry's firings.
     posting: bool,
-    /// The amount a posting posts: the whole expression, or what `min`, `max`
+    /// The amount a move moves: the whole expression, or what `min`, `max`
     /// and `if` pick from it. Only these can `fill`.
     posted: bool,
-    /// Kinds of the current function's parameters and `let` bindings.
+    /// Kinds of the current function's or entry's parameters and `let`s.
     locals: &'a [Option<Kind>],
 }
 
@@ -86,7 +88,7 @@ const GLOBAL: Cx = Cx {
     locals: &[],
 };
 
-/// Checks every expression in `program`, spreading the rates that postings use.
+/// Checks every expression in `program`, spreading the rates that moves use.
 pub fn check(program: &mut Program) -> Vec<Diagnostic> {
     let mut checker = Checker {
         fns: &mut program.fns,
@@ -111,24 +113,39 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
             ));
         }
     }
-    let in_posting = Cx {
-        posting: true,
-        posted: true,
-        locals: &[],
-    };
     for (index, entry) in program.entries.iter_mut().enumerate() {
-        for posting in &mut entry.postings {
-            checker.posting = Some((index, posting.leg));
-            if let Amount::Expr(e) = &mut posting.amount
-                && let Some(kind) = checker.kind(e, in_posting)
-            {
-                spread(e, kind);
+        let mut locals: Vec<Option<Kind>> = vec![None; entry.slots];
+        for stmt in &mut entry.body {
+            match stmt {
+                // A `let` can mix rates with amounts, as a move can, but what
+                // it holds is only moved, and so spread, where a move uses it.
+                EntryStmt::Let { slot, value, .. } => {
+                    checker.posting = Some((index, None));
+                    let cx = Cx {
+                        posting: true,
+                        posted: false,
+                        locals: &locals,
+                    };
+                    let kind = checker.kind(value, cx);
+                    locals[*slot] = kind;
+                }
+                EntryStmt::Move(m) => {
+                    checker.posting = Some((index, m.tag));
+                    let cx = Cx {
+                        posting: true,
+                        posted: true,
+                        locals: &locals,
+                    };
+                    if let Some(kind) = checker.kind(&mut m.amount, cx) {
+                        spread(&mut m.amount, kind);
+                    }
+                    m.fills = std::mem::take(&mut checker.posting_fills);
+                }
             }
-            posting.fills = std::mem::take(&mut checker.posting_fills);
         }
     }
     checker.posting = None;
-    for (_, e) in &mut program.asserts {
+    for (_, e) in &mut program.checks {
         checker.kind(e, GLOBAL);
     }
     let Checker {
@@ -148,10 +165,10 @@ struct Checker<'p> {
     instances: HashMap<(usize, Vec<Kind>), Option<Kind>>,
     /// The calls whose function bodies are being checked, innermost last.
     calls: Vec<(usize, Span)>,
-    /// The entry whose posting is being checked, and the posting's leg.
+    /// The entry whose move is being checked, and the move's tag.
     posting: Option<(usize, Option<usize>)>,
     fills: Vec<Fill>,
-    /// The `fill`s found so far in the posting being checked.
+    /// The `fill`s found so far in the move being checked.
     posting_fills: Vec<usize>,
     diags: Vec<Diagnostic>,
 }
@@ -196,7 +213,7 @@ impl Checker<'_> {
                                 Diagnostic::new(
                                     span,
                                     format!(
-                                        "param `{name}` is {first} in one arm \
+                                        "`{name}` is {first} in one arm \
                                          but {found} in another"
                                     ),
                                 )
@@ -249,10 +266,12 @@ impl Checker<'_> {
         };
         match &mut e.kind {
             ExprKind::Num(_) | ExprKind::Bool(_) => Some(Kind::Number),
-            ExprKind::Account(_) | ExprKind::Leg(_) | ExprKind::Spread(..) => Some(Kind::Amount),
+            ExprKind::Balance { .. } | ExprKind::Spread(..) => Some(Kind::Amount),
             ExprKind::Param(param) => self.params.get(*param).copied().flatten(),
             ExprKind::Local(slot) => cx.locals[*slot],
-            ExprKind::Total(_, agg) => Some(Kind::Total(agg.unit())),
+            ExprKind::Total(_, agg) | ExprKind::AccountTotal { agg, .. } => {
+                Some(Kind::Total(agg.unit()))
+            }
             ExprKind::Neg(x) => self.kind(x, below),
             ExprKind::Per(x, unit) => {
                 let found = self.kind(x, below)?;
@@ -267,6 +286,9 @@ impl Checker<'_> {
                 let (ka, kb) = (ka?, kb?);
                 match op {
                     BinOp::And | BinOp::Or => Some(Kind::Number),
+                    BinOp::Union | BinOp::Inter => {
+                        unreachable!("the resolver rejects sets of days")
+                    }
                     BinOp::Mul => self.multiply(ka, kb, span),
                     BinOp::Div => self.divide(ka, b, kb, span),
                     BinOp::Add | BinOp::Sub => {
@@ -312,7 +334,7 @@ impl Checker<'_> {
         }
     }
 
-    /// The kind of `x per unit`, where `x` is of kind `found`, converting `x`
+    /// The kind of `x / unit`, where `x` is of kind `found`, converting `x`
     /// if it's a rate per another unit.
     fn per(&mut self, x: &mut Expr, found: Kind, unit: TimeUnit, span: Span) -> Option<Kind> {
         let message = match found {
@@ -337,7 +359,7 @@ impl Checker<'_> {
                 }
             },
             Kind::Total(_) => format!(
-                "`per {unit}` can't apply to {found}, which is an amount so far, \
+                "`/{unit}` can't apply to {found}, which is an amount so far, \
                  not per period"
             ),
         };
@@ -362,7 +384,7 @@ impl Checker<'_> {
         let (true, Some((entry, leg))) = (cx.posted, self.posting) else {
             self.error(Diagnostic::new(
                 span,
-                "`fill` can only be the amount a posting posts, \
+                "`fill` can only be the amount a move moves, \
                  or what `min`, `max` or `if` pick for it",
             ));
             return None;
@@ -371,8 +393,8 @@ impl Checker<'_> {
             self.error(Diagnostic::new(
                 args[0].span,
                 format!(
-                    "`fill` needs an amount per period, like `24_500 per year`, \
-                     or a total like `x.ytd`, but this is {found}"
+                    "`fill` needs an amount per period, like `24_500/year`, \
+                     or a total like `x[year]`, but this is {found}"
                 ),
             ));
             return None;
@@ -382,7 +404,7 @@ impl Checker<'_> {
         {
             self.error(Diagnostic::new(
                 args[0].span,
-                "`fill` already subtracts what this posting has posted, \
+                "`fill` already subtracts what this move has moved, \
                  so this subtracts it twice",
             ));
             return None;
@@ -414,26 +436,26 @@ impl Checker<'_> {
         match (ka, kb) {
             (Number, k) | (k, Number) => Some(k),
             _ if ka == kb => Some(ka),
-            // In a posting, `min`, `max` and `if` pick the amount to post, so
+            // In an entry, `min`, `max` and `if` pick the amount to move, so
             // a rate among the choices is the firing's share of it.
             (Rate(_), _) | (_, Rate(_)) if cx.posting && what.picks() => {
                 let (ka, kb) = spread_both(a, b);
                 self.combine(a, ka, b, kb, what, span, cx)
             }
             // Both measure the current period, so the rate counts in full: a
-            // per-year limit minus a `.ytd` total is what's left of the limit.
+            // per-year limit minus a `[year]` total is what's left of the limit.
             (Rate(u), Total(v)) | (Total(v), Rate(u)) if u == v => Some(Total(u)),
-            // In a posting, a rate is the firing's share of it.
+            // In an entry, a rate is the firing's share of it.
             (Rate(_), _) | (_, Rate(_)) if cx.posting => {
                 let (ka, kb) = spread_both(a, b);
                 self.combine(a, ka, b, kb, what, span, cx)
             }
             (Amount | Total(_), Amount | Total(_)) => Some(Amount),
             _ => {
-                // Function bodies don't spread rates, even in postings.
+                // Function bodies don't spread rates, even in entries.
                 let describe = |kind| match kind {
                     Rate(_) if self.calls.is_empty() => {
-                        format!("{kind}, which only a posting can turn into an amount")
+                        format!("{kind}, which only an entry can turn into an amount")
                     }
                     _ => kind.to_string(),
                 };
@@ -477,8 +499,8 @@ impl Checker<'_> {
                     diag = diag.with_note(
                         b.span,
                         format!(
-                            "`per` binds tighter than `/`; to divide first, \
-                             write `(… / …) per {unit}`"
+                            "`/{unit}` applies to what's on its left; to divide first, \
+                             write `(… / …)/{unit}`"
                         ),
                     );
                 }
@@ -524,16 +546,16 @@ impl Checker<'_> {
     }
 }
 
-/// Whether `e` reads a `.ytd`, `.qtd` or `.mtd` total of `leg`.
-fn reads_total(e: &Expr, leg: usize) -> bool {
-    let reads = |e: &Expr| reads_total(e, leg);
+/// Whether `e` reads a total of `tag`.
+fn reads_total(e: &Expr, tag: usize) -> bool {
+    let reads = |e: &Expr| reads_total(e, tag);
     match &e.kind {
-        ExprKind::Total(total, _) => *total == leg,
+        ExprKind::Total(total, _) => *total == tag,
         ExprKind::Num(_)
         | ExprKind::Bool(_)
-        | ExprKind::Account(_)
+        | ExprKind::Balance { .. }
+        | ExprKind::AccountTotal { .. }
         | ExprKind::Param(_)
-        | ExprKind::Leg(_)
         | ExprKind::Local(_) => false,
         ExprKind::Neg(x)
         | ExprKind::Not(x)

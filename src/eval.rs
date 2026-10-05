@@ -1,10 +1,8 @@
 use crate::ast::schedule::Share;
-use crate::ast::{
-    AggKind, BinOp, Expr, GrowthKind, ParamBody, Path, PostingAmount, Span, SpannedExpr, TimeUnit,
-};
-use crate::compile::{Amount, Builtin, ExprKind, Function, Growth, Program, Stmt};
+use crate::ast::{AggKind, BinOp, EntryStmt, Expr, GrowthKind, Path, Span, SpannedExpr, TimeUnit};
+use crate::compile::{Builtin, ExprKind, Function, Growth, Program, Stmt};
 use crate::errors::Diagnostic;
-use crate::resolver::{Model, walk_expr};
+use crate::resolver::{Model, ParamBody, walk_expr};
 use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
@@ -44,8 +42,8 @@ pub struct Transaction {
 #[derive(Debug)]
 pub struct DaySnapshot {
     pub date: NaiveDate,
-    /// End-of-day balance of every account, in declaration order (the order of
-    /// `Output::accounts`).
+    /// End-of-day ledger balance of every account, in the order of
+    /// `Output::accounts`.
     pub balances: Vec<Decimal>,
 }
 
@@ -54,82 +52,95 @@ impl Model {
     /// opening date if that's before `start`, so the warm-up period accumulates
     /// the right balances before reporting starts.
     pub fn first_day(&self, start: NaiveDate) -> NaiveDate {
-        self.stocks
+        self.accounts
             .values()
             .filter_map(|a| a.opening.as_ref().map(|(_, d)| *d))
             .min()
             .map_or(start, |earliest| earliest.min(start))
     }
 
-    /// Warns about `.ytd`/`.qtd`/`.mtd` totals that are missing amounts because
-    /// the simulation starts partway through their period, after their entry
-    /// would already have fired.
+    /// Warns about totals that are missing amounts because the simulation
+    /// starts partway through their period, after an entry they count would
+    /// already have fired.
     pub fn missed_aggregate_warnings(&self, first_day: NaiveDate) -> Vec<Diagnostic> {
         struct Aggregate {
-            entry_key: String,
-            leg: String,
+            /// What it counts: a tag's entry, or an account or group.
+            counts: Counted,
             kind: AggKind,
-            /// How it's written, e.g. `paycheck.k401.ytd`.
+            /// How it's written, e.g. `paycheck.k401[year]`.
             display: String,
             span: Span,
         }
+        #[derive(PartialEq, Eq, Hash, Clone)]
+        enum Counted {
+            Tag(String, String),
+            Account(Path),
+        }
         let mut aggregates: Vec<Aggregate> = Vec::new();
-        let mut collect = |e: &SpannedExpr, entry_key: Option<&str>| {
-            walk_expr(e, &mut |sub| {
-                if let Expr::ParamAgg(qualifier, leg, kind) = sub.0.as_ref()
-                    && let Some(key) = qualifier.as_deref().or(entry_key)
-                {
-                    let display = match qualifier {
-                        Some(q) => format!("{q}.{leg}.{kind}"),
-                        None => format!("{leg}.{kind}"),
-                    };
-                    aggregates.push(Aggregate {
-                        entry_key: key.to_string(),
-                        leg: leg.clone(),
-                        kind: *kind,
-                        display,
-                        span: sub.1,
-                    });
-                }
+        let mut collect = |e: &SpannedExpr| {
+            walk_expr(e, &mut |sub| match sub.0.as_ref() {
+                Expr::TagTotal { entry, tag, agg } => aggregates.push(Aggregate {
+                    counts: Counted::Tag(entry.clone(), tag.clone()),
+                    kind: *agg,
+                    display: format!("{entry}.{tag}{agg}"),
+                    span: sub.1,
+                }),
+                Expr::AccountTotal(path, agg) => aggregates.push(Aggregate {
+                    counts: Counted::Account(path.clone()),
+                    kind: *agg,
+                    display: format!("{path}{agg}"),
+                    span: sub.1,
+                }),
+                _ => {}
             });
         };
         for body in self.params.values() {
             match body {
-                ParamBody::Const(e) => collect(e, None),
+                ParamBody::Const(e) => collect(e),
                 ParamBody::Arms(arms) => {
                     for arm in arms {
-                        collect(&arm.value, None);
+                        collect(&arm.value);
                     }
                 }
             }
         }
         for entry in &self.entries {
-            for posting in &entry.postings {
-                if let Some(PostingAmount::Expr(e)) = &posting.amount {
-                    collect(e, Some(&entry.key));
+            for stmt in &entry.body {
+                match stmt {
+                    EntryStmt::Let { value, .. } => collect(value),
+                    EntryStmt::Move(m) => collect(&m.amount),
                 }
             }
         }
-        for (_, e) in &self.asserts {
-            collect(e, None);
+        for (_, e) in &self.checks {
+            collect(e);
         }
         aggregates.sort_by_key(|a| a.span.start);
 
         let mut warned = HashSet::new();
         let mut warnings = Vec::new();
         for agg in aggregates {
-            if !warned.insert((agg.entry_key.clone(), agg.leg.clone(), agg.kind)) {
+            if !warned.insert((agg.counts.clone(), agg.kind)) {
                 continue;
             }
-            let Some(entry) = self.entries.iter().find(|e| e.key == agg.entry_key) else {
-                continue;
-            };
+            let counted = self.entries.iter().filter(|e| match &agg.counts {
+                Counted::Tag(entry, _) => e.name == *entry,
+                Counted::Account(path) => e.body.iter().any(|stmt| {
+                    matches!(stmt, EntryStmt::Move(m)
+                        if m.from.0.starts_with(path) || m.to.0.starts_with(path))
+                }),
+            });
             let period_start = agg.kind.period_start(first_day);
-            let missed = period_start
-                .iter_days()
-                .take_while(|d| *d < first_day)
-                .find(|d| entry.schedule.matches(*d));
-            if let Some(missed) = missed {
+            let missed = counted
+                .filter_map(|entry| {
+                    let day = period_start
+                        .iter_days()
+                        .take_while(|d| *d < first_day)
+                        .find(|d| entry.schedule.matches(*d))?;
+                    Some((day, entry))
+                })
+                .min_by_key(|(day, _)| *day);
+            if let Some((missed, entry)) = missed {
                 warnings.push(
                     Diagnostic::new(
                         agg.span,
@@ -154,8 +165,8 @@ impl Model {
 }
 
 impl Program {
-    /// Warns about `fill`s that can't know what their posting posted earlier
-    /// in a period, because the simulation starts partway through it.
+    /// Warns about `fill`s that can't know what their move moved earlier in a
+    /// period, because the simulation starts partway through it.
     pub fn missed_fill_warnings(&self, first_day: NaiveDate) -> Vec<Diagnostic> {
         self.fills
             .iter()
@@ -169,7 +180,7 @@ impl Program {
                 Some(
                     Diagnostic::new(
                         fill.span,
-                        format!("`fill` is missing what was posted before {first_day}"),
+                        format!("`fill` is missing what was moved before {first_day}"),
                     )
                     .with_note(
                         fill.span,
@@ -194,7 +205,7 @@ enum ParamValue {
     Error(Diagnostic),
 }
 
-/// Index of each period in a leg's totals.
+/// Index of each period in a tag's or account's totals.
 fn period_index(kind: AggKind) -> usize {
     match kind {
         AggKind::Ytd => 0,
@@ -206,18 +217,23 @@ fn period_index(kind: AggKind) -> usize {
 struct State<'p> {
     program: &'p Program,
     date: NaiveDate,
-    /// Balance of each account; `None` until it opens.
+    /// Ledger balance of each account; `None` until it opens.
     balances: Vec<Option<Decimal>>,
     params: Vec<ParamValue>,
-    /// Each leg's amount in the current day's firing (zero if it hasn't fired).
-    legs_today: Vec<Decimal>,
-    /// Each leg's year/quarter/month-to-date totals, excluding today; see
+    /// What each tag's moves moved today (zero if its entry hasn't fired).
+    tags_today: Vec<Decimal>,
+    /// Each tag's year/quarter/month-to-date totals, excluding today; see
     /// `total` for what an expression reads.
     totals: Vec<[Decimal; 3]>,
-    /// The entry whose postings are being evaluated.
+    /// What moved into each account today, as a ledger amount.
+    accounts_today: Vec<Decimal>,
+    /// What moved into each account so far this year, quarter and month,
+    /// excluding today.
+    account_totals: Vec<[Decimal; 3]>,
+    /// The entry whose moves are being evaluated.
     firing: Option<usize>,
-    /// For each `fill`, the start of the period it last posted in and what
-    /// its posting has posted since.
+    /// For each `fill`, the start of the period it last moved in and what its
+    /// move has moved since.
     fills: Vec<(NaiveDate, Decimal)>,
     /// For each growing arm, by param and arm, how many steps it has taken
     /// and what they come to.
@@ -241,15 +257,17 @@ impl Program {
                 .map(|o| o.is_none().then_some(Decimal::ZERO))
                 .collect(),
             params: Vec::with_capacity(self.params.len()),
-            legs_today: vec![Decimal::ZERO; self.legs.len()],
-            totals: vec![[Decimal::ZERO; 3]; self.legs.len()],
+            tags_today: vec![Decimal::ZERO; self.tags.len()],
+            totals: vec![[Decimal::ZERO; 3]; self.tags.len()],
+            accounts_today: vec![Decimal::ZERO; self.accounts.len()],
+            account_totals: vec![[Decimal::ZERO; 3]; self.accounts.len()],
             firing: None,
             fills: vec![(NaiveDate::MIN, Decimal::ZERO); self.fills.len()],
             grown: HashMap::new(),
         };
         let equity: Arc<Path> = Arc::new(Path(vec![
-            "Equity".to_string(),
-            "OpeningBalances".to_string(),
+            "equity".to_string(),
+            "opening_balances".to_string(),
         ]));
 
         let mut log = SimLog {
@@ -261,7 +279,8 @@ impl Program {
         let mut t = first_day;
         while t <= end {
             state.date = t;
-            state.legs_today.fill(Decimal::ZERO);
+            state.tags_today.fill(Decimal::ZERO);
+            state.accounts_today.fill(Decimal::ZERO);
             state.reset_periods(t);
             state.evaluate_params();
 
@@ -304,7 +323,7 @@ impl Program {
                     continue;
                 }
                 let tx = state.fire(i)?;
-                // Later entries and today's assertions see what this one posted.
+                // Later entries and today's checks see what this one moved.
                 state.evaluate_params();
                 if let Some(tx) = tx
                     && report
@@ -312,7 +331,7 @@ impl Program {
                     log.transactions.push(tx);
                 }
             }
-            state.check_assertions()?;
+            state.run_checks()?;
 
             if report {
                 log.snapshots.push(DaySnapshot {
@@ -347,7 +366,7 @@ impl State<'_> {
         }
         let new_quarter = matches!(t.month(), 1 | 4 | 7 | 10);
         let new_year = t.month() == 1;
-        for totals in &mut self.totals {
+        for totals in self.totals.iter_mut().chain(&mut self.account_totals) {
             totals[period_index(AggKind::Mtd)] = Decimal::ZERO;
             if new_quarter {
                 totals[period_index(AggKind::Qtd)] = Decimal::ZERO;
@@ -358,15 +377,29 @@ impl State<'_> {
         }
     }
 
-    /// Adds today's leg amounts to their period totals.
+    /// Adds today's tag and account amounts to their period totals.
     fn advance_period(&mut self) -> Result<(), Diagnostic> {
-        for (leg, (totals, &today)) in self.totals.iter_mut().zip(&self.legs_today).enumerate() {
+        for (tag, (totals, &today)) in self.totals.iter_mut().zip(&self.tags_today).enumerate() {
             for total in totals.iter_mut() {
                 *total = total.checked_add(today).ok_or_else(|| {
-                    let leg = &self.program.legs[leg];
+                    let tag = &self.program.tags[tag];
                     Diagnostic::new(
-                        self.program.entries[leg.entry].span,
-                        format!("running total of leg `{}` overflowed", leg.name),
+                        self.program.entries[tag.entry].span,
+                        format!("running total of tag `{}` overflowed", tag.name),
+                    )
+                })?;
+            }
+        }
+        let accounts = self.account_totals.iter_mut().zip(&self.accounts_today);
+        for (account, (totals, &today)) in accounts.enumerate() {
+            for total in totals.iter_mut() {
+                *total = total.checked_add(today).ok_or_else(|| {
+                    Diagnostic::new(
+                        Span::new(0, 0),
+                        format!(
+                            "running total of `{}` overflowed",
+                            self.program.accounts[account]
+                        ),
                     )
                 })?;
             }
@@ -441,7 +474,7 @@ impl State<'_> {
                 GrowthKind::Adding => total.checked_add(by),
             }
             .ok_or_else(|| {
-                Diagnostic::new(growth.by.span, "arithmetic overflow growing a param")
+                Diagnostic::new(growth.by.span, "arithmetic overflow growing a value")
             })?;
         }
         Ok(total)
@@ -470,7 +503,7 @@ impl State<'_> {
                             return Err(Diagnostic::new(
                                 e.span,
                                 format!(
-                                    "param `{name}` has no value on {date}: none of its arms cover this date"
+                                    "`{name}` has no value on {date}: none of its arms cover this date"
                                 ),
                             ));
                         };
@@ -496,7 +529,8 @@ impl State<'_> {
             if let Some((expr, date)) = opening
                 && *date == self.date
             {
-                self.balances[account] = Some(to_amount(self.eval_num(expr, &[])?));
+                let balance = to_amount(self.eval_num(expr, &[])?) * self.program.signs[account];
+                self.balances[account] = Some(balance);
                 opened.push(account);
             }
         }
@@ -508,85 +542,66 @@ impl State<'_> {
         let program = self.program;
         let entry = &program.entries[index];
         self.firing = Some(index);
-        let mut postings: Vec<(Arc<Path>, Decimal)> = Vec::with_capacity(entry.postings.len());
-        let mut amounts: Vec<(usize, Decimal)> = Vec::with_capacity(entry.postings.len());
-        let mut auto = None;
+        let in_entry =
+            |d: Diagnostic| d.with_note(entry.span, format!("in entry `{}`", entry.label));
+        let mut frame = vec![Decimal::ZERO; entry.slots];
+        // What each account receives, in the order they're first named.
+        let mut net: IndexMap<usize, Decimal> = IndexMap::new();
 
-        // Every posting sees the balances from before the entry fired.
-        for posting in &entry.postings {
-            self.check_open(posting.account, posting.account_span)?;
-            let amount =
-                match &posting.amount {
-                    Amount::Expr(e) => to_amount(self.eval_num(e, &[]).map_err(|d| {
-                        d.with_note(entry.span, format!("in entry `{}`", entry.label))
-                    })?),
-                    Amount::All => to_amount(-self.balance(posting.account)),
-                    Amount::Auto => {
-                        auto = Some(posting);
-                        continue;
-                    }
-                };
-            if let Some(leg) = posting.leg {
-                self.legs_today[leg] = amount;
+        // Every move sees the balances from before the entry fired.
+        for stmt in &entry.body {
+            let m = match stmt {
+                crate::compile::EntryStmt::Let { slot, value, .. } => {
+                    frame[*slot] = self.eval_num(value, &frame).map_err(in_entry)?;
+                    continue;
+                }
+                crate::compile::EntryStmt::Move(m) => m,
+            };
+            self.check_open(m.from, m.from_span)?;
+            self.check_open(m.to, m.to_span)?;
+            let amount = to_amount(self.eval_num(&m.amount, &frame).map_err(in_entry)?);
+            let overflow = || Diagnostic::new(m.span, "this move's amounts overflowed");
+            if let Some(tag) = m.tag {
+                self.tags_today[tag] = self.tags_today[tag]
+                    .checked_add(amount)
+                    .ok_or_else(overflow)?;
             }
-            for &fill in &posting.fills {
+            for &fill in &m.fills {
                 let start = program.fills[fill].unit.period_start(self.date);
-                let (period, posted) = &mut self.fills[fill];
+                let (period, moved) = &mut self.fills[fill];
                 if *period != start {
-                    (*period, *posted) = (start, Decimal::ZERO);
+                    (*period, *moved) = (start, Decimal::ZERO);
                 }
-                *posted = posted.checked_add(amount).ok_or_else(|| {
-                    Diagnostic::new(
-                        program.fills[fill].span,
-                        "running total of `fill` overflowed",
-                    )
-                })?;
+                *moved = moved.checked_add(amount).ok_or_else(overflow)?;
             }
-            amounts.push((posting.account, amount));
-        }
-
-        let sum = checked_sum(amounts.iter().map(|(_, a)| a)).ok_or_else(|| {
-            Diagnostic::new(
-                entry.span,
-                format!("postings of entry `{}` overflow when summed", entry.label),
-            )
-        })?;
-        match auto {
-            Some(posting) => {
-                // Exact negation guarantees the transaction sums to zero.
-                let amount = to_amount(-sum);
-                if let Some(leg) = posting.leg {
-                    self.legs_today[leg] = amount;
-                }
-                amounts.push((posting.account, amount));
-            }
-            None if !sum.is_zero() => {
-                return Err(Diagnostic::new(
-                    entry.span,
-                    format!(
-                        "entry `{}` does not balance on {}: postings sum to {sum}",
-                        entry.label, self.date
-                    ),
-                ));
-            }
-            None => {}
+            let to = net.entry(m.to).or_default();
+            *to = to.checked_add(amount).ok_or_else(overflow)?;
+            let from = net.entry(m.from).or_default();
+            *from = from.checked_sub(amount).ok_or_else(overflow)?;
         }
         self.firing = None;
 
-        for &(account, amount) in &amounts {
-            let balance = self.balance(account);
-            self.balances[account] = Some(balance.checked_add(amount).ok_or_else(|| {
+        let mut postings: Vec<(Arc<Path>, Decimal)> = Vec::with_capacity(net.len());
+        for (&account, &amount) in &net {
+            let overflow = || {
                 Diagnostic::new(
                     entry.span,
                     format!("balance of `{}` overflowed", program.accounts[account]),
                 )
-            })?);
-            postings.push((program.accounts[account].clone(), amount));
+            };
+            let balance = self.balance(account);
+            self.balances[account] = Some(balance.checked_add(amount).ok_or_else(overflow)?);
+            self.accounts_today[account] = self.accounts_today[account]
+                .checked_add(amount)
+                .ok_or_else(overflow)?;
+            if !amount.is_zero() {
+                postings.push((program.accounts[account].clone(), amount));
+            }
         }
 
-        // An entry that moves no money (e.g. `= all` on an empty account) is
+        // An entry that moves no money (e.g. clearing an empty account) is
         // not worth a ledger transaction.
-        if amounts.iter().all(|(_, amount)| amount.is_zero()) {
+        if postings.is_empty() {
             return Ok(None);
         }
         Ok(Some(Transaction {
@@ -596,8 +611,8 @@ impl State<'_> {
         }))
     }
 
-    fn check_assertions(&self) -> Result<(), Diagnostic> {
-        for (schedule, expr) in &self.program.asserts {
+    fn run_checks(&self) -> Result<(), Diagnostic> {
+        for (schedule, expr) in &self.program.checks {
             if !schedule.matches(self.date) {
                 continue;
             }
@@ -609,20 +624,17 @@ impl State<'_> {
                         ExprKind::Bin(lhs, op, rhs) => {
                             match (self.eval(lhs, &[]), self.eval(rhs, &[])) {
                                 (Ok(lv), Ok(rv)) => {
-                                    format!("assertion failed on {t}: {lv} {op} {rv}")
+                                    format!("check failed on {t}: {lv} {op} {rv}")
                                 }
-                                _ => format!("assertion failed on {t}"),
+                                _ => format!("check failed on {t}"),
                             }
                         }
-                        _ => format!("assertion failed on {t}"),
+                        _ => format!("check failed on {t}"),
                     };
                     return Err(Diagnostic::new(expr.span, msg));
                 }
                 Value::Num(_) => {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "assertion expression must evaluate to a bool",
-                    ));
+                    return Err(Diagnostic::new(expr.span, "a check must be a bool"));
                 }
             }
         }
@@ -671,14 +683,23 @@ impl State<'_> {
         match &expr.kind {
             ExprKind::Num(n) => Ok(Value::Num(*n)),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
-            ExprKind::Account(account) => {
-                self.check_open(*account, span)?;
-                Ok(Value::Num(self.balance(*account)))
-            }
+            ExprKind::Balance {
+                accounts,
+                sign,
+                group,
+            } => self
+                .balance_of(accounts, *sign, *group, span)
+                .map(Value::Num),
             ExprKind::Param(param) => self.param(*param, span),
-            ExprKind::Leg(leg) => Ok(Value::Num(self.legs_today[*leg])),
             ExprKind::Local(slot) => Ok(Value::Num(locals[*slot])),
-            ExprKind::Total(leg, kind) => self.total(*leg, *kind, span).map(Value::Num),
+            ExprKind::Total(tag, kind) => self.total(*tag, *kind, span).map(Value::Num),
+            ExprKind::AccountTotal {
+                accounts,
+                sign,
+                agg,
+            } => self
+                .account_total(accounts, *sign, *agg, span)
+                .map(Value::Num),
             ExprKind::Neg(x) => match self.eval(x, locals)? {
                 Value::Num(n) => Ok(Value::Num(-n)),
                 _ => Err(Diagnostic::new(
@@ -742,19 +763,63 @@ impl State<'_> {
     // `eval` recurses once per level of nesting, so its arms with much to do
     // call these to keep its stack frame small.
 
-    /// What `leg` has posted so far this `kind` of period: earlier days, plus
-    /// today unless its entry is the one firing.
-    fn total(&self, leg: usize, kind: AggKind, span: Span) -> Result<Decimal, Diagnostic> {
-        let earlier = self.totals[leg][period_index(kind)];
-        if self.firing == Some(self.program.legs[leg].entry) {
+    /// The sum of `accounts`' balances, read as their kind reads by
+    /// multiplying by `sign`. A group counts accounts that haven't opened as
+    /// zero.
+    fn balance_of(
+        &self,
+        accounts: &[usize],
+        sign: Decimal,
+        group: bool,
+        span: Span,
+    ) -> Result<Decimal, Diagnostic> {
+        let mut sum = Decimal::ZERO;
+        for &account in accounts {
+            let balance = match self.balances[account] {
+                Some(balance) => balance,
+                None if group => continue,
+                None => return Err(self.check_open(account, span).unwrap_err()),
+            };
+            sum = sum
+                .checked_add(balance)
+                .ok_or_else(|| Diagnostic::new(span, "this sum of balances overflowed"))?;
+        }
+        Ok(sum * sign)
+    }
+
+    /// What moved into `accounts` so far this `kind` of period, including
+    /// earlier entries today, read as their kind reads.
+    fn account_total(
+        &self,
+        accounts: &[usize],
+        sign: Decimal,
+        kind: AggKind,
+        span: Span,
+    ) -> Result<Decimal, Diagnostic> {
+        let overflow = || Diagnostic::new(span, "this running total overflowed");
+        let mut sum = Decimal::ZERO;
+        for &account in accounts {
+            let total = self.account_totals[account][period_index(kind)]
+                .checked_add(self.accounts_today[account])
+                .ok_or_else(overflow)?;
+            sum = sum.checked_add(total).ok_or_else(overflow)?;
+        }
+        Ok(sum * sign)
+    }
+
+    /// What `tag`'s moves have moved so far this `kind` of period: earlier
+    /// days, plus today unless its entry is the one firing.
+    fn total(&self, tag: usize, kind: AggKind, span: Span) -> Result<Decimal, Diagnostic> {
+        let earlier = self.totals[tag][period_index(kind)];
+        if self.firing == Some(self.program.tags[tag].entry) {
             return Ok(earlier);
         }
-        earlier.checked_add(self.legs_today[leg]).ok_or_else(|| {
+        earlier.checked_add(self.tags_today[tag]).ok_or_else(|| {
             Diagnostic::new(
                 span,
                 format!(
-                    "running total of leg `{}` overflowed",
-                    self.program.legs[leg].name
+                    "running total of tag `{}` overflowed",
+                    self.program.tags[tag].name
                 ),
             )
         })
@@ -765,15 +830,12 @@ impl State<'_> {
             ParamValue::Value(v) => Ok(Value::Num(*v)),
             ParamValue::Error(d) => Err(d.clone().with_note(
                 span,
-                format!(
-                    "while evaluating param `{}`",
-                    self.program.params[param].name
-                ),
+                format!("while evaluating `{}`", self.program.params[param].name),
             )),
             ParamValue::Inactive => Err(Diagnostic::new(
                 span,
                 format!(
-                    "param `{}` has no value on {}: none of its arms cover this date",
+                    "`{}` has no value on {}: none of its arms cover this date",
                     self.program.params[param].name, self.date
                 ),
             )),
@@ -798,7 +860,7 @@ impl State<'_> {
             Builtin::Fill => {
                 return Err(Diagnostic::new(
                     span,
-                    "`fill` can only be the amount a posting posts",
+                    "`fill` can only be the amount a move moves",
                 ));
             }
         };
@@ -813,7 +875,7 @@ impl State<'_> {
         unit: TimeUnit,
         span: Span,
     ) -> Result<Decimal, Diagnostic> {
-        let entry = self.firing.expect("only postings spread amounts");
+        let entry = self.firing.expect("only entries spread amounts");
         let share = self.program.entries[entry].schedule.share(unit, self.date);
         if share.carried > 0 {
             self.check_carried(expr, unit, span)?;
@@ -834,7 +896,7 @@ impl State<'_> {
         unit: TimeUnit,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        let entry = &self.program.entries[self.firing.expect("only postings spread")];
+        let entry = &self.program.entries[self.firing.expect("only entries spread")];
         let carried = entry.schedule.carried_periods(unit, self.date);
         let own = unit.period_start(self.date);
         for param in self.params_read(expr) {
@@ -909,7 +971,7 @@ impl State<'_> {
         fill: usize,
         span: Span,
     ) -> Result<Decimal, Diagnostic> {
-        let entry = self.firing.expect("only postings fill");
+        let entry = self.firing.expect("only entries fill");
         let start = unit.period_start(self.date);
         let posted = match self.fills[fill] {
             (period, posted) if period == start => posted,
@@ -1018,7 +1080,7 @@ fn apply_growth(growth: &Growth, base: Decimal, total: Decimal) -> Result<Decima
         GrowthKind::Compounding => base.checked_mul(total),
         GrowthKind::Adding => base.checked_add(total),
     }
-    .ok_or_else(|| Diagnostic::new(growth.by.span, "arithmetic overflow growing a param"))
+    .ok_or_else(|| Diagnostic::new(growth.by.span, "arithmetic overflow growing a value"))
 }
 
 /// Adds the params `e` reads directly to `out`.
@@ -1027,8 +1089,8 @@ fn params_in(e: &crate::compile::Expr, out: &mut Vec<usize>) {
         ExprKind::Param(param) => out.push(*param),
         ExprKind::Num(_)
         | ExprKind::Bool(_)
-        | ExprKind::Account(_)
-        | ExprKind::Leg(_)
+        | ExprKind::Balance { .. }
+        | ExprKind::AccountTotal { .. }
         | ExprKind::Local(_)
         | ExprKind::Total(..) => {}
         ExprKind::Neg(x)
@@ -1130,5 +1192,6 @@ fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagn
         BinOp::Eq => Ok(Value::Bool(a == b)),
         BinOp::NotEq => Ok(Value::Bool(a != b)),
         BinOp::And | BinOp::Or => unreachable!("evaluated with short-circuiting in eval_expr"),
+        BinOp::Union | BinOp::Inter => unreachable!("the resolver rejects sets of days"),
     }
 }

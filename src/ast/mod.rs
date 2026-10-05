@@ -2,7 +2,7 @@ pub mod schedule;
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-pub use schedule::{Schedule, When, Window};
+pub use schedule::{Dow, Month, Ordinal, Schedule};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Span {
@@ -45,18 +45,86 @@ impl From<std::ops::Range<usize>> for Span {
 pub type Spanned<T> = (T, Span);
 pub type SpannedExpr = Spanned<Box<Expr>>;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// A dotted name, like `assets.cash` or `loans.car.repay`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Path(pub Vec<String>);
 
 impl Path {
     pub fn join(&self) -> String {
-        self.0.join(":")
+        self.0.join(".")
+    }
+
+    /// The account's name in ledger output: each part capitalized, with `_`
+    /// starting a new word, so `liabilities.taxes_payable` is
+    /// `Liabilities:TaxesPayable`.
+    pub fn ledger_name(&self) -> String {
+        self.0
+            .iter()
+            .map(|part| {
+                part.split('_')
+                    .map(|word| {
+                        let mut chars = word.chars();
+                        chars.next().map_or(String::new(), |first| {
+                            first.to_uppercase().chain(chars).collect()
+                        })
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(":")
+    }
+
+    /// The kind of account this path names, if it starts with a kind's root.
+    pub fn account_kind(&self) -> Option<AccountKind> {
+        AccountKind::from_root(self.0.first()?)
+    }
+
+    /// Whether `self` is `other` or one of its descendants.
+    pub fn starts_with(&self, other: &Path) -> bool {
+        self.0.starts_with(&other.0)
     }
 }
 
 impl std::fmt::Display for Path {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.join())
+    }
+}
+
+/// What an account holds, named by the first part of its path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AccountKind {
+    Assets,
+    Liabilities,
+    Income,
+    Expenses,
+    Equity,
+}
+
+impl AccountKind {
+    pub const ROOTS: [&'static str; 5] = ["assets", "liabilities", "income", "expenses", "equity"];
+
+    pub fn from_root(root: &str) -> Option<Self> {
+        Some(match root {
+            "assets" => AccountKind::Assets,
+            "liabilities" => AccountKind::Liabilities,
+            "income" => AccountKind::Income,
+            "expenses" => AccountKind::Expenses,
+            "equity" => AccountKind::Equity,
+            _ => return None,
+        })
+    }
+
+    /// What a ledger balance is multiplied by to read it: assets and expenses
+    /// read as they print, and liabilities, income and equity, which the
+    /// ledger shows as negative, read positive.
+    pub fn sign(self) -> Decimal {
+        match self {
+            AccountKind::Assets | AccountKind::Expenses => Decimal::ONE,
+            AccountKind::Liabilities | AccountKind::Income | AccountKind::Equity => {
+                Decimal::NEGATIVE_ONE
+            }
+        }
     }
 }
 
@@ -68,6 +136,16 @@ pub enum AggKind {
 }
 
 impl AggKind {
+    /// The total kept for `unit`, if there is one.
+    pub fn from_unit(unit: TimeUnit) -> Option<Self> {
+        match unit {
+            TimeUnit::Year => Some(AggKind::Ytd),
+            TimeUnit::Quarter => Some(AggKind::Qtd),
+            TimeUnit::Month => Some(AggKind::Mtd),
+            TimeUnit::Week | TimeUnit::Day => None,
+        }
+    }
+
     /// The period the total accumulates over.
     pub fn unit(self) -> TimeUnit {
         match self {
@@ -221,11 +299,7 @@ impl std::fmt::Display for TimeUnit {
 
 impl std::fmt::Display for AggKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            AggKind::Ytd => "ytd",
-            AggKind::Qtd => "qtd",
-            AggKind::Mtd => "mtd",
-        })
+        write!(f, "[{}]", self.unit())
     }
 }
 
@@ -243,6 +317,10 @@ pub enum BinOp {
     NotEq,
     And,
     Or,
+    /// `|`: the days in either set.
+    Union,
+    /// `&`: the days in both sets.
+    Inter,
 }
 
 impl std::fmt::Display for BinOp {
@@ -260,6 +338,8 @@ impl std::fmt::Display for BinOp {
             BinOp::NotEq => "!=",
             BinOp::And => "and",
             BinOp::Or => "or",
+            BinOp::Union => "|",
+            BinOp::Inter => "&",
         })
     }
 }
@@ -268,6 +348,7 @@ impl std::fmt::Display for BinOp {
 pub enum Expr {
     Num(Decimal),
     Bool(bool),
+    /// A name as written. The resolver replaces these with what they name.
     Ref(Path),
     Neg(SpannedExpr),
     Not(SpannedExpr),
@@ -277,25 +358,67 @@ pub enum Expr {
         then: SpannedExpr,
         else_: SpannedExpr,
     },
-    Call(String, Vec<SpannedExpr>),
-    /// `x per year`: an amount per period.
+    /// A call. The resolver replaces a user function's path with its full name.
+    Call(Path, Vec<SpannedExpr>),
+    /// `x / year`: an amount per period.
     Per(SpannedExpr, TimeUnit),
-    /// `.ytd`/`.qtd`/`.mtd` aggregation. The optional first field is the entry
-    /// qualifier (e.g. `paycheck.k401_contrib.ytd` has `Some("paycheck")`).
-    /// Unqualified form (`k401_contrib.ytd`) is only valid inside the defining entry.
-    ParamAgg(Option<String>, String, AggKind),
+    /// `x[year]`: a total so far this period.
+    Period(SpannedExpr, TimeUnit),
+    /// A set of days written as a literal, like `fri` or `jan 1`.
+    Days(DayLit),
+    /// `a..b`, `a..=b` or `a..`.
+    Range {
+        from: SpannedExpr,
+        to: Option<SpannedExpr>,
+        inclusive: bool,
+    },
+
+    // What the resolver replaces names with.
+    /// A `let` at the top of a module, by full name.
+    Global(String),
+    /// A function's parameter or `let`, or an entry's `let`.
+    Local(String),
+    /// An account's balance, or a group's: the sum of the accounts under it.
+    Balance(Path),
+    /// What moves with a tag have moved so far this period.
+    TagTotal {
+        entry: String,
+        tag: String,
+        agg: AggKind,
+    },
+    /// What has moved into an account (or a group) so far this period.
+    AccountTotal(Path, AggKind),
 }
 
-#[derive(Clone, Debug)]
-pub enum ScheduleRef {
-    Literal(Schedule),
-    Named(String, Span),
+/// A set of days written as a literal.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DayLit {
+    /// `*`: every day.
+    All,
+    /// `fri`, `weekday`.
+    Weekday(Dow),
+    /// `15th`, `last`: that day of every month.
+    MonthDay(Ordinal),
+    /// `2nd mon`, `last fri`: that weekday of every month.
+    NthWeekday(Ordinal, Dow),
+    /// `jan`: every day of a month, every year.
+    Month(Month),
+    /// `jan 1`, `feb last`: a day of a month, every year.
+    YearDay(Month, Ordinal),
+    /// `jul 2026`.
+    MonthYear(Month, i32),
+    /// `q2`: every day of a quarter, every year.
+    Quarter(u32),
+    /// `q3 2027`.
+    QuarterYear(u32, i32),
+    Date(NaiveDate),
 }
 
-/// A time-varying param's value on the days `when` covers.
+/// A time-varying value's value on the days `when` covers.
 #[derive(Clone, Debug)]
 pub struct Arm {
-    pub when: When,
+    /// `None` for `_`, which covers every day.
+    pub when: Option<SpannedExpr>,
     pub value: SpannedExpr,
     pub growth: Option<Growth>,
     pub span: Span,
@@ -328,68 +451,79 @@ impl GrowthKind {
 }
 
 #[derive(Clone, Debug)]
-pub enum PostingAmount {
+pub enum LetBody {
     Expr(SpannedExpr),
-    All,
-}
-
-#[derive(Clone, Debug)]
-pub struct Posting {
-    pub account: Path,
-    pub amount: Option<PostingAmount>,
-    pub leg_name: Option<String>,
-    /// The whole posting line.
-    pub span: Span,
-    pub account_span: Span,
-    pub leg_span: Option<Span>,
-}
-
-#[derive(Clone, Debug)]
-pub enum ParamBody {
-    Const(SpannedExpr),
     /// Arms, of which the first that covers a day gives the value.
     Arms(Vec<Arm>),
 }
 
+/// A statement in a function body.
 #[derive(Clone, Debug)]
 pub enum Stmt {
-    Let { name: String, value: SpannedExpr },
+    Let {
+        name: String,
+        value: SpannedExpr,
+    },
+    /// The final expression, which the function returns.
     Return(SpannedExpr),
+}
+
+/// `from -> to : amount #tag`.
+#[derive(Clone, Debug)]
+pub struct Move {
+    pub from: Spanned<Path>,
+    pub to: Spanned<Path>,
+    pub amount: SpannedExpr,
+    pub tag: Option<Spanned<String>>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum EntryStmt {
+    Let {
+        name: Spanned<String>,
+        value: SpannedExpr,
+    },
+    Move(Move),
+}
+
+#[derive(Clone, Debug)]
+pub enum ModBody {
+    /// `mod x`: the declarations in another file, until loading reads them.
+    File,
+    Inline(Vec<Spanned<Decl>>),
 }
 
 #[derive(Clone, Debug)]
 pub enum Decl {
-    Account {
-        name: Path,
-        opening: Option<(SpannedExpr, NaiveDate)>,
-    },
-    Schedule {
-        name: String,
-        schedule: Schedule,
-    },
-    Param {
-        name: String,
-        body: ParamBody,
-    },
-    Entry {
-        label: String,
-        alias: Option<String>,
-        schedule: ScheduleRef,
-        postings: Vec<Posting>,
-    },
-    Assert {
-        schedule: Option<ScheduleRef>,
-        asserted: SpannedExpr,
+    Let {
+        name: Spanned<String>,
+        body: LetBody,
     },
     Fn {
-        name: String,
+        name: Spanned<String>,
         params: Vec<Spanned<String>>,
         body: Vec<Stmt>,
     },
-    /// `import "path"`. Loading a model replaces these with the imported
-    /// file's declarations, so later stages never see them.
-    Import {
-        path: Spanned<String>,
+    Entry {
+        name: Spanned<String>,
+        label: Option<String>,
+        /// The days it fires, or every day.
+        when: Option<SpannedExpr>,
+        body: Vec<EntryStmt>,
+    },
+    Check {
+        expr: SpannedExpr,
+        /// The days it's checked, or every day.
+        when: Option<SpannedExpr>,
+    },
+    Balances {
+        date: NaiveDate,
+        balances: Vec<(Spanned<Path>, SpannedExpr)>,
+    },
+    Mod {
+        name: Spanned<String>,
+        body: ModBody,
     },
 }
 
@@ -477,19 +611,14 @@ mod tests {
 
     #[test]
     fn fmt_path() {
-        assert_eq!("Single", Path(vec!["Single".to_string()]).to_string());
+        let path = |parts: &[&str]| Path(parts.iter().map(|p| p.to_string()).collect());
+        assert_eq!(path(&["assets", "cash"]).to_string(), "assets.cash");
+        assert_eq!(path(&["assets", "cash"]).ledger_name(), "Assets:Cash");
         assert_eq!(
-            "Single:Double",
-            Path(vec!["Single".to_string(), "Double".to_string()]).to_string()
+            path(&["liabilities", "taxes_payable", "current_year"]).ledger_name(),
+            "Liabilities:TaxesPayable:CurrentYear"
         );
-        assert_eq!(
-            "Single:Double:Triple",
-            Path(vec![
-                "Single".to_string(),
-                "Double".to_string(),
-                "Triple".to_string()
-            ])
-            .to_string()
-        );
+        assert_eq!(path(&["assets", "HSA"]).ledger_name(), "Assets:HSA");
+        assert_eq!(path(&["expenses", "café"]).ledger_name(), "Expenses:Café");
     }
 }

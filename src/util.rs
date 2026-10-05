@@ -31,9 +31,52 @@ pub fn topological_sort(dependents: &[Vec<usize>]) -> (Vec<usize>, bool) {
     (order, had_cycle)
 }
 
+/// How many single-character insertions, deletions and substitutions turn
+/// `a` into `b`.
+pub fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = previous[j] + usize::from(ca != *cb);
+            current.push(substitute.min(previous[j + 1] + 1).min(current[j] + 1));
+        }
+        previous = current;
+    }
+    previous[b.len()]
+}
+
+/// The candidate closest to `name`, if one is close enough to be a typo.
+pub fn closest<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let limit = (name.chars().count() / 3).clamp(1, 3);
+    candidates
+        .into_iter()
+        .map(|c| (edit_distance(name, c), c))
+        .filter(|(distance, _)| *distance <= limit)
+        .min()
+        .map(|(_, c)| c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_distances() {
+        assert_eq!(edit_distance("cash", "cash"), 0);
+        assert_eq!(edit_distance("csh", "cash"), 1);
+        assert_eq!(edit_distance("retirment", "retirement"), 1);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("", "abc"), 3);
+    }
+
+    #[test]
+    fn closest_finds_likely_typos() {
+        let names = ["assets.cash", "assets.retirement", "expenses.rent"];
+        assert_eq!(closest("assets.csh", names), Some("assets.cash"));
+        assert_eq!(closest("expenses.food", names), None);
+    }
 
     mod topological_sort {
         use super::*;

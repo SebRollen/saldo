@@ -1,5 +1,15 @@
-use super::TimeUnit;
+//! Sets of days, and the schedules entries fire on.
+//!
+//! A [`DaySet`] is what a day-set expression like `15th | last` or
+//! `2026-01-02.. & fri / 2` means: whether it covers a given day. A
+//! [`Schedule`] is the set of days an entry fires on, split into the parts that
+//! decide how a rate per period is shared between its firings.
+
+use super::{BinOp, DayLit, Expr, Path, Span, SpannedExpr, TimeUnit};
+use crate::errors::Diagnostic;
 use chrono::{Datelike, NaiveDate};
+use rust_decimal::Decimal;
+use std::cell::RefCell;
 use std::fmt;
 
 /// The English ordinal suffix for `n` ("st" for 1, "nd" for 22, "th" for 13…).
@@ -15,7 +25,7 @@ pub fn ordinal_suffix(n: u8) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Dow {
     Monday,
     Tuesday,
@@ -29,7 +39,22 @@ pub enum Dow {
 }
 
 impl Dow {
-    fn matches(&self, t: NaiveDate) -> bool {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "monday" | "mon" => Dow::Monday,
+            "tuesday" | "tue" => Dow::Tuesday,
+            "wednesday" | "wed" => Dow::Wednesday,
+            "thursday" | "thu" => Dow::Thursday,
+            "friday" | "fri" => Dow::Friday,
+            "saturday" | "sat" => Dow::Saturday,
+            "sunday" | "sun" => Dow::Sunday,
+            "weekday" => Dow::Weekday,
+            "weekend" => Dow::Weekend,
+            _ => return None,
+        })
+    }
+
+    pub fn matches(&self, t: NaiveDate) -> bool {
         use chrono::Weekday as W;
         match self {
             Dow::Monday => t.weekday() == W::Mon,
@@ -85,6 +110,24 @@ pub enum Month {
 }
 
 impl Month {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "january" | "jan" => Month::January,
+            "february" | "feb" => Month::February,
+            "march" | "mar" => Month::March,
+            "april" | "apr" => Month::April,
+            "may" => Month::May,
+            "june" | "jun" => Month::June,
+            "july" | "jul" => Month::July,
+            "august" | "aug" => Month::August,
+            "september" | "sep" => Month::September,
+            "october" | "oct" => Month::October,
+            "november" | "nov" => Month::November,
+            "december" | "dec" => Month::December,
+            _ => return None,
+        })
+    }
+
     pub fn matches(&self, t: NaiveDate) -> bool {
         *self as u32 == t.month()
     }
@@ -99,31 +142,21 @@ impl Month {
     }
 }
 
-// Non-first ordinal
-#[derive(Debug, Clone, PartialEq)]
-pub struct Nth(u8);
-
-impl Nth {
-    pub fn new(inner: u8) -> Self {
-        assert!(inner > 1, "Nth must be > 1; use Ordinal::First for 1");
-        Self(inner)
-    }
-
-    pub fn get(&self) -> u8 {
-        self.0
-    }
+/// A quarter's number, from `q1` to `q4`.
+pub fn quarter_from_name(name: &str) -> Option<u32> {
+    Some(match name {
+        "q1" => 1,
+        "q2" => 2,
+        "q3" => 3,
+        "q4" => 4,
+        _ => return None,
+    })
 }
 
-impl fmt::Display for Nth {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.0, ordinal_suffix(self.0))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ordinal {
-    First,
-    Nth(Nth),
+    /// The `n`th, from 1.
+    Nth(u8),
     Last,
 }
 
@@ -132,215 +165,627 @@ impl Ordinal {
     /// fall on its last day, so "the 30th" is Feb 28 (or 29).
     pub fn matches(&self, t: NaiveDate) -> bool {
         match self {
-            Ordinal::First => t.day() == 1,
-            Ordinal::Nth(Nth(n)) => {
+            Ordinal::Nth(n) => {
                 t.day() == u32::from(*n)
-                    || (u32::from(*n) > t.num_days_in_month().into() && t.is_month_end())
+                    || (u32::from(*n) > t.num_days_in_month().into() && is_month_end(t))
             }
-            Ordinal::Last => t.is_month_end(),
+            Ordinal::Last => is_month_end(t),
         }
     }
-}
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum MonthOccurrence {
-    Day(Ordinal),          // "1st [day]"
-    Weekday(Ordinal, Dow), // "first monday"
-}
-
-impl MonthOccurrence {
-    pub fn matches(&self, t: NaiveDate) -> bool {
+    /// Whether `t` is this `dow` of its month, like its second Monday.
+    pub fn matches_weekday(&self, dow: Dow, t: NaiveDate) -> bool {
+        if !dow.matches(t) {
+            return false;
+        }
+        // Counting matching days (rather than weeks) also handles `weekday`
+        // and `weekend`, which match several days a week.
+        let matches_on = |day: u32| t.with_day(day).is_some_and(|d| dow.matches(d));
         match self {
-            Self::Day(ordinal) => ordinal.matches(t),
-            Self::Weekday(ordinal, dow) => {
-                if !dow.matches(t) {
-                    return false;
-                }
-                // Counting matching days (rather than weeks) also handles `weekday`
-                // and `weekend`, which match several days a week.
-                let matches_on = |day: u32| t.with_day(day).is_some_and(|d| dow.matches(d));
-                match ordinal {
-                    Ordinal::First => !(1..t.day()).any(matches_on),
-                    Ordinal::Nth(Nth(n)) => {
-                        (1..=t.day()).filter(|&day| matches_on(day)).count() == usize::from(*n)
-                    }
-                    Ordinal::Last => {
-                        !(t.day() + 1..=u32::from(t.num_days_in_month())).any(matches_on)
-                    }
-                }
+            Ordinal::Nth(n) => {
+                (1..=t.day()).filter(|&day| matches_on(day)).count() == usize::from(*n)
             }
+            Ordinal::Last => !(t.day() + 1..=u32::from(t.num_days_in_month())).any(matches_on),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Period {
-    Day,
-    Week { on: Vec<Dow> },
-    Weekday(Dow),                                      // "every monday"
-    NamedMonth { month: Month, day: Option<Ordinal> }, // "every january [1st]"
-    Month { on: Vec<MonthOccurrence> },
-    Quarter,
-    Year { on: Vec<(Month, Ordinal)> },
+impl fmt::Display for Ordinal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Ordinal::Nth(n) => write!(f, "{n}{}", ordinal_suffix(*n)),
+            Ordinal::Last => f.write_str("last"),
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Periodic {
-    pub nth: Option<Nth>,
-    pub period: Period,
-    /// The days `in` keeps, or every day.
-    pub within: When,
-    pub start: Option<NaiveDate>,
+fn is_month_end(t: NaiveDate) -> bool {
+    t.day() == u32::from(t.num_days_in_month())
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Schedule {
-    Periodic(Periodic),
-    Dates(Vec<NaiveDate>),
+/// A set of days.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DaySet {
+    All,
+    /// From the first day up to, but not including, the second.
+    Span(NaiveDate, Option<NaiveDate>),
+    /// These months every year, a bit each with January in bit 0.
+    Months(u16),
+    Weekday(Dow),
+    /// That day of every month.
+    MonthDay(Ordinal),
+    /// That weekday of every month, like its second Monday.
+    NthWeekday(Ordinal, Dow),
+    /// That day of a month, every year.
+    YearDay(Month, Ordinal),
+    Union(Vec<DaySet>),
+    Inter(Vec<DaySet>),
+    Diff(Box<DaySet>, Box<DaySet>),
+    /// Every `n`th day of a set.
+    Thin(Thin),
+}
+
+/// Every `every`th day of `inner`, counting from its first day on or after
+/// `anchor`, and back from it before.
+#[derive(Clone, Debug)]
+pub struct Thin {
+    inner: Box<DaySet>,
+    every: u32,
+    /// The start of the range the set is intersected with; `None` until the
+    /// intersection is known.
+    anchor: Option<NaiveDate>,
+    /// Where `/` is written, for reporting a missing anchor.
+    span: Span,
+    cache: RefCell<ThinCache>,
+}
+
+impl PartialEq for Thin {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner && self.every == other.every && self.anchor == other.anchor
+    }
+}
+
+/// The days of a [`Thin`]'s inner set found so far, so each is only looked for
+/// once however often the simulation asks.
+#[derive(Clone, Debug, Default)]
+struct ThinCache {
+    /// Days on or after the anchor, earliest first.
+    after: Vec<NaiveDate>,
+    /// The last day looked at after the anchor.
+    after_until: Option<NaiveDate>,
+    /// Days before the anchor, latest first.
+    before: Vec<NaiveDate>,
+    /// The earliest day looked at before the anchor.
+    before_until: Option<NaiveDate>,
+}
+
+impl Thin {
+    fn contains(&self, t: NaiveDate) -> bool {
+        if !self.inner.contains(t) {
+            return false;
+        }
+        let anchor = self.anchor.expect("anchors are set while lowering");
+        let every = self.every as usize;
+        let mut cache = self.cache.borrow_mut();
+        if t >= anchor {
+            let mut day = match cache.after_until {
+                Some(until) => until.succ_opt(),
+                None => Some(anchor),
+            };
+            while let Some(d) = day
+                && d <= t
+            {
+                if self.inner.contains(d) {
+                    cache.after.push(d);
+                }
+                cache.after_until = Some(d);
+                day = d.succ_opt();
+            }
+            let index = cache.after.binary_search(&t).expect("t is in the set");
+            index.is_multiple_of(every)
+        } else {
+            let mut day = match cache.before_until {
+                Some(until) => until.pred_opt(),
+                None => anchor.pred_opt(),
+            };
+            while let Some(d) = day
+                && d >= t
+            {
+                if self.inner.contains(d) {
+                    cache.before.push(d);
+                }
+                cache.before_until = Some(d);
+                day = d.pred_opt();
+            }
+            let index = cache
+                .before
+                .binary_search_by(|d| t.cmp(d))
+                .expect("t is in the set");
+            (index + 1).is_multiple_of(every)
+        }
+    }
+}
+
+/// What part a set plays in a schedule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// Days of particular years: when the schedule is active.
+    Window,
+    /// Months or quarters of every year: which ones it keeps.
+    Filter,
+    /// Days within weeks, months or years: when it fires.
+    Rhythm,
+}
+
+impl DaySet {
+    pub fn contains(&self, t: NaiveDate) -> bool {
+        match self {
+            DaySet::All => true,
+            DaySet::Span(from, to) => t >= *from && to.is_none_or(|to| t < to),
+            DaySet::Months(months) => months & (1 << t.month0()) != 0,
+            DaySet::Weekday(dow) => dow.matches(t),
+            DaySet::MonthDay(ordinal) => ordinal.matches(t),
+            DaySet::NthWeekday(ordinal, dow) => ordinal.matches_weekday(*dow, t),
+            DaySet::YearDay(month, ordinal) => month.matches(t) && ordinal.matches(t),
+            DaySet::Union(sets) => sets.iter().any(|s| s.contains(t)),
+            DaySet::Inter(sets) => sets.iter().all(|s| s.contains(t)),
+            DaySet::Diff(a, b) => a.contains(t) && !b.contains(t),
+            DaySet::Thin(thin) => thin.contains(t),
+        }
+    }
+
+    fn role(&self) -> Role {
+        let all_same = |sets: &mut dyn Iterator<Item = &DaySet>| {
+            let roles: Vec<Role> = sets.map(DaySet::role).collect();
+            match roles.first() {
+                Some(&first) if roles.iter().all(|r| *r == first) => first,
+                _ => Role::Rhythm,
+            }
+        };
+        match self {
+            DaySet::Span(..) => Role::Window,
+            DaySet::Months(_) => Role::Filter,
+            DaySet::All
+            | DaySet::Weekday(_)
+            | DaySet::MonthDay(_)
+            | DaySet::NthWeekday(..)
+            | DaySet::YearDay(..)
+            | DaySet::Thin(_) => Role::Rhythm,
+            DaySet::Union(sets) | DaySet::Inter(sets) => all_same(&mut sets.iter()),
+            DaySet::Diff(a, b) => all_same(&mut [a.as_ref(), b.as_ref()].into_iter()),
+        }
+    }
+
+    /// A day before which the set has no days, if it's bounded below by a
+    /// range of dates.
+    pub fn lower_bound(&self) -> Option<NaiveDate> {
+        match self {
+            DaySet::Span(from, _) => Some(*from),
+            DaySet::Inter(sets) => sets.iter().filter_map(DaySet::lower_bound).max(),
+            DaySet::Union(sets) => sets
+                .iter()
+                .map(DaySet::lower_bound)
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .min(),
+            DaySet::Diff(a, _) => a.lower_bound(),
+            DaySet::Thin(thin) => thin.inner.lower_bound(),
+            _ => None,
+        }
+    }
+
+    /// The first day the set covers, if it's bounded below: where a growing
+    /// value starts counting its steps.
+    pub fn first_day(&self) -> Option<NaiveDate> {
+        let bound = self.lower_bound()?;
+        // Within a few years of the bound, unless nothing's there.
+        let first = bound.iter_days().take(4 * 366).find(|d| self.contains(*d));
+        Some(first.unwrap_or(bound))
+    }
+
+    /// Gives every `/ n` in the set that doesn't have one yet `anchor` to
+    /// count from.
+    fn anchor(&mut self, anchor: NaiveDate) {
+        match self {
+            DaySet::Thin(thin) => {
+                thin.inner.anchor(anchor);
+                thin.anchor.get_or_insert(anchor);
+            }
+            DaySet::Union(sets) | DaySet::Inter(sets) => {
+                sets.iter_mut().for_each(|s| s.anchor(anchor));
+            }
+            DaySet::Diff(a, b) => {
+                a.anchor(anchor);
+                b.anchor(anchor);
+            }
+            _ => {}
+        }
+    }
+
+    /// The span of the first `/ n` in the set with nothing to count from.
+    fn unanchored(&self) -> Option<Span> {
+        match self {
+            DaySet::Thin(thin) => thin
+                .inner
+                .unanchored()
+                .or(thin.anchor.is_none().then_some(thin.span)),
+            DaySet::Union(sets) | DaySet::Inter(sets) => sets.iter().find_map(DaySet::unanchored),
+            DaySet::Diff(a, b) => a.unanchored().or_else(|| b.unanchored()),
+            _ => None,
+        }
+    }
+
+    /// Whether every day `self` covers is covered by one of `earlier`, if
+    /// that can be worked out: only for sets made of ranges, months and
+    /// quarters, which change only where a range starts or ends and at the
+    /// start of a month.
+    pub fn is_shadowed_by(&self, earlier: &[&DaySet]) -> Option<bool> {
+        let sets = std::iter::once(self).chain(earlier.iter().copied());
+        if !sets.clone().all(DaySet::is_calendar) {
+            return None;
+        }
+        // Before the first edge, no range has started; from the last one on,
+        // each has started or ended. So a year either side stands for every
+        // year beyond.
+        let mut edges = Vec::new();
+        for set in sets {
+            set.edges(&mut edges);
+        }
+        let any_year = NaiveDate::from_ymd_opt(2000, 1, 1).expect("a valid date");
+        let first = edges.iter().min().copied().unwrap_or(any_year);
+        let last = edges.iter().max().copied().unwrap_or(any_year);
+        let year = chrono::Months::new(12);
+        let start = month_start(first).checked_sub_months(year).unwrap_or(first);
+        let end = month_start(last)
+            .checked_add_months(year)
+            .unwrap_or(NaiveDate::MAX);
+        let mut days: Vec<NaiveDate> = std::iter::successors(Some(start), |t| {
+            t.checked_add_months(chrono::Months::new(1))
+        })
+        .take_while(|t| *t <= end)
+        .chain(edges)
+        .collect();
+        days.sort();
+        days.dedup();
+        Some(
+            days.into_iter()
+                .all(|t| !self.contains(t) || earlier.iter().any(|s| s.contains(t))),
+        )
+    }
+
+    fn is_calendar(&self) -> bool {
+        match self {
+            DaySet::All | DaySet::Span(..) | DaySet::Months(_) => true,
+            DaySet::Union(sets) | DaySet::Inter(sets) => sets.iter().all(DaySet::is_calendar),
+            DaySet::Diff(a, b) => a.is_calendar() && b.is_calendar(),
+            _ => false,
+        }
+    }
+
+    /// The dates its ranges start and end on.
+    fn edges(&self, out: &mut Vec<NaiveDate>) {
+        match self {
+            DaySet::Span(from, to) => out.extend(std::iter::once(*from).chain(*to)),
+            DaySet::Union(sets) | DaySet::Inter(sets) => sets.iter().for_each(|s| s.edges(out)),
+            DaySet::Diff(a, b) => {
+                a.edges(out);
+                b.edges(out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reads the set of days `expr` describes. `names` reads the sets that names
+/// in it stand for, with [`lower_part`].
+pub fn lower(
+    expr: &SpannedExpr,
+    names: &mut dyn FnMut(&Path, Span) -> Result<DaySet, Diagnostic>,
+) -> Result<DaySet, Diagnostic> {
+    let set = lower_part(expr, names)?;
+    if let Some(span) = set.unanchored() {
+        return Err(Diagnostic::new(
+            span,
+            "there's no date to count from: intersect this with a range that has a start, \
+             like `2026-01-02.. & fri / 2`",
+        ));
+    }
+    Ok(set)
+}
+
+/// Reads the set of days `expr` describes, as part of a larger one: its `/ n`
+/// may still need a range to count from.
+pub fn lower_part(
+    (expr, span): &SpannedExpr,
+    names: &mut dyn FnMut(&Path, Span) -> Result<DaySet, Diagnostic>,
+) -> Result<DaySet, Diagnostic> {
+    let span = *span;
+    Ok(match expr.as_ref() {
+        Expr::Days(lit) => match lit {
+            DayLit::All => DaySet::All,
+            DayLit::Weekday(dow) => DaySet::Weekday(*dow),
+            DayLit::MonthDay(ordinal) => DaySet::MonthDay(*ordinal),
+            DayLit::NthWeekday(ordinal, dow) => DaySet::NthWeekday(*ordinal, *dow),
+            DayLit::YearDay(month, ordinal) => DaySet::YearDay(*month, *ordinal),
+            DayLit::Month(_) | DayLit::Quarter(_) => {
+                let (first, last) = point(expr, span)?.months().expect("a yearly point");
+                DaySet::Months(month_mask(first, last))
+            }
+            DayLit::MonthYear(..) | DayLit::QuarterYear(..) | DayLit::Date(_) => {
+                let (from, to) = point(expr, span)?.dates().expect("a point in time");
+                DaySet::Span(from, Some(to))
+            }
+        },
+        Expr::Num(_) => {
+            let (from, to) = point(expr, span)?.dates().expect("a year");
+            DaySet::Span(from, Some(to))
+        }
+        Expr::Range {
+            from,
+            to,
+            inclusive,
+        } => range(from, to.as_ref(), *inclusive, span)?,
+        Expr::Bin(a, op @ (BinOp::Union | BinOp::Inter), b) => {
+            let mut sets = Vec::new();
+            for side in [a, b] {
+                match (lower_part(side, names)?, op) {
+                    (DaySet::Union(inner), BinOp::Union) | (DaySet::Inter(inner), BinOp::Inter) => {
+                        sets.extend(inner)
+                    }
+                    (set, _) => sets.push(set),
+                }
+            }
+            if *op == BinOp::Union {
+                DaySet::Union(sets)
+            } else {
+                // Every `/ n` in it counts from where its ranges of dates start.
+                let mut set = DaySet::Inter(sets);
+                let windows = match &set {
+                    DaySet::Inter(sets) => sets
+                        .iter()
+                        .filter(|s| s.role() == Role::Window)
+                        .filter_map(DaySet::lower_bound)
+                        .max(),
+                    _ => unreachable!(),
+                };
+                if let Some(anchor) = windows {
+                    set.anchor(anchor);
+                }
+                set
+            }
+        }
+        Expr::Bin(a, BinOp::Sub, b) => DaySet::Diff(
+            Box::new(lower_part(a, names)?),
+            Box::new(lower_part(b, names)?),
+        ),
+        Expr::Bin(a, BinOp::Div, b) => {
+            let inner = lower_part(a, names)?;
+            let every = match b.0.as_ref() {
+                Expr::Num(n) if n.fract().is_zero() && *n >= Decimal::ONE => {
+                    u32::try_from(n.mantissa()).ok().filter(|_| n.scale() == 0)
+                }
+                _ => None,
+            };
+            let Some(every) = every else {
+                return Err(Diagnostic::new(
+                    b.1,
+                    "expected how many to count, a whole number like `2`",
+                ));
+            };
+            DaySet::Thin(Thin {
+                inner: Box::new(inner),
+                every,
+                anchor: None,
+                span,
+                cache: RefCell::default(),
+            })
+        }
+        Expr::Ref(path) => names(path, span)?,
+        _ => {
+            return Err(Diagnostic::new(
+                span,
+                "expected a set of days, like `fri`, `15th | last` or `2026..`",
+            ));
+        }
+    })
+}
+
+/// One end of a range.
+#[derive(Clone, Copy)]
+enum Point {
+    /// From the first day up to, but not including, the second.
+    Dates(NaiveDate, NaiveDate),
+    /// A first and last month, from 1 for January, every year.
+    Months(u32, u32),
+}
+
+impl Point {
+    fn dates(self) -> Option<(NaiveDate, NaiveDate)> {
+        match self {
+            Point::Dates(from, to) => Some((from, to)),
+            Point::Months(..) => None,
+        }
+    }
+
+    fn months(self) -> Option<(u32, u32)> {
+        match self {
+            Point::Months(first, last) => Some((first, last)),
+            Point::Dates(..) => None,
+        }
+    }
+}
+
+fn point(expr: &Expr, span: Span) -> Result<Point, Diagnostic> {
+    let first_of = |year: i32, month: u32| NaiveDate::from_ymd_opt(year, month, 1);
+    let months = |year: i32, first: u32, last: u32| {
+        let end = if last == 12 {
+            first_of(year + 1, 1)
+        } else {
+            first_of(year, last + 1)
+        };
+        Some(Point::Dates(first_of(year, first)?, end?))
+    };
+    let point = match expr {
+        Expr::Num(n) => {
+            let year = (n.fract().is_zero() && n.scale() == 0)
+                .then(|| i32::try_from(n.mantissa()).ok())
+                .flatten()
+                .filter(|y| (1000..=9999).contains(y));
+            year.and_then(|y| months(y, 1, 12))
+        }
+        Expr::Days(DayLit::Date(d)) => d.succ_opt().map(|next| Point::Dates(*d, next)),
+        Expr::Days(DayLit::MonthYear(m, y)) => months(*y, *m as u32, *m as u32),
+        Expr::Days(DayLit::QuarterYear(q, y)) => months(*y, q * 3 - 2, q * 3),
+        Expr::Days(DayLit::Month(m)) => Some(Point::Months(*m as u32, *m as u32)),
+        Expr::Days(DayLit::Quarter(q)) => Some(Point::Months(q * 3 - 2, q * 3)),
+        _ => {
+            return Err(Diagnostic::new(
+                span,
+                "a range runs between dates, years written in full like `2026`, \
+                 months or quarters",
+            ));
+        }
+    };
+    point.ok_or_else(|| Diagnostic::new(span, "expected a year written in full, like `2026`"))
+}
+
+fn range(
+    from: &SpannedExpr,
+    to: Option<&SpannedExpr>,
+    inclusive: bool,
+    span: Span,
+) -> Result<DaySet, Diagnostic> {
+    let start = point(&from.0, from.1)?;
+    let Some(to) = to else {
+        return match start {
+            Point::Dates(from, _) => Ok(DaySet::Span(from, None)),
+            Point::Months(..) => Err(Diagnostic::new(
+                span,
+                "a range of months needs an end, like `sep..=dec`",
+            )),
+        };
+    };
+    match (start, point(&to.0, to.1)?) {
+        (Point::Dates(from, _), Point::Dates(next, after)) => {
+            let to = if inclusive { after } else { next };
+            if to <= from {
+                return Err(Diagnostic::new(span, "this ends before it starts"));
+            }
+            Ok(DaySet::Span(from, Some(to)))
+        }
+        (Point::Months(first, _), Point::Months(next, after)) => {
+            let last = if inclusive {
+                after
+            } else if next == first {
+                return Err(Diagnostic::new(
+                    span,
+                    "this has no months; write `..=` to include the last one",
+                ));
+            } else {
+                (next + 10) % 12 + 1
+            };
+            Ok(DaySet::Months(month_mask(first, last)))
+        }
+        _ => Err(Diagnostic::new(
+            span,
+            "both ends of a range need a year, or neither",
+        )),
+    }
+}
+
+/// The months from `first` through `last`, wrapping past December.
+fn month_mask(first: u32, last: u32) -> u16 {
+    let mut mask = 0;
+    let mut month = first;
+    loop {
+        mask |= 1 << (month - 1);
+        if month == last {
+            return mask;
+        }
+        month = month % 12 + 1;
+    }
+}
+
+fn month_start(t: NaiveDate) -> NaiveDate {
+    t.with_day(1).expect("every month has a first day")
+}
+
+/// The days an entry fires on, or a check is checked on.
+///
+/// A rate per period is shared between the days in each period that fit the
+/// schedule's *rhythm* and *filter*: its days of the week, month or year, and
+/// the months or quarters it keeps. The *window*, its ranges of dates and
+/// years, only says when it's active, so a schedule that starts partway
+/// through a year still gets each firing's share of a yearly amount, and so
+/// only part of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Schedule {
+    rhythm: DaySet,
+    filter: Option<DaySet>,
+    window: Option<DaySet>,
 }
 
 impl Schedule {
-    pub fn matches(&self, t: NaiveDate) -> bool {
-        if let Self::Periodic(periodic) = self
-            && periodic.start.is_some_and(|s| t < s)
-        {
-            return false;
-        }
-        self.matches_pattern(t)
+    pub fn every_day() -> Self {
+        Schedule::new(DaySet::All)
     }
 
-    /// Whether `t` fits the schedule's pattern, ignoring when the schedule
-    /// starts. The `from` date of an `every N …` schedule still picks which
-    /// days fit, before it as well as after.
-    fn matches_pattern(&self, t: NaiveDate) -> bool {
-        self.fits_rhythm(t) && self.within(t)
-    }
-
-    /// Whether `t` is among the days the schedule's `in` keeps.
-    fn within(&self, t: NaiveDate) -> bool {
-        match self {
-            Self::Periodic(periodic) => periodic.within.contains(t),
-            Self::Dates(_) => true,
-        }
-    }
-
-    /// Whether `t` fits the schedule's pattern before `in` leaves days out.
-    fn fits_rhythm(&self, t: NaiveDate) -> bool {
-        let periodic = match self {
-            Self::Dates(dates) => return dates.contains(&t),
-            Self::Periodic(periodic) => periodic,
+    pub fn new(set: DaySet) -> Self {
+        let parts = match set {
+            DaySet::Inter(sets) => sets,
+            set => vec![set],
         };
-
-        let origin = periodic.start.unwrap_or(t);
-
-        match &periodic.period {
-            Period::Day => match periodic.nth {
-                None => true,
-                Some(Nth(n)) => (t - origin).num_days().rem_euclid(n.into()) == 0,
-            },
-            Period::Week { on } => {
-                let dow_ok = if on.is_empty() {
-                    // Like other periods, default to the last day: Sunday.
-                    Dow::Sunday.matches(t)
-                } else {
-                    on.iter().any(|dow| dow.matches(t))
-                };
-                if !dow_ok {
-                    return false;
-                }
-                match periodic.nth {
-                    None => true,
-                    // Count calendar weeks (Monday to Sunday), so days listed
-                    // in `on` that share a week always fire together.
-                    Some(Nth(n)) => {
-                        ((week_start(t) - week_start(origin)).num_days() / 7).rem_euclid(n.into())
-                            == 0
-                    }
-                }
-            }
-            Period::Weekday(dow) => {
-                if !dow.matches(t) {
-                    return false;
-                }
-                match periodic.nth {
-                    None => true,
-                    Some(Nth(n)) => (t - origin).num_days().div_euclid(7).rem_euclid(n.into()) == 0,
-                }
-            }
-            Period::Month { on } => {
-                let day_ok = if on.is_empty() {
-                    t.is_month_end()
-                } else {
-                    on.iter().any(|d| d.matches(t))
-                };
-                if !day_ok {
-                    return false;
-                }
-                match periodic.nth {
-                    None => true,
-                    Some(Nth(n)) => {
-                        let months = (t.year() - origin.year()) * 12 + t.month() as i32
-                            - origin.month() as i32;
-                        months.rem_euclid(n.into()) == 0
-                    }
-                }
-            }
-            Period::NamedMonth { month, day } => {
-                if !month.matches(t) {
-                    return false;
-                }
-                let day_ok = match day {
-                    Some(ordinal) => ordinal.matches(t),
-                    None => t.is_month_end(),
-                };
-                if !day_ok {
-                    return false;
-                }
-                match periodic.nth {
-                    None => true,
-                    Some(Nth(n)) => (t.year() - origin.year()).rem_euclid(n.into()) == 0,
-                }
-            }
-            Period::Quarter => {
-                if !t.is_quarter_end() {
-                    return false;
-                }
-                match periodic.nth {
-                    None => true,
-                    Some(Nth(n)) => {
-                        let quarters = (t.year() - origin.year()) * 4 + t.quarter() as i32
-                            - origin.quarter() as i32;
-                        quarters.rem_euclid(n.into()) == 0
-                    }
-                }
-            }
-            Period::Year { on } => {
-                let day_ok = if on.is_empty() {
-                    t.is_year_end()
-                } else {
-                    on.iter()
-                        .any(|(month, ordinal)| month.matches(t) && ordinal.matches(t))
-                };
-                if !day_ok {
-                    return false;
-                }
-                match periodic.nth {
-                    None => true,
-                    Some(Nth(n)) => (t.year() - origin.year()).rem_euclid(n.into()) == 0,
-                }
+        let (mut rhythm, mut filter, mut window) = (Vec::new(), Vec::new(), Vec::new());
+        for part in parts {
+            match part.role() {
+                Role::Rhythm => rhythm.push(part),
+                Role::Filter => filter.push(part),
+                Role::Window => window.push(part),
             }
         }
+        let inter = |mut sets: Vec<DaySet>| match sets.len() {
+            0 => None,
+            1 => sets.pop(),
+            _ => Some(DaySet::Inter(sets)),
+        };
+        // Dates alone, like `2026-04-15 | 2026-10-15`, are when it fires.
+        if rhythm.is_empty() && filter.is_empty() {
+            return Schedule {
+                rhythm: inter(window).unwrap_or(DaySet::All),
+                filter: None,
+                window: None,
+            };
+        }
+        Schedule {
+            rhythm: inter(rhythm).unwrap_or(DaySet::All),
+            filter: inter(filter),
+            window: inter(window),
+        }
+    }
+
+    pub fn matches(&self, t: NaiveDate) -> bool {
+        self.matches_pattern(t) && self.window.as_ref().is_none_or(|w| w.contains(t))
+    }
+
+    /// Whether `t` fits the schedule's pattern, ignoring when it's active.
+    pub fn matches_pattern(&self, t: NaiveDate) -> bool {
+        self.rhythm.contains(t) && self.within(t)
+    }
+
+    /// Whether `t` is in a month or quarter the schedule keeps.
+    fn within(&self, t: NaiveDate) -> bool {
+        self.filter.as_ref().is_none_or(|f| f.contains(t))
     }
 
     /// Which part of an amount per `unit` belongs to the firing on `t`, which
     /// must fit the schedule.
     ///
     /// The days in `t`'s period that fit the schedule's pattern split the
-    /// period's amount equally, including days before the schedule's `from`
-    /// date, so a schedule that starts partway through a period gets only part
-    /// of it. Periods with no such days add their whole amount to the next day
-    /// that fits, back to the period containing `from`, before which the
-    /// schedule doesn't cover anything (see `carried_periods`).
+    /// period's amount equally, including days before the schedule's window
+    /// opens, so a schedule that starts partway through a period gets only
+    /// part of it. Periods with no such days add their whole amount to the
+    /// next day that fits, back to the start of the window (see
+    /// `carried_periods`).
     pub fn share(&self, unit: TimeUnit, t: NaiveDate) -> Share {
         let start = unit.period_start(t);
         let mut share = Share {
@@ -348,17 +793,13 @@ impl Schedule {
             index: 0,
             count: 0,
         };
-        let mut day = Some(start);
-        while let Some(d) = day
-            && unit.period_start(d) == start
-        {
+        for d in unit.days(start) {
             if self.matches_pattern(d) {
                 share.count += 1;
                 if d <= t {
                     share.index += 1;
                 }
             }
-            day = d.succ_opt();
         }
         share.carried = self
             .carried_periods(unit, t)
@@ -370,16 +811,18 @@ impl Schedule {
 
     /// The first days of the periods before `t`'s that add their whole amount
     /// to the firing on `t`: those since the previous firing's, back to the
-    /// one containing `from`, except the ones `in` leaves out.
+    /// start of the window, except the ones the filter leaves out and those
+    /// outside the window.
     pub fn carried_periods(&self, unit: TimeUnit, t: NaiveDate) -> Vec<NaiveDate> {
         let own = unit.period_start(t);
         let after_previous = self
             .previous_match(own)
             .and_then(|d| unit.next_period_start(d));
-        let from = match self {
-            Self::Periodic(periodic) => periodic.start.map(|d| unit.period_start(d)),
-            Self::Dates(_) => None,
-        };
+        let from = self
+            .window
+            .as_ref()
+            .and_then(DaySet::lower_bound)
+            .map(|d| unit.period_start(d));
         let Some(first) = after_previous.into_iter().chain(from).max() else {
             return Vec::new();
         };
@@ -389,20 +832,23 @@ impl Schedule {
             .collect()
     }
 
-    /// Whether `in` leaves out the period starting on `start`: it keeps none
-    /// of its days, or none of the days the schedule would fire on in it.
+    /// Whether the period starting on `start` doesn't roll into the next
+    /// firing: the filter keeps none of its days, or none of the days the
+    /// schedule would have fired on in it, or it's outside the window.
     fn leaves_out(&self, unit: TimeUnit, start: NaiveDate) -> bool {
-        let Self::Periodic(periodic) = self else {
+        if let Some(window) = &self.window
+            && !unit.days(start).any(|d| window.contains(d))
+        {
+            return true;
+        }
+        let Some(filter) = &self.filter else {
             return false;
         };
-        if periodic.within == When::Always {
-            return false;
-        }
         let (mut kept, mut fires, mut fires_kept) = (false, false, false);
         for d in unit.days(start) {
-            let within = periodic.within.contains(d);
+            let within = filter.contains(d);
             kept |= within;
-            if self.fits_rhythm(d) {
+            if self.rhythm.contains(d) {
                 fires = true;
                 fires_kept |= within;
             }
@@ -425,10 +871,7 @@ impl Schedule {
     /// The last day before `t` that fits the schedule's pattern, if there's one
     /// in the few centuries before it.
     fn previous_match(&self, t: NaiveDate) -> Option<NaiveDate> {
-        if let Self::Dates(dates) = self {
-            return dates.iter().filter(|d| **d < t).max().copied();
-        }
-        // Long enough for the sparsest schedule, `every 255 years` on a leap day.
+        // Long enough for the sparsest schedule, every 255th leap day.
         const MAX_DAYS: usize = 255 * 8 * 366;
         std::iter::successors(t.pred_opt(), NaiveDate::pred_opt)
             .take(MAX_DAYS)
@@ -446,130 +889,6 @@ pub struct Share {
     pub count: u32,
 }
 
-/// The Monday starting `t`'s week.
-fn week_start(t: NaiveDate) -> NaiveDate {
-    t - chrono::Duration::days(t.weekday().num_days_from_monday().into())
-}
-
-trait PeriodEnd: Datelike {
-    fn is_month_end(&self) -> bool {
-        self.day() == self.num_days_in_month() as u32
-    }
-    fn is_quarter_end(&self) -> bool {
-        match self.month() {
-            3 | 12 => self.day() == 31,
-            6 | 9 => self.day() == 30,
-            _ => false,
-        }
-    }
-    fn is_year_end(&self) -> bool {
-        self.month() == 12 && self.day() == 31
-    }
-}
-
-impl PeriodEnd for NaiveDate {}
-
-/// The days a param arm covers.
-#[derive(Clone, Debug, PartialEq)]
-pub enum When {
-    /// `else`: every day.
-    Always,
-    /// `from … to …` or `in …`: the days in any of these windows.
-    Windows(Vec<Window>),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Window {
-    /// From the first date up to, but not including, the second.
-    Dates(NaiveDate, Option<NaiveDate>),
-    /// These months every year, a bit each with January in bit 0.
-    Months(u16),
-}
-
-impl Window {
-    pub fn contains(self, t: NaiveDate) -> bool {
-        match self {
-            Window::Dates(from, to) => t >= from && to.is_none_or(|to| t < to),
-            Window::Months(months) => months & (1 << t.month0()) != 0,
-        }
-    }
-}
-
-impl When {
-    /// The first day it covers, if it covers days of particular years only.
-    pub fn start(&self) -> Option<NaiveDate> {
-        let When::Windows(windows) = self else {
-            return None;
-        };
-        windows
-            .iter()
-            .map(|w| match *w {
-                Window::Dates(from, _) => Some(from),
-                Window::Months(_) => None,
-            })
-            .collect::<Option<Vec<_>>>()?
-            .into_iter()
-            .min()
-    }
-
-    pub fn contains(&self, t: NaiveDate) -> bool {
-        match self {
-            When::Always => true,
-            When::Windows(windows) => windows.iter().any(|w| w.contains(t)),
-        }
-    }
-
-    /// Whether `earlier` already cover every day this covers.
-    pub fn is_shadowed_by(&self, earlier: &[&When]) -> bool {
-        // Coverage only changes where a window starts or ends and at the start
-        // of a month, so those days stand for the rest. Before the first date
-        // a window starts or ends on, no `Dates` window has started; from the
-        // last one on, each has started or ended. So a year either side of
-        // them stands for every year beyond.
-        let edges: Vec<NaiveDate> = std::iter::once(self)
-            .chain(earlier.iter().copied())
-            .flat_map(When::edges)
-            .collect();
-        let any_year = NaiveDate::from_ymd_opt(2000, 1, 1).expect("a valid date");
-        let first = edges.iter().min().copied().unwrap_or(any_year);
-        let last = edges.iter().max().copied().unwrap_or(any_year);
-        let year = chrono::Months::new(12);
-        let start = month_start(first).checked_sub_months(year).unwrap_or(first);
-        let end = month_start(last)
-            .checked_add_months(year)
-            .unwrap_or(NaiveDate::MAX);
-        let mut days: Vec<NaiveDate> = std::iter::successors(Some(start), |t| {
-            t.checked_add_months(chrono::Months::new(1))
-        })
-        .take_while(|t| *t <= end)
-        .chain(edges)
-        .collect();
-        days.sort();
-        days.dedup();
-        days.into_iter()
-            .all(|t| !self.contains(t) || earlier.iter().any(|w| w.contains(t)))
-    }
-
-    /// The dates its `Dates` windows start and end on.
-    fn edges(&self) -> Vec<NaiveDate> {
-        let When::Windows(windows) = self else {
-            return Vec::new();
-        };
-        windows
-            .iter()
-            .flat_map(|w| match *w {
-                Window::Dates(from, to) => [Some(from), to],
-                Window::Months(_) => [None, None],
-            })
-            .flatten()
-            .collect()
-    }
-}
-
-fn month_start(t: NaiveDate) -> NaiveDate {
-    t.with_day(1).expect("every month has a first day")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,689 +897,254 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
 
-    mod dates {
-        use super::*;
-
-        #[test]
-        fn matches_single_date() {
-            let schedule = Schedule::Dates(vec![date(2025, 1, 1)]);
-            assert!(schedule.matches(date(2025, 1, 1)));
-            assert!(!schedule.matches(date(2025, 1, 2)));
-            assert!(!schedule.matches(date(2025, 1, 3)));
-        }
-
-        #[test]
-        fn matches_multiple_date() {
-            let schedule = Schedule::Dates(vec![date(2025, 1, 1), date(2025, 1, 3)]);
-            assert!(schedule.matches(date(2025, 1, 1)));
-            assert!(!schedule.matches(date(2025, 1, 2)));
-            assert!(schedule.matches(date(2025, 1, 3)));
-        }
-
-        #[test]
-        fn doesnt_match_empty_dates() {
-            let schedule = Schedule::Dates(vec![]);
-            assert!(!schedule.matches(date(2025, 1, 1)));
-            assert!(!schedule.matches(date(2025, 1, 2)));
-            assert!(!schedule.matches(date(2025, 1, 3)));
-        }
+    /// The set of days `src` describes.
+    fn set(src: &str) -> DaySet {
+        try_set(src).unwrap_or_else(|e| panic!("{src}: {}", e.message))
     }
 
-    mod periodic {
+    fn try_set(src: &str) -> Result<DaySet, Diagnostic> {
+        let expr = crate::parser::parse_expression(src).expect("parses");
+        lower(&expr, &mut |path, span| {
+            Err(Diagnostic::new(span, format!("no names in tests: {path}")))
+        })
+    }
+
+    /// The days from `from` to `to`, inclusive, that `src` covers.
+    fn days(src: &str, from: NaiveDate, to: NaiveDate) -> Vec<NaiveDate> {
+        let set = set(src);
+        from.iter_days()
+            .take_while(|d| *d <= to)
+            .filter(|d| set.contains(*d))
+            .collect()
+    }
+
+    mod sets {
         use super::*;
 
-        mod simple {
-            use super::*;
-
-            fn schedule(period: Period) -> Schedule {
-                Schedule::Periodic(Periodic {
-                    nth: None,
-                    period,
-                    within: When::Always,
-                    start: None,
-                })
-            }
-
-            mod day {
-                use super::*;
-
-                #[test]
-                fn matches_every_day() {
-                    let sched = schedule(Period::Day);
-                    assert!(sched.matches(date(2025, 1, 1)));
-                    assert!(sched.matches(date(2025, 1, 2)));
-                    assert!(sched.matches(date(2025, 1, 3)));
-                }
-            }
-
-            mod week {
-                use super::*;
-
-                #[test]
-                fn matches_without_on() {
-                    let sched = schedule(Period::Week { on: vec![] });
-                    assert!(!sched.matches(date(2024, 12, 30))); // monday
-                    assert!(!sched.matches(date(2025, 1, 1))); // wednesday
-                    assert!(sched.matches(date(2025, 1, 5))); // sunday
-                    assert!(sched.matches(date(2025, 1, 12))); // sunday
-                }
-
-                #[test]
-                fn matches_with_single_on() {
-                    let sched = schedule(Period::Week {
-                        on: vec![Dow::Wednesday],
-                    });
-                    assert!(!sched.matches(date(2024, 12, 30))); // monday
-                    assert!(sched.matches(date(2025, 1, 1))); // wednesday
-                    assert!(!sched.matches(date(2025, 1, 6))); // monday
-                    assert!(sched.matches(date(2025, 1, 8))); // wednesday
-                }
-
-                #[test]
-                fn matches_with_multi_on() {
-                    let sched = schedule(Period::Week {
-                        on: vec![Dow::Monday, Dow::Wednesday],
-                    });
-                    assert!(sched.matches(date(2024, 12, 30))); // monday
-                    assert!(!sched.matches(date(2024, 12, 31))); // monday
-                    assert!(sched.matches(date(2025, 1, 1))); // wednesday
-                    assert!(!sched.matches(date(2025, 1, 2))); // thursday
-                }
-
-                #[test]
-                fn matches_with_weekday() {
-                    let sched = schedule(Period::Week {
-                        on: vec![Dow::Weekday],
-                    });
-                    assert!(sched.matches(date(2024, 12, 31))); // monday
-                    assert!(sched.matches(date(2025, 1, 1))); // wednesday
-                    assert!(sched.matches(date(2025, 1, 2))); // thursday
-                    assert!(!sched.matches(date(2025, 1, 4))); // saturday
-                    assert!(!sched.matches(date(2025, 1, 5))); // sunday
-                }
-
-                #[test]
-                fn matches_with_weekend() {
-                    let sched = schedule(Period::Week {
-                        on: vec![Dow::Weekend],
-                    });
-                    assert!(!sched.matches(date(2024, 12, 31))); // monday
-                    assert!(!sched.matches(date(2025, 1, 1))); // wednesday
-                    assert!(!sched.matches(date(2025, 1, 2))); // thursday
-                    assert!(sched.matches(date(2025, 1, 4))); // saturday
-                    assert!(sched.matches(date(2025, 1, 5))); // sunday
-                }
-            }
-
-            mod weekday {
-                use super::*;
-
-                #[test]
-                fn matches() {
-                    let sched = schedule(Period::Weekday(Dow::Wednesday));
-                    assert!(!sched.matches(date(2024, 12, 30))); // monday
-                    assert!(sched.matches(date(2025, 1, 1))); // wednesday
-                    assert!(!sched.matches(date(2025, 1, 6))); // monday
-                    assert!(sched.matches(date(2025, 1, 8))); // wednesday
-                }
-            }
-
-            mod named_month {
-                use super::*;
-
-                #[test]
-                fn day_past_end_of_month_clamps() {
-                    let sched = schedule(Period::NamedMonth {
-                        month: Month::February,
-                        day: Some(Ordinal::Nth(Nth(29))),
-                    });
-                    assert!(sched.matches(date(2024, 2, 29)));
-                    assert!(!sched.matches(date(2024, 2, 28)));
-                    assert!(sched.matches(date(2025, 2, 28)));
-                }
-
-                #[test]
-                fn matches_without_ordinal() {
-                    let sched = schedule(Period::NamedMonth {
-                        month: Month::February,
-                        day: None,
-                    });
-
-                    assert!(!sched.matches(date(2024, 2, 28)));
-                    assert!(sched.matches(date(2024, 2, 29)));
-                    assert!(sched.matches(date(2025, 2, 28)));
-                    assert!(!sched.matches(date(2025, 3, 31)));
-                }
-
-                #[test]
-                fn matches_with_first_ordinal() {
-                    let sched = schedule(Period::NamedMonth {
-                        month: Month::February,
-                        day: Some(Ordinal::First),
-                    });
-                    assert!(sched.matches(date(2024, 2, 1)));
-                    assert!(sched.matches(date(2025, 2, 1)));
-                    assert!(!sched.matches(date(2025, 3, 1)));
-                }
-
-                #[test]
-                fn matches_with_nth_ordinal() {
-                    let sched = schedule(Period::NamedMonth {
-                        month: Month::February,
-                        day: Some(Ordinal::Nth(Nth(2))),
-                    });
-                    assert!(sched.matches(date(2024, 2, 2)));
-                    assert!(sched.matches(date(2025, 2, 2)));
-                    assert!(!sched.matches(date(2025, 3, 2)));
-                }
-
-                #[test]
-                fn matches_with_last_ordinal() {
-                    let sched = schedule(Period::NamedMonth {
-                        month: Month::February,
-                        day: Some(Ordinal::Last),
-                    });
-                    assert!(!sched.matches(date(2024, 2, 28)));
-                    assert!(sched.matches(date(2024, 2, 29)));
-                    assert!(sched.matches(date(2025, 2, 28)));
-                    assert!(!sched.matches(date(2025, 3, 31)));
-                }
-            }
-
-            mod month {
-                use super::*;
-
-                #[test]
-                fn matches_without_on() {
-                    let sched = schedule(Period::Month { on: vec![] });
-                    assert!(sched.matches(date(2024, 1, 31)));
-                    assert!(sched.matches(date(2024, 2, 29)));
-                    assert!(sched.matches(date(2024, 3, 31)));
-                    assert!(!sched.matches(date(2024, 3, 1)));
-                }
-
-                #[test]
-                fn matches_with_day_on() {
-                    let sched = schedule(Period::Month {
-                        on: vec![MonthOccurrence::Day(Ordinal::Nth(Nth(30)))],
-                    });
-                    assert!(!sched.matches(date(2024, 1, 29)));
-                    assert!(sched.matches(date(2024, 1, 30)));
-                    assert!(!sched.matches(date(2024, 1, 31)));
-                    assert!(sched.matches(date(2024, 2, 29)));
-                    assert!(sched.matches(date(2024, 3, 30)));
-                }
-
-                #[test]
-                fn matches_with_first_weekday_on() {
-                    let sched = schedule(Period::Month {
-                        on: vec![MonthOccurrence::Weekday(Ordinal::First, Dow::Monday)],
-                    });
-                    assert!(sched.matches(date(2024, 1, 1))); // first monday
-                    assert!(!sched.matches(date(2024, 1, 2))); // first tuesday
-                    assert!(!sched.matches(date(2024, 1, 8))); // second monday
-                }
-
-                #[test]
-                fn matches_with_nth_weekday_on() {
-                    let sched = schedule(Period::Month {
-                        on: vec![MonthOccurrence::Weekday(Ordinal::Nth(Nth(2)), Dow::Monday)],
-                    });
-                    assert!(!sched.matches(date(2024, 1, 1))); // first monday
-                    assert!(!sched.matches(date(2024, 1, 2))); // first tuesday
-                    assert!(sched.matches(date(2024, 1, 8))); // second monday
-                }
-
-                #[test]
-                fn matches_with_last_weekday_on() {
-                    let sched = schedule(Period::Month {
-                        on: vec![MonthOccurrence::Weekday(Ordinal::Last, Dow::Monday)],
-                    });
-                    assert!(!sched.matches(date(2024, 1, 22))); // second-to-last monday
-                    assert!(sched.matches(date(2024, 1, 29))); // last monday
-                }
-
-                #[test]
-                fn business_day_ordinals() {
-                    // January 2025 starts on a Wednesday and ends on a Friday.
-                    let on = |ordinal| {
-                        schedule(Period::Month {
-                            on: vec![MonthOccurrence::Weekday(ordinal, Dow::Weekday)],
-                        })
-                    };
-                    let first = on(Ordinal::First);
-                    assert!(first.matches(date(2025, 1, 1)));
-                    assert!(!first.matches(date(2025, 1, 2)));
-                    let third = on(Ordinal::Nth(Nth(3)));
-                    assert!(!third.matches(date(2025, 1, 2)));
-                    assert!(third.matches(date(2025, 1, 3)));
-                    assert!(!third.matches(date(2025, 1, 6)));
-                    let last = on(Ordinal::Last);
-                    assert!(!last.matches(date(2025, 1, 30)));
-                    assert!(last.matches(date(2025, 1, 31)));
-                    // March 2025 ends on a Monday.
-                    assert!(!last.matches(date(2025, 3, 28)));
-                    assert!(last.matches(date(2025, 3, 31)));
-                }
-
-                #[test]
-                fn weekend_day_ordinals() {
-                    // February 2025 starts on a Saturday and ends on a Friday.
-                    let on = |ordinal| {
-                        schedule(Period::Month {
-                            on: vec![MonthOccurrence::Weekday(ordinal, Dow::Weekend)],
-                        })
-                    };
-                    assert!(on(Ordinal::First).matches(date(2025, 2, 1)));
-                    assert!(!on(Ordinal::First).matches(date(2025, 2, 2)));
-                    assert!(on(Ordinal::Nth(Nth(2))).matches(date(2025, 2, 2)));
-                    assert!(on(Ordinal::Last).matches(date(2025, 2, 23)));
-                    assert!(!on(Ordinal::Last).matches(date(2025, 2, 22)));
-                }
-
-                #[test]
-                fn last_weekday_fires_once_when_month_ends_on_it() {
-                    // March 2025 has Mondays on the 24th and 31st.
-                    let sched = schedule(Period::Month {
-                        on: vec![MonthOccurrence::Weekday(Ordinal::Last, Dow::Monday)],
-                    });
-                    assert!(!sched.matches(date(2025, 3, 24)));
-                    assert!(sched.matches(date(2025, 3, 31)));
-                }
-            }
-
-            mod quarter {
-                use super::*;
-
-                #[test]
-                fn matches() {
-                    let sched = schedule(Period::Quarter);
-                    assert!(!sched.matches(date(2024, 1, 31)));
-                    assert!(!sched.matches(date(2024, 2, 29)));
-                    assert!(sched.matches(date(2024, 3, 31)));
-                    assert!(!sched.matches(date(2024, 4, 30)));
-                    assert!(!sched.matches(date(2024, 5, 31)));
-                    assert!(sched.matches(date(2024, 6, 30)));
-                    assert!(!sched.matches(date(2024, 7, 31)));
-                    assert!(!sched.matches(date(2024, 8, 31)));
-                    assert!(sched.matches(date(2024, 9, 30)));
-                    assert!(!sched.matches(date(2024, 10, 31)));
-                    assert!(!sched.matches(date(2024, 11, 30)));
-                    assert!(sched.matches(date(2024, 12, 31)));
-                }
-            }
-
-            mod year {
-                use super::*;
-
-                #[test]
-                fn matches_without_on() {
-                    let sched = schedule(Period::Year { on: Vec::new() });
-                    assert!(!sched.matches(date(2024, 1, 31)));
-                    assert!(!sched.matches(date(2024, 2, 29)));
-                    assert!(!sched.matches(date(2024, 3, 31)));
-                    assert!(!sched.matches(date(2024, 4, 30)));
-                    assert!(!sched.matches(date(2024, 5, 31)));
-                    assert!(!sched.matches(date(2024, 6, 30)));
-                    assert!(!sched.matches(date(2024, 7, 31)));
-                    assert!(!sched.matches(date(2024, 8, 31)));
-                    assert!(!sched.matches(date(2024, 9, 30)));
-                    assert!(!sched.matches(date(2024, 10, 31)));
-                    assert!(!sched.matches(date(2024, 11, 30)));
-                    assert!(sched.matches(date(2024, 12, 31)));
-                }
-
-                #[test]
-                fn matches_with_single_on() {
-                    let sched = schedule(Period::Year {
-                        on: vec![(Month::May, Ordinal::Last)],
-                    });
-                    assert!(!sched.matches(date(2024, 1, 31)));
-                    assert!(!sched.matches(date(2024, 2, 29)));
-                    assert!(!sched.matches(date(2024, 3, 31)));
-                    assert!(!sched.matches(date(2024, 4, 30)));
-                    assert!(sched.matches(date(2024, 5, 31)));
-                    assert!(!sched.matches(date(2024, 6, 30)));
-                    assert!(!sched.matches(date(2024, 7, 31)));
-                    assert!(!sched.matches(date(2024, 8, 31)));
-                    assert!(!sched.matches(date(2024, 9, 30)));
-                    assert!(!sched.matches(date(2024, 10, 31)));
-                    assert!(!sched.matches(date(2024, 11, 30)));
-                    assert!(!sched.matches(date(2024, 12, 31)));
-                }
-
-                #[test]
-                fn matches_with_multiple_on() {
-                    let sched = schedule(Period::Year {
-                        on: vec![
-                            (Month::February, Ordinal::Last),
-                            (Month::May, Ordinal::Last),
-                        ],
-                    });
-                    assert!(!sched.matches(date(2024, 1, 31)));
-                    assert!(sched.matches(date(2024, 2, 29)));
-                    assert!(!sched.matches(date(2024, 3, 31)));
-                    assert!(!sched.matches(date(2024, 4, 30)));
-                    assert!(sched.matches(date(2024, 5, 31)));
-                    assert!(!sched.matches(date(2024, 6, 30)));
-                    assert!(!sched.matches(date(2024, 7, 31)));
-                    assert!(!sched.matches(date(2024, 8, 31)));
-                    assert!(!sched.matches(date(2024, 9, 30)));
-                    assert!(!sched.matches(date(2024, 10, 31)));
-                    assert!(!sched.matches(date(2024, 11, 30)));
-                    assert!(!sched.matches(date(2024, 12, 31)));
-                }
-            }
+        #[test]
+        fn weekdays() {
+            let wed = set("wed");
+            assert!(!wed.contains(date(2024, 12, 30))); // monday
+            assert!(wed.contains(date(2025, 1, 1))); // wednesday
+            let both = set("mon | wed");
+            assert!(both.contains(date(2024, 12, 30)));
+            assert!(!both.contains(date(2024, 12, 31)));
+            assert!(both.contains(date(2025, 1, 1)));
+            assert!(set("weekday").contains(date(2025, 1, 2))); // thursday
+            assert!(!set("weekday").contains(date(2025, 1, 4))); // saturday
+            assert!(set("weekend").contains(date(2025, 1, 5))); // sunday
         }
 
-        mod nth {
-            use super::*;
+        #[test]
+        fn days_of_the_month() {
+            let last = set("last");
+            assert!(last.contains(date(2024, 1, 31)));
+            assert!(last.contains(date(2024, 2, 29)));
+            assert!(!last.contains(date(2024, 3, 1)));
+            // Days past the end of a short month fall on its last day.
+            let thirtieth = set("30th");
+            assert!(thirtieth.contains(date(2024, 1, 30)));
+            assert!(!thirtieth.contains(date(2024, 1, 31)));
+            assert!(thirtieth.contains(date(2024, 2, 29)));
+            let semi = set("15th | last");
+            assert!(semi.contains(date(2026, 3, 15)));
+            assert!(semi.contains(date(2026, 3, 31)));
+            assert!(!semi.contains(date(2026, 3, 16)));
+        }
 
-            fn schedule(nth: u8, period: Period, start: NaiveDate) -> Schedule {
-                Schedule::Periodic(Periodic {
-                    nth: Some(Nth(nth)),
-                    period,
-                    within: When::Always,
-                    start: Some(start),
-                })
-            }
+        #[test]
+        fn weekdays_of_the_month() {
+            let first = set("1st mon");
+            assert!(first.contains(date(2024, 1, 1)));
+            assert!(!first.contains(date(2024, 1, 8)));
+            assert!(set("2nd mon").contains(date(2024, 1, 8)));
+            let last = set("last mon");
+            assert!(!last.contains(date(2024, 1, 22)));
+            assert!(last.contains(date(2024, 1, 29)));
+            // Ordinals count matching days, so `weekday` counts business days.
+            let third = set("3rd weekday");
+            assert!(third.contains(date(2025, 1, 3)));
+            assert!(!third.contains(date(2025, 1, 6)));
+            let last = set("last weekday");
+            assert!(last.contains(date(2025, 1, 31)));
+            assert!(!last.contains(date(2025, 3, 28)));
+            assert!(last.contains(date(2025, 3, 31)));
+        }
 
-            mod day {
-                use super::*;
+        #[test]
+        fn days_of_the_year() {
+            let leap = set("feb 29");
+            assert!(leap.contains(date(2024, 2, 29)));
+            assert!(!leap.contains(date(2024, 2, 28)));
+            assert!(leap.contains(date(2025, 2, 28)));
+            let end = set("feb last");
+            assert!(!end.contains(date(2024, 2, 28)));
+            assert!(end.contains(date(2025, 2, 28)));
+            assert!(!end.contains(date(2025, 3, 31)));
+            assert!(set("jan 1").contains(date(2030, 1, 1)));
+            assert!(set("jan 1st").contains(date(2030, 1, 1)));
+        }
 
-                #[test]
-                fn every_2_days() {
-                    let sched = schedule(2, Period::Day, date(2025, 1, 1));
-                    assert!(sched.matches(date(2025, 1, 1))); // day 0
-                    assert!(!sched.matches(date(2025, 1, 2))); // day 1
-                    assert!(sched.matches(date(2025, 1, 3))); // day 2
-                    assert!(!sched.matches(date(2025, 1, 4))); // day 3
-                    assert!(sched.matches(date(2025, 1, 5))); // day 4
-                }
+        #[test]
+        fn months_quarters_and_years() {
+            assert!(set("jul").contains(date(2031, 7, 9)));
+            assert!(!set("jul").contains(date(2031, 8, 9)));
+            assert!(set("q2").contains(date(2026, 6, 30)));
+            assert!(!set("q2").contains(date(2026, 7, 1)));
+            assert!(set("2026").contains(date(2026, 12, 31)));
+            assert!(!set("2026").contains(date(2027, 1, 1)));
+            assert!(set("jul 2026").contains(date(2026, 7, 31)));
+            assert!(!set("jul 2026").contains(date(2027, 7, 1)));
+            assert!(set("q3 2027").contains(date(2027, 9, 30)));
+            assert!(set("2026-04-15").contains(date(2026, 4, 15)));
+            assert!(!set("2026-04-15").contains(date(2026, 4, 16)));
+        }
 
-                #[test]
-                fn every_3_days() {
-                    let sched = schedule(3, Period::Day, date(2025, 1, 1));
-                    assert!(sched.matches(date(2025, 1, 1))); // day 0
-                    assert!(!sched.matches(date(2025, 1, 2))); // day 1
-                    assert!(!sched.matches(date(2025, 1, 3))); // day 2
-                    assert!(sched.matches(date(2025, 1, 4))); // day 3
-                    assert!(!sched.matches(date(2025, 1, 5))); // day 4
-                    assert!(!sched.matches(date(2025, 1, 6))); // day 5
-                    assert!(sched.matches(date(2025, 1, 7))); // day 6
-                }
+        #[test]
+        fn ranges() {
+            // `..` leaves out its end and `..=` includes it.
+            let to = set("2026-01-01..2026-04-01");
+            assert!(to.contains(date(2026, 3, 31)));
+            assert!(!to.contains(date(2026, 4, 1)));
+            assert!(set("2026..2028").contains(date(2027, 12, 31)));
+            assert!(!set("2026..2028").contains(date(2028, 1, 1)));
+            assert!(set("2026..=2028").contains(date(2028, 12, 31)));
+            assert!(set("jul 2027..").contains(date(2090, 1, 1)));
+            assert!(!set("jul 2027..").contains(date(2027, 6, 30)));
+            // Months wrap past December.
+            let school = set("sep..=jun");
+            assert!(school.contains(date(2026, 1, 15)));
+            assert!(!school.contains(date(2026, 7, 15)));
+            assert!(!set("sep..jun").contains(date(2026, 6, 15)));
+            assert!(set("q1..=q2").contains(date(2026, 6, 15)));
+        }
 
-                #[test]
-                fn start_is_respected() {
-                    let sched = schedule(2, Period::Day, date(2025, 1, 3));
-                    assert!(!sched.matches(date(2025, 1, 1))); // before start
-                    assert!(!sched.matches(date(2025, 1, 2))); // before start
-                    assert!(sched.matches(date(2025, 1, 3))); // day 0
-                    assert!(!sched.matches(date(2025, 1, 4))); // day 1
-                    assert!(sched.matches(date(2025, 1, 5))); // day 2
-                }
-            }
+        #[test]
+        fn range_errors() {
+            let error = |src: &str| try_set(src).unwrap_err().message;
+            assert_eq!(
+                error("2026..jan"),
+                "both ends of a range need a year, or neither"
+            );
+            assert_eq!(error("2027-01-01..2026"), "this ends before it starts");
+            assert_eq!(
+                error("sep.."),
+                "a range of months needs an end, like `sep..=dec`"
+            );
+            assert!(error("26..").contains("year written in full"));
+            assert!(error("fri..").contains("a range runs between"));
+        }
 
-            mod weekday {
-                use super::*;
+        #[test]
+        fn operators() {
+            let from = date(2026, 1, 1);
+            let to = date(2026, 1, 31);
+            assert_eq!(
+                days("(mon | fri) & 2026-01-10..", from, to),
+                [12, 16, 19, 23, 26, 30].map(|d| date(2026, 1, d))
+            );
+            assert_eq!(
+                days("weekday - fri & 2026-01-26..", from, to),
+                [26, 27, 28, 29].map(|d| date(2026, 1, d))
+            );
+            assert_eq!(
+                days("last - dec 31", date(2026, 11, 1), date(2026, 12, 31)),
+                [date(2026, 11, 30)]
+            );
+        }
 
-                #[test]
-                fn every_2_mondays() {
-                    // start = Mon 2025-01-06
-                    let sched = schedule(2, Period::Weekday(Dow::Monday), date(2025, 1, 6));
-                    assert!(sched.matches(date(2025, 1, 6))); // occurrence 0
-                    assert!(!sched.matches(date(2025, 1, 7))); // Tuesday — wrong dow
-                    assert!(!sched.matches(date(2025, 1, 13))); // occurrence 1, skip
-                    assert!(sched.matches(date(2025, 1, 20))); // occurrence 2
-                    assert!(!sched.matches(date(2025, 1, 27))); // occurrence 3, skip
-                    assert!(sched.matches(date(2025, 2, 3))); // occurrence 4
-                }
+        #[test]
+        fn every_nth_counts_from_the_start_of_its_range() {
+            let from = date(2026, 1, 1);
+            let to = date(2026, 1, 31);
+            assert_eq!(
+                days("2026-01-02.. & fri / 2", from, to),
+                [2, 16, 30].map(|d| date(2026, 1, d))
+            );
+            // The first Friday on or after a Thursday start.
+            assert_eq!(
+                days("2026-01-08.. & fri / 2", from, to),
+                [9, 23].map(|d| date(2026, 1, d))
+            );
+            assert_eq!(
+                days("2026-01-01.. & * / 3", from, date(2026, 1, 10)),
+                [1, 4, 7, 10].map(|d| date(2026, 1, d))
+            );
+            assert_eq!(
+                days("2026-01-01.. & last / 3", from, date(2026, 12, 31)),
+                [
+                    date(2026, 1, 31),
+                    date(2026, 4, 30),
+                    date(2026, 7, 31),
+                    date(2026, 10, 31)
+                ]
+            );
+            // Counting carries on through the days the rest of the set leaves out.
+            assert_eq!(
+                days("2026-01-01.. & * / 2 & (jan 1 | jan 4 | jan 5)", from, to),
+                [date(2026, 1, 1), date(2026, 1, 5)]
+            );
+            // Before its start, a set still counts back from it.
+            let fridays = set("2026-01-01.. & fri / 2");
+            let DaySet::Inter(parts) = &fridays else {
+                panic!("an intersection")
+            };
+            assert!(parts[1].contains(date(2025, 12, 19)));
+            assert!(!parts[1].contains(date(2025, 12, 26)));
+        }
 
-                #[test]
-                fn every_3_wednesdays() {
-                    // start = Wed 2025-01-01
-                    let sched = schedule(3, Period::Weekday(Dow::Wednesday), date(2025, 1, 1));
-                    assert!(sched.matches(date(2025, 1, 1))); // occurrence 0
-                    assert!(!sched.matches(date(2025, 1, 8))); // occurrence 1, skip
-                    assert!(!sched.matches(date(2025, 1, 15))); // occurrence 2, skip
-                    assert!(sched.matches(date(2025, 1, 22))); // occurrence 3
-                }
+        #[test]
+        fn every_nth_needs_a_start() {
+            let error = try_set("fri / 2").unwrap_err();
+            assert!(
+                error.message.contains("no date to count from"),
+                "{}",
+                error.message
+            );
+            assert!(try_set("2026.. & fri / 0").is_err());
+        }
 
-                #[test]
-                fn start_not_on_target_dow() {
-                    // start = Tue 2025-01-07, target = Monday, every 2
-                    let sched = schedule(2, Period::Weekday(Dow::Monday), date(2025, 1, 7));
-                    assert!(!sched.matches(date(2025, 1, 6))); // before start
-                    assert!(sched.matches(date(2025, 1, 13))); // first Monday at/after start — occurrence 0
-                    assert!(!sched.matches(date(2025, 1, 20))); // occurrence 1, skip
-                    assert!(sched.matches(date(2025, 1, 27))); // occurrence 2
-                }
-            }
+        #[test]
+        fn first_day() {
+            assert_eq!(set("jul 2026..").first_day(), Some(date(2026, 7, 1)));
+            assert_eq!(set("2026").first_day(), Some(date(2026, 1, 1)));
+            assert_eq!(set("jul & 2026..").first_day(), Some(date(2026, 7, 1)));
+            assert_eq!(set("2026 | 2028").first_day(), Some(date(2026, 1, 1)));
+            assert_eq!(set("jul").first_day(), None);
+            assert_eq!(set("jul | 2028").first_day(), None);
+        }
 
-            mod month {
-                use super::*;
-
-                #[test]
-                fn every_2_months_no_on() {
-                    // no on → fires on month end
-                    let sched = schedule(2, Period::Month { on: vec![] }, date(2025, 1, 1));
-                    assert!(sched.matches(date(2025, 1, 31))); // month 0 end
-                    assert!(!sched.matches(date(2025, 2, 28))); // month 1, skip
-                    assert!(sched.matches(date(2025, 3, 31))); // month 2
-                    assert!(!sched.matches(date(2025, 4, 30))); // month 3, skip
-                    assert!(sched.matches(date(2025, 5, 31))); // month 4
-                }
-
-                #[test]
-                fn every_3_months_on_15th() {
-                    let sched = schedule(
-                        3,
-                        Period::Month {
-                            on: vec![MonthOccurrence::Day(Ordinal::Nth(Nth(15)))],
-                        },
-                        date(2025, 1, 1),
-                    );
-                    assert!(sched.matches(date(2025, 1, 15))); // month 0
-                    assert!(!sched.matches(date(2025, 2, 15))); // month 1, skip
-                    assert!(!sched.matches(date(2025, 3, 15))); // month 2, skip
-                    assert!(sched.matches(date(2025, 4, 15))); // month 3
-                    assert!(!sched.matches(date(2025, 1, 16))); // month 0, wrong day
-                }
-
-                #[test]
-                fn every_2_months_on_first_monday() {
-                    let sched = schedule(
-                        2,
-                        Period::Month {
-                            on: vec![MonthOccurrence::Weekday(Ordinal::First, Dow::Monday)],
-                        },
-                        date(2025, 1, 1),
-                    );
-                    assert!(sched.matches(date(2025, 1, 6))); // month 0 — first Monday of Jan
-                    assert!(!sched.matches(date(2025, 2, 3))); // month 1, skip
-                    assert!(sched.matches(date(2025, 3, 3))); // month 2 — first Monday of Mar
-                    assert!(!sched.matches(date(2025, 4, 7))); // month 3, skip
-                }
-            }
-
-            mod quarter {
-                use super::*;
-
-                #[test]
-                fn every_2_quarters() {
-                    // start = 2025-01-01 (Q1)
-                    let sched = schedule(2, Period::Quarter, date(2025, 1, 1));
-                    assert!(sched.matches(date(2025, 3, 31))); // quarter 0 (Q1)
-                    assert!(!sched.matches(date(2025, 6, 30))); // quarter 1, skip
-                    assert!(sched.matches(date(2025, 9, 30))); // quarter 2 (Q3)
-                    assert!(!sched.matches(date(2025, 12, 31))); // quarter 3, skip
-                    assert!(sched.matches(date(2026, 3, 31))); // quarter 4
-                }
-
-                #[test]
-                fn every_3_quarters() {
-                    let sched = schedule(3, Period::Quarter, date(2025, 1, 1));
-                    assert!(sched.matches(date(2025, 3, 31))); // quarter 0
-                    assert!(!sched.matches(date(2025, 6, 30))); // quarter 1, skip
-                    assert!(!sched.matches(date(2025, 9, 30))); // quarter 2, skip
-                    assert!(sched.matches(date(2025, 12, 31))); // quarter 3
-                    assert!(!sched.matches(date(2026, 3, 31))); // quarter 4, skip
-                    assert!(sched.matches(date(2026, 9, 30))); // quarter 6
-                }
-
-                #[test]
-                fn start_in_q2() {
-                    // start = 2025-04-01 (Q2), every 2
-                    let sched = schedule(2, Period::Quarter, date(2025, 4, 1));
-                    assert!(!sched.matches(date(2025, 3, 31))); // before start
-                    assert!(sched.matches(date(2025, 6, 30))); // quarter 0 (Q2)
-                    assert!(!sched.matches(date(2025, 9, 30))); // quarter 1, skip
-                    assert!(sched.matches(date(2025, 12, 31))); // quarter 2 (Q4)
-                    assert!(!sched.matches(date(2026, 3, 31))); // quarter 3, skip
-                }
-            }
-
-            mod year {
-                use super::*;
-
-                #[test]
-                fn every_2_years_no_on() {
-                    // no on → year end (Dec 31)
-                    let sched = schedule(2, Period::Year { on: Vec::new() }, date(2024, 1, 1));
-                    assert!(sched.matches(date(2024, 12, 31))); // year 0
-                    assert!(!sched.matches(date(2025, 12, 31))); // year 1, skip
-                    assert!(sched.matches(date(2026, 12, 31))); // year 2
-                    assert!(!sched.matches(date(2027, 12, 31))); // year 3, skip
-                }
-
-                #[test]
-                fn every_3_years_with_on() {
-                    let sched = schedule(
-                        3,
-                        Period::Year {
-                            on: vec![(Month::May, Ordinal::Last)],
-                        },
-                        date(2024, 1, 1),
-                    );
-                    assert!(sched.matches(date(2024, 5, 31))); // year 0
-                    assert!(!sched.matches(date(2025, 5, 31))); // year 1, skip
-                    assert!(!sched.matches(date(2026, 5, 31))); // year 2, skip
-                    assert!(sched.matches(date(2027, 5, 31))); // year 3
-                    assert!(!sched.matches(date(2024, 6, 30))); // year 0, wrong month
-                }
-            }
-
-            mod named_month {
-                use super::*;
-
-                #[test]
-                fn every_2_years_in_february() {
-                    // start = 2024-02-29; no day → month end
-                    let sched = schedule(
-                        2,
-                        Period::NamedMonth {
-                            month: Month::February,
-                            day: None,
-                        },
-                        date(2024, 2, 29),
-                    );
-                    assert!(sched.matches(date(2024, 2, 29))); // year 0 — leap year end
-                    assert!(!sched.matches(date(2025, 2, 28))); // year 1, skip
-                    assert!(sched.matches(date(2026, 2, 28))); // year 2
-                    assert!(!sched.matches(date(2027, 2, 28))); // year 3, skip
-                    assert!(sched.matches(date(2028, 2, 29))); // year 4
-                }
-
-                #[test]
-                fn every_3_years_in_march_on_15th() {
-                    let sched = schedule(
-                        3,
-                        Period::NamedMonth {
-                            month: Month::March,
-                            day: Some(Ordinal::Nth(Nth(15))),
-                        },
-                        date(2024, 3, 15),
-                    );
-                    assert!(sched.matches(date(2024, 3, 15))); // year 0
-                    assert!(!sched.matches(date(2025, 3, 15))); // year 1, skip
-                    assert!(!sched.matches(date(2026, 3, 15))); // year 2, skip
-                    assert!(sched.matches(date(2027, 3, 15))); // year 3
-                    assert!(!sched.matches(date(2024, 4, 15))); // right day, wrong month
-                }
-            }
-
-            mod week {
-                use super::*;
-
-                // start = Mon 2025-01-06; every 2 weeks (no explicit on → defaults to Sunday)
-                #[test]
-                fn every_2_weeks_default_sunday() {
-                    let sched = schedule(2, Period::Week { on: vec![] }, date(2025, 1, 6));
-                    assert!(!sched.matches(date(2025, 1, 6))); // week 0 — Mon
-                    assert!(sched.matches(date(2025, 1, 12))); // week 0 — Sun
-                    assert!(!sched.matches(date(2025, 1, 19))); // week 1 — Sun, skip
-                    assert!(sched.matches(date(2025, 1, 26))); // week 2 — Sun
-                    assert!(!sched.matches(date(2025, 2, 2))); // week 3 — Sun, skip
-                    assert!(sched.matches(date(2025, 2, 9))); // week 4 — Sun
-                }
-
-                #[test]
-                fn every_2_weeks_on_wednesday() {
-                    // start = Mon 2025-01-06; on = Wednesday
-                    let sched = schedule(
-                        2,
-                        Period::Week {
-                            on: vec![Dow::Wednesday],
-                        },
-                        date(2025, 1, 6),
-                    );
-                    assert!(!sched.matches(date(2025, 1, 6))); // week 0 — Mon, wrong dow
-                    assert!(sched.matches(date(2025, 1, 8))); // week 0 — Wed
-                    assert!(!sched.matches(date(2025, 1, 15))); // week 1 — Wed, skip
-                    assert!(sched.matches(date(2025, 1, 22))); // week 2 — Wed
-                    assert!(!sched.matches(date(2025, 1, 29))); // week 3 — Wed, skip
-                }
-
-                #[test]
-                fn counts_calendar_weeks_from_a_midweek_start() {
-                    // start = Wed 2025-01-08; Mon 13th is in the next calendar week.
-                    let sched = schedule(
-                        2,
-                        Period::Week {
-                            on: vec![Dow::Monday, Dow::Friday],
-                        },
-                        date(2025, 1, 8),
-                    );
-                    assert!(sched.matches(date(2025, 1, 10))); // week 0 — Fri
-                    assert!(!sched.matches(date(2025, 1, 13))); // week 1 — Mon
-                    assert!(!sched.matches(date(2025, 1, 17))); // week 1 — Fri
-                    assert!(sched.matches(date(2025, 1, 20))); // week 2 — Mon
-                    assert!(sched.matches(date(2025, 1, 24))); // week 2 — Fri
-                }
-
-                #[test]
-                fn every_3_weeks() {
-                    let sched = schedule(3, Period::Week { on: vec![] }, date(2025, 1, 6));
-                    assert!(sched.matches(date(2025, 1, 12))); // week 0
-                    assert!(!sched.matches(date(2025, 1, 19))); // week 1
-                    assert!(!sched.matches(date(2025, 1, 26))); // week 2
-                    assert!(sched.matches(date(2025, 2, 2))); // week 3
-                }
-            }
+        #[test]
+        fn shadowed_when_the_sets_above_cover_every_day() {
+            let shadowed = |src: &str, above: &[&str]| {
+                let above: Vec<DaySet> = above.iter().map(|s| set(s)).collect();
+                set(src).is_shadowed_by(&above.iter().collect::<Vec<_>>())
+            };
+            assert_eq!(shadowed("may", &["q2"]), Some(true));
+            assert_eq!(shadowed("q2", &["may"]), Some(false));
+            assert_eq!(shadowed("2025-06-01..", &["2025-01-01.."]), Some(true));
+            assert_eq!(shadowed("2024-06-01..", &["2025-01-01.."]), Some(false));
+            assert_eq!(shadowed("*", &["jan..=dec"]), Some(true));
+            assert_eq!(shadowed("*", &["q2"]), Some(false));
+            // May recurs before and after the range, so the range can't cover it.
+            assert_eq!(shadowed("may", &["2026..2028"]), Some(false));
+            assert_eq!(shadowed("may", &["2027.."]), Some(false));
+            // A range is covered by months together with other ranges.
+            assert_eq!(shadowed("q2 2027", &["may 2027", "jun 2027"]), Some(false));
+            assert_eq!(
+                shadowed("q2 2027", &["may 2027", "jun 2027", "apr"]),
+                Some(true)
+            );
+            // Days of the week can't be worked out this way.
+            assert_eq!(shadowed("fri", &["*"]), None);
         }
     }
 
     mod share {
         use super::*;
-        use crate::ast::Decl;
 
         fn schedule(src: &str) -> Schedule {
-            let src = format!("schedule s = {src}");
-            let tokens = crate::lexer::lex(&src, 0).unwrap();
-            match crate::parser::parse(tokens).unwrap().decls.remove(0).0 {
-                Decl::Schedule { schedule, .. } => schedule,
-                _ => unreachable!(),
-            }
+            Schedule::new(set(src))
         }
 
         /// The shares of the firings of `src` from `from` to `to`, inclusive.
@@ -1284,7 +1168,7 @@ mod tests {
         #[test]
         fn semi_monthly_splits_a_year_in_24() {
             let year = shares(
-                "every month on the 15th and last day",
+                "15th | last",
                 TimeUnit::Year,
                 date(2026, 1, 1),
                 date(2026, 12, 31),
@@ -1295,7 +1179,7 @@ mod tests {
 
         #[test]
         fn biweekly_years_have_26_or_27_paydays() {
-            let src = "every second friday from 2021-01-01";
+            let src = "2021-01-01.. & fri / 2";
             let to = date(2022, 12, 31);
             let paydays = shares(src, TimeUnit::Year, date(2021, 1, 1), to);
             assert_eq!(paydays.len(), 27 + 26);
@@ -1305,10 +1189,10 @@ mod tests {
         }
 
         #[test]
-        fn paydays_before_from_still_count() {
+        fn paydays_before_the_start_still_count() {
             // Jan 1 fits the pattern, so the year still has 27 paydays.
             let paydays = shares(
-                "every second friday from 2021-01-15",
+                "2021-01-15.. & fri / 2",
                 TimeUnit::Year,
                 date(2021, 1, 1),
                 date(2021, 12, 31),
@@ -1319,19 +1203,16 @@ mod tests {
 
         #[test]
         fn a_schedule_starting_midyear_gets_part_of_the_year() {
-            let months = shares(
-                "every month from 2026-07-01",
-                TimeUnit::Year,
-                date(2026, 1, 1),
-                date(2026, 12, 31),
-            );
-            assert_eq!(months.len(), 6);
-            assert_eq!(months[0], share(0, 7, 12));
+            for src in ["2026-07-01.. & last", "jul 2026.. & last"] {
+                let months = shares(src, TimeUnit::Year, date(2026, 1, 1), date(2026, 12, 31));
+                assert_eq!(months.len(), 6, "{src}");
+                assert_eq!(months[0], share(0, 7, 12), "{src}");
+            }
         }
 
         #[test]
         fn every_other_friday_extends_back_before_a_thursday_start() {
-            let schedule = schedule("every second friday from 2026-01-01");
+            let schedule = schedule("2026-01-01.. & fri / 2");
             assert!(schedule.matches(date(2026, 1, 2)));
             assert!(schedule.matches_pattern(date(2025, 12, 19)));
             assert!(!schedule.matches_pattern(date(2025, 12, 26)));
@@ -1341,20 +1222,16 @@ mod tests {
         #[test]
         fn periods_without_firings_carry_into_the_next() {
             let cases = [
-                ("quarterly", TimeUnit::Month, share(2, 1, 1)),
-                ("yearly", TimeUnit::Month, share(11, 1, 1)),
-                ("yearly", TimeUnit::Quarter, share(3, 1, 1)),
-                ("weekly", TimeUnit::Day, share(6, 1, 1)),
                 (
-                    "every 2 years from 2020-01-01",
-                    TimeUnit::Year,
-                    share(1, 1, 1),
+                    "mar 31 | jun 30 | sep 30 | dec 31",
+                    TimeUnit::Month,
+                    share(2, 1, 1),
                 ),
-                (
-                    "every second friday from 2021-01-01",
-                    TimeUnit::Week,
-                    share(1, 1, 1),
-                ),
+                ("dec 31", TimeUnit::Month, share(11, 1, 1)),
+                ("dec 31", TimeUnit::Quarter, share(3, 1, 1)),
+                ("sun", TimeUnit::Day, share(6, 1, 1)),
+                ("2020-01-01.. & dec 31 / 2", TimeUnit::Year, share(1, 1, 1)),
+                ("2021-01-01.. & fri / 2", TimeUnit::Week, share(1, 1, 1)),
             ];
             for (src, unit, expected) in cases {
                 let found = shares(src, unit, date(2026, 1, 1), date(2026, 12, 31));
@@ -1366,42 +1243,52 @@ mod tests {
         }
 
         #[test]
-        fn carrying_starts_at_from() {
+        fn carrying_starts_at_the_start_of_the_window() {
             let found = shares(
-                "every month from 2026-03-17",
+                "2026-03-17.. & last",
                 TimeUnit::Day,
                 date(2026, 3, 1),
                 date(2026, 4, 30),
             );
             // Mar 17 to 31, then all of April.
             assert_eq!(found, [share(14, 1, 1), share(29, 1, 1)]);
-            // Without `from`, the first firing covers the whole month.
-            let found = shares(
-                "monthly",
-                TimeUnit::Day,
-                date(2026, 3, 1),
-                date(2026, 3, 31),
-            );
+            // Without a start, the first firing covers the whole month.
+            let found = shares("last", TimeUnit::Day, date(2026, 3, 1), date(2026, 3, 31));
             assert_eq!(found, [share(30, 1, 1)]);
         }
 
         #[test]
         fn monthly_per_day_carries_the_rest_of_the_month() {
-            let days: Vec<u32> = shares(
-                "monthly",
-                TimeUnit::Day,
-                date(2026, 1, 1),
-                date(2026, 3, 31),
-            )
-            .iter()
-            .map(|s| s.carried + 1)
-            .collect();
+            let days: Vec<u32> = shares("last", TimeUnit::Day, date(2026, 1, 1), date(2026, 3, 31))
+                .iter()
+                .map(|s| s.carried + 1)
+                .collect();
             assert_eq!(days, [31, 28, 31]);
         }
 
         #[test]
-        fn firings_left_respect_from() {
-            let schedule = schedule("every month from 2026-07-01");
+        fn months_left_out_dont_carry() {
+            // A filter leaves July and August out.
+            let found = shares(
+                "1st & sep..=jun",
+                TimeUnit::Month,
+                date(2026, 6, 1),
+                date(2026, 9, 30),
+            );
+            assert_eq!(found, [share(0, 1, 1), share(0, 1, 1)]);
+            // So does a gap in the window.
+            let found = shares(
+                "dec 31 & (2026 | 2028)",
+                TimeUnit::Year,
+                date(2026, 1, 1),
+                date(2028, 12, 31),
+            );
+            assert_eq!(found, [share(0, 1, 1), share(0, 1, 1)]);
+        }
+
+        #[test]
+        fn firings_left_respect_the_window() {
+            let schedule = schedule("2026-07-01.. & last");
             assert_eq!(schedule.firings_left(TimeUnit::Year, date(2026, 7, 31)), 6);
             assert_eq!(schedule.firings_left(TimeUnit::Year, date(2026, 12, 31)), 1);
             assert_eq!(
@@ -1412,7 +1299,7 @@ mod tests {
 
         #[test]
         fn date_lists_split_by_period() {
-            let src = "2026-04-15, 2026-06-15, 2026-09-15, 2027-01-15";
+            let src = "2026-04-15 | 2026-06-15 | 2026-09-15 | 2027-01-15";
             let found = shares(src, TimeUnit::Year, date(2026, 1, 1), date(2027, 12, 31));
             assert_eq!(
                 found,
@@ -1426,50 +1313,6 @@ mod tests {
             // The first date has no earlier one to carry from.
             let found = shares(src, TimeUnit::Month, date(2026, 1, 1), date(2026, 12, 31));
             assert_eq!(found, [share(0, 1, 1), share(1, 1, 1), share(2, 1, 1)]);
-        }
-    }
-
-    mod when {
-        use super::*;
-
-        fn months(list: &[u32]) -> When {
-            When::Windows(vec![Window::Months(
-                list.iter().map(|m| 1 << (m - 1)).sum(),
-            )])
-        }
-
-        fn from(from: NaiveDate, to: Option<NaiveDate>) -> When {
-            When::Windows(vec![Window::Dates(from, to)])
-        }
-
-        #[test]
-        fn shadowed_when_the_arms_above_cover_every_day() {
-            let q2 = months(&[4, 5, 6]);
-            assert!(months(&[5]).is_shadowed_by(&[&q2]));
-            assert!(!q2.is_shadowed_by(&[&months(&[5])]));
-
-            let open = from(date(2025, 1, 1), None);
-            assert!(from(date(2025, 6, 1), None).is_shadowed_by(&[&open]));
-            assert!(!from(date(2024, 6, 1), None).is_shadowed_by(&[&open]));
-
-            let all_months = months(&(1..=12).collect::<Vec<_>>());
-            assert!(When::Always.is_shadowed_by(&[&all_months]));
-            assert!(!When::Always.is_shadowed_by(&[&q2]));
-        }
-
-        #[test]
-        fn every_year_beats_any_range_of_dates() {
-            // May recurs before and after the range, so the range can't cover it.
-            let range = from(date(2026, 1, 1), Some(date(2028, 1, 1)));
-            assert!(!months(&[5]).is_shadowed_by(&[&range]));
-            let open = from(date(2027, 1, 1), None);
-            assert!(!months(&[5]).is_shadowed_by(&[&open]));
-            // A range is covered by months together with other ranges.
-            let may_2027 = from(date(2027, 5, 1), Some(date(2027, 6, 1)));
-            let rest = from(date(2027, 6, 1), Some(date(2027, 7, 1)));
-            let target = from(date(2027, 4, 1), Some(date(2027, 7, 1)));
-            assert!(!target.is_shadowed_by(&[&may_2027, &rest]));
-            assert!(target.is_shadowed_by(&[&may_2027, &rest, &months(&[4])]));
         }
     }
 }

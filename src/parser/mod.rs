@@ -1,18 +1,48 @@
-mod schedule;
+mod days;
 
 use crate::Span;
 use crate::ast::{
-    AggKind, Arm, BinOp, Decl, Expr, Growth, GrowthKind, ParamBody, Path, Posting, PostingAmount,
-    Program, ScheduleRef, SpannedExpr, Stmt, TimeUnit,
+    Arm, BinOp, Decl, EntryStmt, Expr, Growth, GrowthKind, LetBody, ModBody, Move, Path, Program,
+    Spanned, SpannedExpr, Stmt, TimeUnit,
 };
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
 /// Upper bound on expression nesting (parentheses, unary minus, chained
 /// operators), so pathological input can't overflow the stack while parsing or
 /// evaluating.
 const MAX_EXPR_DEPTH: usize = 256;
+
+// How tightly binary operators bind, loosest first.
+const OR: u8 = 1;
+const AND: u8 = 2;
+const NOT: u8 = 3;
+const COMPARE: u8 = 4;
+const UNION: u8 = 5;
+const INTER: u8 = 6;
+const RANGE: u8 = 7;
+const SUM: u8 = 8;
+const PRODUCT: u8 = 9;
+
+#[derive(Clone, Copy)]
+enum Infix {
+    Op(BinOp),
+    Range { inclusive: bool },
+}
+
+/// Words that end an expression rather than continue it as a name.
+const STOP_WORDS: &[&str] = &[
+    "and",
+    "or",
+    "not",
+    "then",
+    "else",
+    "compounding",
+    "adding",
+    "every",
+];
 
 pub struct Parser<'src> {
     tokens: Vec<(Token<'src>, Span)>,
@@ -36,9 +66,9 @@ impl<'src> Parser<'src> {
     }
 
     pub fn parse(&mut self) -> Result<Program, Vec<Diagnostic>> {
-        let program = self.parse_program();
+        let decls = self.parse_decls(false);
         if self.errors.is_empty() {
-            Ok(program)
+            Ok(Program { decls })
         } else {
             Err(std::mem::take(&mut self.errors))
         }
@@ -56,13 +86,6 @@ impl<'src> Parser<'src> {
             .get(self.current)
             .map(|(_, s)| *s)
             .unwrap_or(self.last_span)
-    }
-
-    fn peek_next(&self) -> &Token<'src> {
-        self.tokens
-            .get(self.current + 1)
-            .map(|(t, _)| t)
-            .unwrap_or(&Token::Eof)
     }
 
     fn advance(&mut self) -> (Token<'src>, Span) {
@@ -89,10 +112,22 @@ impl<'src> Parser<'src> {
         if let Some(s) = self.eat(expected) {
             return Some(s);
         }
-        let span = self.peek_span();
-        self.errors
-            .push(Diagnostic::new(span, format!("expected `{expected}`")));
+        self.error_here(format!("expected `{expected}`"));
         None
+    }
+
+    /// Reports `message` at the next token. A `(` there that isn't right
+    /// after a name was probably meant as a call.
+    fn error_here(&mut self, message: impl Into<String>) {
+        let span = self.peek_span();
+        let mut diag = Diagnostic::new(span, message);
+        if *self.peek() == Token::LParen && self.last_span.end < span.start {
+            diag = diag.with_note(
+                span,
+                "to call a function, write `(` right after its name, like `min(a, b)`",
+            );
+        }
+        self.errors.push(diag);
     }
 
     fn eat_ident(&mut self) -> Option<(&'src str, Span)> {
@@ -105,13 +140,11 @@ impl<'src> Parser<'src> {
         }
     }
 
-    fn expect_ident(&mut self, what: &str) -> Option<(&'src str, Span)> {
-        if let Some(ident) = self.eat_ident() {
-            return Some(ident);
+    fn expect_ident(&mut self, what: &str) -> Option<Spanned<String>> {
+        if let Some((name, span)) = self.eat_ident() {
+            return Some((name.to_string(), span));
         }
-        let span = self.peek_span();
-        self.errors
-            .push(Diagnostic::new(span, format!("expected {what}")));
+        self.error_here(format!("expected {what}"));
         None
     }
 
@@ -127,48 +160,17 @@ impl<'src> Parser<'src> {
         None
     }
 
-    fn save(&self) -> (usize, usize) {
-        (self.current, self.errors.len())
-    }
+    // ---- declarations ----
 
-    fn restore(&mut self, (pos, err_len): (usize, usize)) {
-        self.current = pos;
-        self.errors.truncate(err_len);
-    }
-
-    // item ((, | , and | and) item)*
-    // Reports "expected {what}" if the list is empty or ends with a separator.
-    fn parse_comma_list<T, F>(&mut self, what: &str, mut parse_item: F) -> Vec<T>
-    where
-        F: FnMut(&mut Self) -> Option<T>,
-    {
-        let mut items = Vec::new();
-        loop {
-            let err_count = self.errors.len();
-            let Some(item) = parse_item(self) else {
-                if self.errors.len() == err_count {
-                    self.errors.push(Diagnostic::new(
-                        self.peek_span(),
-                        format!("expected {what}"),
-                    ));
-                }
-                break;
-            };
-            items.push(item);
-            let comma = self.eat(&Token::Comma).is_some();
-            let and = self.eat_keyword("and").is_some();
-            if !comma && !and {
-                break;
-            }
-        }
-        items
-    }
-
-    // ---- program / declarations ----
-
-    fn parse_program(&mut self) -> Program {
+    /// Declarations up to the end of the file, or to a `}` if `nested`.
+    fn parse_decls(&mut self, nested: bool) -> Vec<Spanned<Decl>> {
         let mut decls = Vec::new();
-        while *self.peek() != Token::Eof {
+        loop {
+            match self.peek() {
+                Token::Eof => break,
+                Token::RBrace if nested => break,
+                _ => {}
+            }
             let start = self.peek_span();
             let err_count = self.errors.len();
             if let Some(decl) = self.parse_decl() {
@@ -183,291 +185,97 @@ impl<'src> Parser<'src> {
                         .push(Diagnostic::new(span, "malformed declaration"));
                 }
                 // Keep only the first error from this failed declaration, then
-                // skip to the next declaration boundary to avoid cascades.
+                // skip to the next declaration to avoid cascades.
                 self.errors.truncate(err_count + 1);
                 self.synchronize();
             }
         }
-        Program { decls }
+        decls
     }
 
-    // Skip tokens until we reach something that can only start a top-level
-    // declaration. Identifiers and dates are excluded because they appear freely
-    // inside expressions; only the dedicated keyword tokens are reliable anchors.
+    /// Skips to something that can only start a declaration.
     fn synchronize(&mut self) {
-        loop {
-            match self.peek() {
-                Token::Eof
-                | Token::Account
-                | Token::Assert
-                | Token::Entry
+        // Always move on, so a declaration that fails on its keyword doesn't
+        // fail forever.
+        self.advance();
+        while !matches!(
+            self.peek(),
+            Token::Eof
+                | Token::Let
                 | Token::Fn
-                | Token::Import
-                | Token::Param
-                | Token::Schedule => return,
-                _ => {
-                    self.advance();
-                }
-            }
+                | Token::Entry
+                | Token::Check
+                | Token::Balances
+                | Token::Mod
+        ) {
+            self.advance();
         }
     }
 
     fn parse_decl(&mut self) -> Option<Decl> {
         match self.peek() {
-            Token::Assert => {
+            Token::Let => {
                 self.advance();
-                return self.parse_assert_decl();
-            }
-            Token::Entry => {
-                self.advance();
-                return self.parse_entry_decl();
-            }
-            Token::Param => {
-                self.advance();
-                return self.parse_param_decl();
-            }
-            Token::Schedule => {
-                self.advance();
-                return self.parse_schedule_decl();
-            }
-            Token::Account => {
-                self.advance();
-                return self.parse_account_decl();
+                self.parse_let_decl()
             }
             Token::Fn => {
                 self.advance();
-                return self.parse_fn_decl();
+                self.parse_fn_decl()
             }
-            Token::Import => {
+            Token::Entry => {
                 self.advance();
-                return self.parse_import_decl();
+                self.parse_entry_decl()
             }
-            Token::Eof => return None,
-            _ => {}
-        }
-        let span = self.peek_span();
-        self.errors
-            .push(Diagnostic::new(span, "expected declaration"));
-        None
-    }
-
-    fn parse_account_decl(&mut self) -> Option<Decl> {
-        let name = self.parse_colon_path()?;
-        let opening = if self.eat(&Token::Eq).is_some() {
-            let expr = self.parse_expr()?;
-            if self.eat(&Token::At).is_none() {
-                self.errors.push(Diagnostic::new(
-                    self.peek_span(),
-                    "opening balance requires a date: `= <value> @ <date>`",
-                ));
-                return None;
+            Token::Check => {
+                self.advance();
+                self.parse_check_decl()
             }
-            let date = self.parse_date()?;
-            Some((expr, date))
-        } else {
-            None
-        };
-        Some(Decl::Account { name, opening })
-    }
-
-    fn parse_schedule_decl(&mut self) -> Option<Decl> {
-        let (name, _) = self.expect_ident("schedule name")?;
-        self.expect(&Token::Eq)?;
-        let schedule = self.parse_schedule_literal()?;
-        Some(Decl::Schedule {
-            name: name.to_string(),
-            schedule,
-        })
-    }
-
-    fn parse_param_decl(&mut self) -> Option<Decl> {
-        let (name, _) = self.expect_ident("param name")?;
-        if let Some(colon) = self.eat(&Token::Colon) {
-            self.old_unit_annotation(colon);
+            Token::Balances => {
+                self.advance();
+                self.parse_balances_decl()
+            }
+            Token::Mod => {
+                self.advance();
+                self.parse_mod_decl()
+            }
+            _ => {
+                self.error_here(
+                    "expected a declaration: `let`, `fn`, `entry`, `check`, `balances` or `mod`",
+                );
+                None
+            }
         }
+    }
+
+    fn parse_let_decl(&mut self) -> Option<Decl> {
+        let name = self.expect_ident("a name after `let`")?;
         let body = if self.eat(&Token::Eq).is_some() {
-            ParamBody::Const(self.parse_expr()?)
+            LetBody::Expr(self.parse_expr()?)
         } else if self.eat(&Token::LBrace).is_some() {
             let mut arms = Vec::new();
-            while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
+            while !matches!(self.peek(), Token::RBrace | Token::Eof) {
                 arms.push(self.parse_arm()?);
             }
             self.expect(&Token::RBrace)?;
-            ParamBody::Arms(arms)
+            LetBody::Arms(arms)
         } else {
-            let span = self.peek_span();
-            self.errors.push(Diagnostic::new(
-                span,
-                "expected `=` or `{` in param declaration",
-            ));
+            self.error_here(format!("expected `=` or `{{` after `let {}`", name.0));
             return None;
         };
-        Some(Decl::Param {
-            name: name.to_string(),
-            body,
-        })
-    }
-
-    fn parse_assert_decl(&mut self) -> Option<Decl> {
-        let schedule = self.try_parse_schedule_ref();
-        self.expect(&Token::That)?;
-        let asserted = self.parse_expr()?;
-        Some(Decl::Assert { schedule, asserted })
-    }
-
-    fn parse_fn_decl(&mut self) -> Option<Decl> {
-        let (name, _) = self.expect_ident("function name")?;
-        let name = name.to_string();
-        self.expect(&Token::LParen)?;
-        let mut params = Vec::new();
-        while !matches!(self.peek(), Token::RParen | Token::Eof) {
-            let (p, span) = self.expect_ident("parameter name")?;
-            params.push((p.to_string(), span));
-            if self.eat(&Token::Comma).is_none() {
-                break;
-            }
-        }
-        self.expect(&Token::RParen)?;
-        self.expect(&Token::LBrace)?;
-        let mut body: Vec<Stmt> = Vec::new();
-        loop {
-            match self.peek() {
-                Token::RBrace | Token::Eof => break,
-                Token::Let => {
-                    self.advance();
-                    if let Some(stmt) = self.parse_let_stmt() {
-                        body.push(stmt);
-                    } else {
-                        break;
-                    }
-                }
-                Token::Return => {
-                    self.advance();
-                    if let Some(stmt) = self.parse_return_stmt() {
-                        body.push(stmt);
-                    }
-                    break;
-                }
-                _ => {
-                    // Implicit return: a bare expression not followed by `;`.
-                    if let Some(expr) = self.parse_expr() {
-                        if matches!(self.peek(), Token::RBrace | Token::Eof) {
-                            body.push(Stmt::Return(expr));
-                        } else {
-                            self.errors.push(Diagnostic::new(
-                                self.peek_span(),
-                                "expected `}` after expression (use `return expr;` for an explicit return, or omit `;` for an implicit one)",
-                            ));
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        self.expect(&Token::RBrace)?;
-        if !matches!(body.last(), Some(Stmt::Return(_))) {
-            self.errors.push(Diagnostic::new(
-                self.last_span,
-                format!("function `{name}` has no return value"),
-            ));
-            return None;
-        }
-        Some(Decl::Fn { name, params, body })
-    }
-
-    fn parse_import_decl(&mut self) -> Option<Decl> {
-        if let Token::Str(path) = self.peek() {
-            let path = path.to_string();
-            let (_, span) = self.advance();
-            return Some(Decl::Import { path: (path, span) });
-        }
-        self.errors.push(Diagnostic::new(
-            self.peek_span(),
-            "expected a file path in quotes after `import`",
-        ));
-        None
-    }
-
-    fn parse_let_stmt(&mut self) -> Option<Stmt> {
-        let (name, _) = self.expect_ident("variable name")?;
-        self.expect(&Token::Eq)?;
-        let value = self.parse_expr()?;
-        self.expect(&Token::Semicolon)?;
-        Some(Stmt::Let {
-            name: name.to_string(),
-            value,
-        })
-    }
-
-    fn parse_return_stmt(&mut self) -> Option<Stmt> {
-        let value = self.parse_expr()?;
-        self.expect(&Token::Semicolon)?;
-        Some(Stmt::Return(value))
-    }
-
-    fn parse_entry_decl(&mut self) -> Option<Decl> {
-        let schedule = self.parse_schedule_ref_required()?;
-        let label = if let Token::Str(s) = self.peek() {
-            let s = s.to_string();
-            self.advance();
-            s
-        } else {
-            let span = self.peek_span();
-            self.errors
-                .push(Diagnostic::new(span, "expected string label"));
-            return None;
-        };
-        self.expect(&Token::LBrace)?;
-        let mut postings = Vec::new();
-        while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
-            if let Some(p) = self.parse_posting() {
-                postings.push(p);
-            } else {
-                break;
-            }
-        }
-        self.expect(&Token::RBrace)?;
-        let alias = if self.eat_keyword("as").is_some() {
-            Some(self.expect_ident("entry alias after `as`")?.0.to_string())
-        } else {
-            None
-        };
-        Some(Decl::Entry {
-            label,
-            alias,
-            schedule,
-            postings,
-        })
-    }
-
-    fn parse_schedule_ref_required(&mut self) -> Option<ScheduleRef> {
-        if let Some(sr) = self.try_parse_schedule_ref() {
-            return Some(sr);
-        }
-        let span = self.peek_span();
-        self.errors.push(Diagnostic::new(span, "expected schedule"));
-        None
-    }
-
-    fn try_parse_schedule_ref(&mut self) -> Option<ScheduleRef> {
-        let err_count = self.errors.len();
-        if let Some(sched) = self.parse_schedule_literal() {
-            return Some(ScheduleRef::Literal(sched));
-        }
-        if self.errors.len() > err_count {
-            // It started like a schedule literal but was malformed; don't retry
-            // it as a schedule name, which would hide the real error.
-            return None;
-        }
-
-        let (name, span) = self.eat_ident()?;
-        Some(ScheduleRef::Named(name.to_string(), span))
+        Some(Decl::Let { name, body })
     }
 
     fn parse_arm(&mut self) -> Option<Arm> {
         let start = self.peek_span();
-        let when = self.parse_when()?;
-        self.expect(&Token::Eq)?;
+        let when = if self.eat_keyword("_").is_some() {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        if self.eat(&Token::FatArrow).is_none() {
+            self.error_here("expected `=>` between an arm's days and its value");
+            return None;
+        }
         let value = self.parse_expr()?;
         let growth = self.parse_growth()?;
         let span = Span::new(start.start, self.last_span.end);
@@ -493,27 +301,13 @@ impl<'src> Parser<'src> {
         };
         let by = self.parse_expr()?;
         if self.eat_keyword("every").is_none() {
-            self.errors.push(Diagnostic::new(
-                self.peek_span(),
-                format!(
-                    "expected `every` and how often to step after `{}`, like `every year`",
-                    kind.keyword()
-                ),
+            self.error_here(format!(
+                "expected `every` and how often to step after `{}`, like `every year`",
+                kind.keyword()
             ));
             return None;
         }
-        let every = match self.peek() {
-            Token::Ident(name) => TimeUnit::from_name(name),
-            _ => None,
-        };
-        let Some(every) = every else {
-            self.errors.push(Diagnostic::new(
-                self.peek_span(),
-                "expected `day`, `week`, `month`, `quarter` or `year` after `every`",
-            ));
-            return None;
-        };
-        self.advance();
+        let every = self.parse_unit("`every`")?;
         let span = Span::new(start.start, self.last_span.end);
         Some(Some(Growth {
             kind,
@@ -523,66 +317,203 @@ impl<'src> Parser<'src> {
         }))
     }
 
-    /// Reports a unit annotation in the old `param x : usd/year = …` style,
-    /// skipping it so the rest of the param still parses.
-    fn old_unit_annotation(&mut self, colon: Span) {
-        let mut per = None;
-        if matches!(self.peek(), Token::Ident(_) | Token::Percent) {
+    /// A unit of time, which `after` comes before.
+    fn parse_unit(&mut self, after: &str) -> Option<TimeUnit> {
+        if let Token::Ident(name) = self.peek()
+            && let Some(unit) = TimeUnit::from_name(name)
+        {
             self.advance();
+            return Some(unit);
         }
-        if self.eat(&Token::Slash).is_some() {
-            if let Token::Ident(name) = self.peek() {
-                per = TimeUnit::from_name(name.strip_suffix('s').unwrap_or(name));
-            }
-            if matches!(self.peek(), Token::Ident(_) | Token::Percent) {
-                self.advance();
-            }
-        }
-        let message = match per {
-            Some(unit) => format!("units go after the value now: write `per {unit}` after it"),
-            None => "params don't have units like this anymore; use a comment".to_string(),
-        };
-        let span = Span::new(colon.start, self.last_span.end);
-        self.errors.push(Diagnostic::new(span, message));
+        self.error_here(format!(
+            "expected `day`, `week`, `month`, `quarter` or `year` after {after}"
+        ));
+        None
     }
 
-    fn parse_posting(&mut self) -> Option<Posting> {
-        if !matches!(self.peek(), Token::Ident(_)) {
+    fn parse_fn_decl(&mut self) -> Option<Decl> {
+        let name = self.expect_ident("a function name")?;
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        while !matches!(self.peek(), Token::RParen | Token::Eof) {
+            params.push(self.expect_ident("a parameter name")?);
+            if self.eat(&Token::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::LBrace)?;
+        let mut body = Vec::new();
+        while self.eat(&Token::Let).is_some() {
+            let (local, _) = self.expect_ident("a name after `let`")?;
+            self.expect(&Token::Eq)?;
+            let value = self.parse_expr()?;
+            body.push(Stmt::Let { name: local, value });
+        }
+        if *self.peek() == Token::RBrace {
+            self.error_here(format!(
+                "function `{}` needs a value to return: end it with an expression",
+                name.0
+            ));
             return None;
         }
-        let start = self.peek_span();
-        let account = self.parse_colon_path()?;
-        let account_span = Span::new(start.start, self.last_span.end);
-        let amount = if self.eat(&Token::Eq).is_some() {
-            if self.eat_keyword("all").is_some() {
-                Some(PostingAmount::All)
-            } else {
-                Some(PostingAmount::Expr(self.parse_expr()?))
-            }
+        body.push(Stmt::Return(self.parse_expr()?));
+        if *self.peek() != Token::RBrace {
+            self.error_here("expected `}` after the function's value");
+            return None;
+        }
+        self.advance();
+        Some(Decl::Fn { name, params, body })
+    }
+
+    fn parse_entry_decl(&mut self) -> Option<Decl> {
+        let name = self.expect_ident("an entry name after `entry`")?;
+        let label = if let Token::Str(s) = self.peek() {
+            let s = s.to_string();
+            self.advance();
+            Some(s)
         } else {
             None
         };
-        let (leg_name, leg_span) = if self.eat_keyword("as").is_some() {
-            let (leg, span) = self.expect_ident("leg name after `as`")?;
-            (Some(leg.to_string()), Some(span))
+        let when = if self.eat(&Token::At).is_some() {
+            Some(self.parse_expr()?)
         } else {
-            (None, None)
+            None
         };
-        Some(Posting {
-            account,
-            amount,
-            leg_name,
-            span: Span::new(start.start, self.last_span.end),
-            account_span,
-            leg_span,
+        if *self.peek() != Token::LBrace {
+            self.error_here("expected `{` to start the entry, or `@` and when it fires");
+            return None;
+        }
+        self.advance();
+        let mut body = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            body.push(self.parse_entry_stmt()?);
+        }
+        self.expect(&Token::RBrace)?;
+        Some(Decl::Entry {
+            name,
+            label,
+            when,
+            body,
         })
+    }
+
+    fn parse_entry_stmt(&mut self) -> Option<EntryStmt> {
+        if self.eat(&Token::Let).is_some() {
+            let name = self.expect_ident("a name after `let`")?;
+            self.expect(&Token::Eq)?;
+            let value = self.parse_expr()?;
+            return Some(EntryStmt::Let { name, value });
+        }
+        let start = self.peek_span();
+        let Some(from) = self.try_parse_path() else {
+            self.error_here(
+                "expected a move, like `assets.cash -> expenses.rent : 1_000`, or `let`",
+            );
+            return None;
+        };
+        if self.eat(&Token::Arrow).is_none() {
+            self.error_here("expected `->` and the account the money moves to");
+            return None;
+        }
+        let Some(to) = self.try_parse_path() else {
+            self.error_here("expected the account the money moves to");
+            return None;
+        };
+        if self.eat(&Token::Colon).is_none() {
+            self.error_here("expected `:` and how much moves");
+            return None;
+        }
+        let amount = self.parse_expr()?;
+        let tag = if self.eat(&Token::Hash).is_some() {
+            Some(self.expect_ident("a tag after `#`")?)
+        } else {
+            None
+        };
+        Some(EntryStmt::Move(Move {
+            from,
+            to,
+            amount,
+            tag,
+            span: Span::new(start.start, self.last_span.end),
+        }))
+    }
+
+    fn parse_check_decl(&mut self) -> Option<Decl> {
+        let expr = self.parse_expr()?;
+        let when = if self.eat(&Token::At).is_some() {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Some(Decl::Check { expr, when })
+    }
+
+    fn parse_balances_decl(&mut self) -> Option<Decl> {
+        if self.eat(&Token::At).is_none() {
+            self.error_here("expected `@` and the date of the balances");
+            return None;
+        }
+        let date = self.parse_date()?;
+        self.expect(&Token::LBrace)?;
+        let mut balances = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let Some(path) = self.try_parse_path() else {
+                self.error_here("expected an account, like `assets.cash = 1_000`");
+                return None;
+            };
+            self.expect(&Token::Eq)?;
+            balances.push((path, self.parse_expr()?));
+        }
+        self.expect(&Token::RBrace)?;
+        Some(Decl::Balances { date, balances })
+    }
+
+    fn parse_mod_decl(&mut self) -> Option<Decl> {
+        let name = self.expect_ident("a module name after `mod`")?;
+        let body = if self.eat(&Token::LBrace).is_some() {
+            let decls = self.parse_decls(true);
+            self.expect(&Token::RBrace)?;
+            ModBody::Inline(decls)
+        } else {
+            ModBody::File
+        };
+        Some(Decl::Mod { name, body })
+    }
+
+    pub(super) fn parse_date(&mut self) -> Option<NaiveDate> {
+        if let Token::Date(d) = self.peek() {
+            let d = *d;
+            self.advance();
+            Some(d)
+        } else {
+            self.error_here("expected a date, like `2026-01-01`");
+            None
+        }
+    }
+
+    /// A dotted name, like `assets.cash`, if one comes next.
+    fn try_parse_path(&mut self) -> Option<Spanned<Path>> {
+        let (first, start) = self.eat_ident()?;
+        let mut parts = vec![first.to_string()];
+        while *self.peek() == Token::Period {
+            self.advance();
+            match self.eat_ident() {
+                Some((part, _)) => parts.push(part.to_string()),
+                None => {
+                    self.error_here("expected a name after `.`");
+                    break;
+                }
+            }
+        }
+        Some((Path(parts), Span::new(start.start, self.last_span.end)))
     }
 
     // ---- expressions ----
 
     fn parse_expr(&mut self) -> Option<SpannedExpr> {
         let depth = self.depth;
-        let expr = self.nest().and_then(|()| self.parse_or());
+        let expr = self.nest().and_then(|()| self.parse_binary(0));
         self.depth = depth;
         expr
     }
@@ -592,112 +523,131 @@ impl<'src> Parser<'src> {
     fn nest(&mut self) -> Option<()> {
         self.depth += 1;
         if self.depth > MAX_EXPR_DEPTH {
-            self.errors.push(Diagnostic::new(
-                self.peek_span(),
-                "expression is nested too deeply",
-            ));
+            self.error_here("expression is nested too deeply");
             return None;
         }
         Some(())
     }
 
-    fn parse_or(&mut self) -> Option<SpannedExpr> {
-        let mut left = self.parse_and()?;
-        while self.eat_keyword("or").is_some() {
-            self.nest()?;
-            let right = self.parse_and()?;
-            let span = Span::new(left.1.start, right.1.end);
-            left = (Box::new(Expr::Bin(left, BinOp::Or, right)), span);
-        }
-        Some(left)
+    fn bin(left: SpannedExpr, op: BinOp, right: SpannedExpr) -> SpannedExpr {
+        let span = Span::new(left.1.start, right.1.end);
+        (Box::new(Expr::Bin(left, op, right)), span)
     }
 
-    fn parse_and(&mut self) -> Option<SpannedExpr> {
-        let mut left = self.parse_not()?;
-        while self.eat_keyword("and").is_some() {
-            self.nest()?;
-            let right = self.parse_not()?;
-            let span = Span::new(left.1.start, right.1.end);
-            left = (Box::new(Expr::Bin(left, BinOp::And, right)), span);
-        }
-        Some(left)
-    }
-
-    fn parse_not(&mut self) -> Option<SpannedExpr> {
-        if let Some(not_span) = self.eat_keyword("not") {
-            self.nest()?;
-            let inner = self.parse_not()?;
-            let span = Span::new(not_span.start, inner.1.end);
-            return Some((Box::new(Expr::Not(inner)), span));
-        }
-        self.parse_comparison()
-    }
-
-    fn comparison_op(&self) -> Option<BinOp> {
+    /// The binary operator that comes next, if any, and how tightly it binds.
+    fn binary_op(&self) -> Option<(Infix, u8)> {
+        use Infix::*;
         Some(match self.peek() {
-            Token::LtEq => BinOp::LtEq,
-            Token::GtEq => BinOp::GtEq,
-            Token::EqEq => BinOp::Eq,
-            Token::Lt => BinOp::Lt,
-            Token::Gt => BinOp::Gt,
-            Token::NotEq => BinOp::NotEq,
+            Token::Ident("or") => (Op(BinOp::Or), OR),
+            Token::Ident("and") => (Op(BinOp::And), AND),
+            Token::LtEq => (Op(BinOp::LtEq), COMPARE),
+            Token::GtEq => (Op(BinOp::GtEq), COMPARE),
+            Token::EqEq => (Op(BinOp::Eq), COMPARE),
+            Token::Lt => (Op(BinOp::Lt), COMPARE),
+            Token::Gt => (Op(BinOp::Gt), COMPARE),
+            Token::NotEq => (Op(BinOp::NotEq), COMPARE),
+            Token::Pipe => (Op(BinOp::Union), UNION),
+            Token::Amp => (Op(BinOp::Inter), INTER),
+            Token::DotDot => (Range { inclusive: false }, RANGE),
+            Token::DotDotEq => (Range { inclusive: true }, RANGE),
+            Token::Plus => (Op(BinOp::Add), SUM),
+            Token::Minus => (Op(BinOp::Sub), SUM),
+            Token::Star => (Op(BinOp::Mul), PRODUCT),
+            Token::Slash => (Op(BinOp::Div), PRODUCT),
             _ => return None,
         })
     }
 
-    /// Comparisons don't chain: `a < b < c` is an error rather than
-    /// comparing a bool with a number.
-    fn parse_comparison(&mut self) -> Option<SpannedExpr> {
-        let left = self.parse_sum()?;
-        let Some(op) = self.comparison_op() else {
-            return Some(left);
+    /// An expression whose binary operators bind at least as tightly as
+    /// `min`, by precedence climbing: from loosest to tightest, `or`, `and`,
+    /// `not`, comparisons, `|`, `&`, ranges, `+ -`, and `* /`.
+    fn parse_binary(&mut self, min: u8) -> Option<SpannedExpr> {
+        let mut left = match self.eat_keyword("not") {
+            Some(not_span) if min <= NOT => {
+                self.nest()?;
+                let inner = self.parse_binary(COMPARE)?;
+                let span = Span::new(not_span.start, inner.1.end);
+                (Box::new(Expr::Not(inner)), span)
+            }
+            Some(_) => {
+                // `not` binds looser than this operator's operands.
+                self.current -= 1;
+                self.error_here("expected an expression; put `not …` in parentheses here");
+                return None;
+            }
+            None => self.parse_unary()?,
         };
-        self.advance();
-        self.nest()?;
-        let right = self.parse_sum()?;
-        let span = Span::new(left.1.start, right.1.end);
-        if self.comparison_op().is_some() {
-            self.errors.push(Diagnostic::new(
-                Span::new(span.start, self.peek_span().end),
-                "comparisons can't be chained; combine them with `and`",
-            ));
-            return None;
-        }
-        Some((Box::new(Expr::Bin(left, op, right)), span))
-    }
-
-    fn parse_sum(&mut self) -> Option<SpannedExpr> {
-        let mut left = self.parse_product()?;
-        loop {
-            let op = match self.peek() {
-                Token::Plus => BinOp::Add,
-                Token::Minus => BinOp::Sub,
-                _ => break,
-            };
+        while let Some((op, prec)) = self.binary_op() {
+            if prec < min {
+                break;
+            }
             self.advance();
             self.nest()?;
-            let right = self.parse_product()?;
-            let span = Span::new(left.1.start, right.1.end);
-            left = (Box::new(Expr::Bin(left, op, right)), span);
+            left = match op {
+                Infix::Op(BinOp::Div)
+                    if let Token::Ident(name) = self.peek()
+                        && let Some(unit) = TimeUnit::from_name(name) =>
+                {
+                    // `95_000/year`: a rate.
+                    self.advance();
+                    let span = Span::new(left.1.start, self.last_span.end);
+                    (Box::new(Expr::Per(left, unit)), span)
+                }
+                Infix::Op(op) => {
+                    let right = self.parse_binary(prec + 1)?;
+                    Self::bin(left, op, right)
+                }
+                Infix::Range { inclusive } => {
+                    let to = if inclusive || self.starts_operand() {
+                        Some(self.parse_binary(prec + 1)?)
+                    } else {
+                        None
+                    };
+                    let span = Span::new(left.1.start, self.last_span.end);
+                    (
+                        Box::new(Expr::Range {
+                            from: left,
+                            to,
+                            inclusive,
+                        }),
+                        span,
+                    )
+                }
+            };
+            // Comparisons and ranges don't chain.
+            if let Some((next, next_prec)) = self.binary_op()
+                && next_prec == prec
+                && (prec == COMPARE || matches!(next, Infix::Range { .. }))
+            {
+                let message = if prec == COMPARE {
+                    "comparisons can't be chained; combine them with `and`"
+                } else {
+                    "ranges can't be chained"
+                };
+                self.errors.push(Diagnostic::new(
+                    Span::new(left.1.start, self.peek_span().end),
+                    message,
+                ));
+                return None;
+            }
         }
         Some(left)
     }
 
-    fn parse_product(&mut self) -> Option<SpannedExpr> {
-        let mut left = self.parse_unary()?;
-        loop {
-            let op = match self.peek() {
-                Token::Star => BinOp::Mul,
-                Token::Slash => BinOp::Div,
-                _ => break,
-            };
-            self.advance();
-            self.nest()?;
-            let right = self.parse_unary()?;
-            let span = Span::new(left.1.start, right.1.end);
-            left = (Box::new(Expr::Bin(left, op, right)), span);
+    /// Whether the next token can start an operand, so an open range like
+    /// `2026..` doesn't swallow what follows it.
+    fn starts_operand(&self) -> bool {
+        match self.peek() {
+            Token::Number(_)
+            | Token::Date(_)
+            | Token::Ordinal(_)
+            | Token::LParen
+            | Token::Minus
+            | Token::True
+            | Token::False => true,
+            Token::Ident(word) => !STOP_WORDS.contains(word) && *word != "_",
+            _ => false,
         }
-        Some(left)
     }
 
     fn parse_unary(&mut self) -> Option<SpannedExpr> {
@@ -711,9 +661,7 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// An atom followed by any number of `%` and `per <unit>`, which bind
-    /// tighter than any other operator: `salary - 500 per month` subtracts
-    /// 500 a month.
+    /// An atom followed by any number of `%` and `[unit]`.
     fn parse_postfix(&mut self) -> Option<SpannedExpr> {
         let mut expr = self.parse_atom()?;
         loop {
@@ -726,22 +674,12 @@ impl<'src> Parser<'src> {
                     _ => Expr::Bin(expr, BinOp::Div, (Box::new(Expr::Num(hundred)), percent)),
                 };
                 expr = (Box::new(value), span);
-            } else if self.eat_keyword("per").is_some() {
+            } else if self.eat(&Token::LBracket).is_some() {
                 self.nest()?;
-                let unit = match self.peek() {
-                    Token::Ident(name) => TimeUnit::from_name(name),
-                    _ => None,
-                };
-                let Some(unit) = unit else {
-                    self.errors.push(Diagnostic::new(
-                        self.peek_span(),
-                        "expected `day`, `week`, `month`, `quarter` or `year` after `per`",
-                    ));
-                    return None;
-                };
-                self.advance();
+                let unit = self.parse_unit("`[`")?;
+                self.expect(&Token::RBracket)?;
                 let span = Span::new(expr.1.start, self.last_span.end);
-                expr = (Box::new(Expr::Per(expr, unit)), span);
+                expr = (Box::new(Expr::Period(expr, unit)), span);
             } else {
                 return Some(expr);
             }
@@ -752,21 +690,7 @@ impl<'src> Parser<'src> {
         let start = self.peek_span();
 
         if self.eat_keyword("if").is_some() {
-            let cond = self.parse_expr()?;
-            if self.eat_keyword("then").is_none() {
-                self.errors
-                    .push(Diagnostic::new(self.peek_span(), "expected `then`"));
-                return None;
-            }
-            let then = self.parse_expr()?;
-            if self.eat_keyword("else").is_none() {
-                self.errors
-                    .push(Diagnostic::new(self.peek_span(), "expected `else`"));
-                return None;
-            }
-            let else_ = self.parse_expr()?;
-            let span = Span::new(start.start, self.last_span.end);
-            return Some((Box::new(Expr::If { cond, then, else_ }), span));
+            return self.parse_if(start);
         }
 
         if let Some(s) = self.eat(&Token::True) {
@@ -776,20 +700,25 @@ impl<'src> Parser<'src> {
             return Some((Box::new(Expr::Bool(false)), s));
         }
 
-        if let Token::Number(f) = self.peek() {
-            let f = *f;
+        if let Token::Number(n) = self.peek() {
+            let n = *n;
             let (_, s) = self.advance();
-            return Some((Box::new(Expr::Num(f)), s));
+            return Some((Box::new(Expr::Num(n)), s));
         }
 
-        if matches!(self.peek(), Token::Ident(_)) {
-            if *self.peek_next() == Token::LParen {
-                return self.parse_call();
+        if let Some(lit) = self.try_parse_days() {
+            let span = Span::new(start.start, self.last_span.end);
+            return Some((Box::new(Expr::Days(lit?)), span));
+        }
+
+        if matches!(self.peek(), Token::Ident(word) if !STOP_WORDS.contains(word)) {
+            let (path, span) = self.try_parse_path()?;
+            // A call's `(` comes right after the name, so `x (y)` on two
+            // lines is two things rather than a call.
+            if *self.peek() == Token::LParen && self.peek_span().start == span.end {
+                return self.parse_call(path, span);
             }
-            if *self.peek_next() == Token::Period {
-                return self.parse_calc();
-            }
-            return self.parse_colon_path_expr();
+            return Some((Box::new(Expr::Ref(path)), span));
         }
 
         if self.eat(&Token::LParen).is_some() {
@@ -798,104 +727,39 @@ impl<'src> Parser<'src> {
             return Some(inner);
         }
 
-        let span = self.peek_span();
-        self.errors
-            .push(Diagnostic::new(span, "expected expression"));
+        self.error_here("expected an expression");
         None
     }
 
-    fn parse_call(&mut self) -> Option<SpannedExpr> {
-        let start = self.peek_span();
-        let (name, _) = self.eat_ident()?;
+    /// `if … then … else …`, after the `if`.
+    fn parse_if(&mut self, start: Span) -> Option<SpannedExpr> {
+        let cond = self.parse_expr()?;
+        if self.eat_keyword("then").is_none() {
+            self.error_here("expected `then`");
+            return None;
+        }
+        let then = self.parse_expr()?;
+        if self.eat_keyword("else").is_none() {
+            self.error_here("expected `else`");
+            return None;
+        }
+        let else_ = self.parse_expr()?;
+        let span = Span::new(start.start, self.last_span.end);
+        Some((Box::new(Expr::If { cond, then, else_ }), span))
+    }
+
+    fn parse_call(&mut self, callee: Path, start: Span) -> Option<SpannedExpr> {
         self.expect(&Token::LParen);
         let mut args = Vec::new();
-        while *self.peek() != Token::RParen && *self.peek() != Token::Eof {
-            if let Some(arg) = self.parse_expr() {
-                args.push(arg);
-            } else {
-                break;
-            }
+        while !matches!(self.peek(), Token::RParen | Token::Eof) {
+            args.push(self.parse_expr()?);
             if self.eat(&Token::Comma).is_none() {
                 break;
             }
         }
-        self.expect(&Token::RParen);
+        self.expect(&Token::RParen)?;
         let span = Span::new(start.start, self.last_span.end);
-        Some((Box::new(Expr::Call(name.to_string(), args)), span))
-    }
-
-    fn parse_calc(&mut self) -> Option<SpannedExpr> {
-        let start = self.peek_span();
-        let (first, _) = self.eat_ident()?;
-        self.expect(&Token::Period);
-
-        let cp = self.save();
-        if let Some((second, _)) = self.eat_ident()
-            && self.eat(&Token::Period).is_some()
-            && let Some(kind) = self.try_eat_agg_kind()
-        {
-            let span = Span::new(start.start, self.last_span.end);
-            return Some((
-                Box::new(Expr::ParamAgg(
-                    Some(first.to_string()),
-                    second.to_string(),
-                    kind,
-                )),
-                span,
-            ));
-        }
-        self.restore(cp);
-
-        if let Some(kind) = self.try_eat_agg_kind() {
-            let span = Span::new(start.start, self.last_span.end);
-            return Some((
-                Box::new(Expr::ParamAgg(None, first.to_string(), kind)),
-                span,
-            ));
-        }
-
-        let span = self.peek_span();
-        self.errors
-            .push(Diagnostic::new(span, "expected ytd, qtd, or mtd"));
-        None
-    }
-
-    fn try_eat_agg_kind(&mut self) -> Option<AggKind> {
-        if let Token::Ident(s) = self.peek() {
-            let kind = match *s {
-                "ytd" => AggKind::Ytd,
-                "qtd" => AggKind::Qtd,
-                "mtd" => AggKind::Mtd,
-                _ => return None,
-            };
-            self.advance();
-            Some(kind)
-        } else {
-            None
-        }
-    }
-
-    fn parse_colon_path(&mut self) -> Option<Path> {
-        let (first, _) = self.expect_ident("account name")?;
-        let mut parts = vec![first.to_string()];
-        while self.eat(&Token::Colon).is_some() {
-            if let Some((part, _)) = self.eat_ident() {
-                parts.push(part.to_string());
-            } else {
-                let span = self.peek_span();
-                self.errors
-                    .push(Diagnostic::new(span, "expected identifier after `:`"));
-                break;
-            }
-        }
-        Some(Path(parts))
-    }
-
-    fn parse_colon_path_expr(&mut self) -> Option<SpannedExpr> {
-        let start = self.peek_span();
-        let path = self.parse_colon_path()?;
-        let span = Span::new(start.start, self.last_span.end);
-        Some((Box::new(Expr::Ref(path)), span))
+        Some((Box::new(Expr::Call(callee, args)), span))
     }
 }
 
@@ -903,338 +767,30 @@ pub fn parse(tokens: Vec<(Token<'_>, Span)>) -> Result<Program, Vec<Diagnostic>>
     Parser::new(tokens).parse()
 }
 
+/// Parses `src` as a single expression.
+#[cfg(test)]
+pub fn parse_expression(src: &str) -> Result<SpannedExpr, Vec<Diagnostic>> {
+    let tokens = crate::lexer::lex(src, 0)?;
+    let mut parser = Parser::new(tokens);
+    let expr = parser.parse_expr();
+    if *parser.peek() != Token::Eof {
+        parser.error_here("expected the end of the expression");
+    }
+    match expr {
+        Some(expr) if parser.errors.is_empty() => Ok(expr),
+        _ => Err(parser.errors),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::schedule::{Schedule, When, Window};
-    use chrono::NaiveDate;
+    use crate::ast::{DayLit, Dow, Month, Ordinal};
+    use DayLit::*;
 
     fn parse_prog(src: &str) -> Program {
         let tokens = crate::lexer::lex(src, 0).expect("lexer errored");
         parse(tokens).unwrap_or_else(|errs| panic!("parse errs: {errs:?}"))
-    }
-
-    #[test]
-    fn parses_account_with_opening() {
-        let prog = parse_prog("account Liabilities:Loan = -3_000_000 @ 2024-01-01");
-        assert_eq!(prog.decls.len(), 1);
-        match &prog.decls[0].0 {
-            Decl::Account { name, opening } => {
-                assert_eq!(name.join(), "Liabilities:Loan");
-                assert!(matches!(opening, Some(((e, _), _)) if matches!(e.as_ref(), Expr::Neg(_))));
-                let date = opening.as_ref().unwrap().1;
-                assert_eq!(date, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
-            }
-            _ => panic!("expected account"),
-        }
-    }
-
-    #[test]
-    fn parses_account_no_opening() {
-        let prog = parse_prog("account Assets:Cash");
-        match &prog.decls[0].0 {
-            Decl::Account { name, opening } => {
-                assert_eq!(name.join(), "Assets:Cash");
-                assert!(opening.is_none());
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn account_init_without_date_is_error() {
-        let tokens = crate::lexer::lex("account Assets:Cash = 5000", 0).expect("lexer errored");
-        let errs = parse(tokens).unwrap_err();
-        assert!(
-            errs.iter()
-                .any(|d| d.message.contains("opening balance requires a date"))
-        );
-    }
-
-    #[test]
-    fn parses_param_const() {
-        let prog = parse_prog("param interest_rate = 0.05");
-        match &prog.decls[0].0 {
-            Decl::Param { name, body } => {
-                assert_eq!(name, "interest_rate");
-                assert!(matches!(body, ParamBody::Const(_)));
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn parses_param_arms() {
-        let prog = parse_prog(
-            "param p {
-               from 2026-01-01 to 2026-04-01 = 1
-               from 2026-04-01               = 2
-               from jul 2027                 = 3
-               in jul, aug                   = 4
-               in jul through apr            = 5
-               in q2, q4 2027                = 6
-               in 2026 through 2027          = 7
-               in mar 2028                   = 8
-               else                          = 9
-             }",
-        );
-        let Decl::Param {
-            body: ParamBody::Arms(arms),
-            ..
-        } = &prog.decls[0].0
-        else {
-            panic!("not a param with arms")
-        };
-        let date = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
-        let whens: Vec<When> = arms.iter().map(|arm| arm.when.clone()).collect();
-        assert_eq!(
-            whens,
-            [
-                When::Windows(vec![Window::Dates(
-                    date(2026, 1, 1),
-                    Some(date(2026, 4, 1))
-                )]),
-                When::Windows(vec![Window::Dates(date(2026, 4, 1), None)]),
-                When::Windows(vec![Window::Dates(date(2027, 7, 1), None)]),
-                When::Windows(vec![Window::Months(0b0000_1100_0000)]),
-                When::Windows(vec![Window::Months(0b1111_1100_1111)]),
-                When::Windows(vec![
-                    Window::Months(0b0000_0011_1000),
-                    Window::Dates(date(2027, 10, 1), Some(date(2028, 1, 1))),
-                ]),
-                When::Windows(vec![Window::Dates(
-                    date(2026, 1, 1),
-                    Some(date(2028, 1, 1))
-                )]),
-                When::Windows(vec![Window::Dates(
-                    date(2028, 3, 1),
-                    Some(date(2028, 4, 1))
-                )]),
-                When::Always,
-            ]
-        );
-    }
-
-    #[test]
-    fn parses_growth_after_an_arms_value() {
-        let prog = parse_prog(
-            "param p {
-               from jul 2026 = 5 compounding 4% every year
-               in 2027       = 1 per month adding 2 every month
-               else          = 3
-             }",
-        );
-        let Decl::Param {
-            body: ParamBody::Arms(arms),
-            ..
-        } = &prog.decls[0].0
-        else {
-            panic!("not a param with arms")
-        };
-        let growth: Vec<Option<(GrowthKind, TimeUnit)>> = arms
-            .iter()
-            .map(|arm| arm.growth.as_ref().map(|g| (g.kind, g.every)))
-            .collect();
-        assert_eq!(
-            growth,
-            [
-                Some((GrowthKind::Compounding, TimeUnit::Year)),
-                Some((GrowthKind::Adding, TimeUnit::Month)),
-                None,
-            ]
-        );
-    }
-
-    #[test]
-    fn parses_flow_with_postings() {
-        let prog = parse_prog(
-            "entry monthly \"paycheck\" { Assets:Cash = salary_rate / 12\nIncome:Gross }",
-        );
-        match &prog.decls[0].0 {
-            Decl::Entry {
-                label,
-                alias,
-                schedule,
-                postings,
-            } => {
-                assert_eq!(label, "paycheck");
-                assert!(alias.is_none());
-                assert!(matches!(
-                    schedule,
-                    ScheduleRef::Literal(Schedule::Periodic(_))
-                ));
-                assert_eq!(postings.len(), 2);
-                assert_eq!(postings[0].account.join(), "Assets:Cash");
-                assert!(postings[0].amount.is_some());
-                assert_eq!(postings[1].account.join(), "Income:Gross");
-                assert!(postings[1].amount.is_none());
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn parses_flow_with_alias() {
-        let prog = parse_prog(
-            "entry monthly \"Jim's paycheck\" { Assets:Cash = 1000\nIncome:Gross } as paycheck",
-        );
-        match &prog.decls[0].0 {
-            Decl::Entry { label, alias, .. } => {
-                assert_eq!(label, "Jim's paycheck");
-                assert_eq!(alias.as_deref(), Some("paycheck"));
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn parses_posting_all() {
-        let prog = parse_prog(
-            "entry monthly \"loan payment\" { Liabilities:AccruedInterest = all\nAssets:Cash }",
-        );
-        match &prog.decls[0].0 {
-            Decl::Entry { postings, .. } => {
-                assert!(matches!(&postings[0].amount, Some(PostingAmount::All)));
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn parses_assert() {
-        let prog = parse_prog("assert that Assets:Cash >= 0");
-        assert!(matches!(
-            prog.decls[0].0,
-            Decl::Assert { schedule: None, .. }
-        ));
-    }
-
-    #[test]
-    fn parses_scheduled_assert() {
-        let prog = parse_prog("assert yearly that Assets:Retirement >= 0");
-        assert!(matches!(
-            prog.decls[0].0,
-            Decl::Assert {
-                schedule: Some(ScheduleRef::Literal(_)),
-                ..
-            }
-        ));
-
-        let prog = parse_prog("assert quarterly that Assets:Cash >= 0");
-        assert!(matches!(
-            prog.decls[0].0,
-            Decl::Assert {
-                schedule: Some(ScheduleRef::Literal(_)),
-                ..
-            }
-        ));
-
-        let prog = parse_prog("assert monthly that Assets:Cash >= 0");
-        assert!(matches!(
-            prog.decls[0].0,
-            Decl::Assert {
-                schedule: Some(ScheduleRef::Literal(_)),
-                ..
-            }
-        ));
-    }
-
-    /// The value of `param x = <src>`.
-    fn param_value(src: &str) -> Expr {
-        match parse_prog(&format!("param x = {src}")).decls.remove(0).0 {
-            Decl::Param {
-                body: ParamBody::Const((e, _)),
-                ..
-            } => *e,
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn percent_divides_by_100() {
-        assert!(matches!(param_value("6.2%"), Expr::Num(n) if n == Decimal::new(62, 3)));
-        assert!(matches!(param_value("-5%"), Expr::Neg(_)));
-        let Expr::Bin(x, BinOp::Div, hundred) = param_value("rate%") else {
-            panic!()
-        };
-        assert!(matches!(*x.0, Expr::Ref(_)));
-        assert!(matches!(*hundred.0, Expr::Num(n) if n == Decimal::ONE_HUNDRED));
-    }
-
-    #[test]
-    fn per_binds_tighter_than_arithmetic() {
-        let Expr::Bin(_, BinOp::Sub, rhs) = param_value("salary - 500 per month") else {
-            panic!()
-        };
-        assert!(matches!(*rhs.0, Expr::Per(_, TimeUnit::Month)));
-        let Expr::Per(inner, TimeUnit::Year) = param_value("(a + b) per year") else {
-            panic!()
-        };
-        assert!(matches!(*inner.0, Expr::Bin(_, BinOp::Add, _)));
-        let Expr::Per(inner, TimeUnit::Year) = param_value("5% per year") else {
-            panic!()
-        };
-        assert!(matches!(*inner.0, Expr::Num(_)));
-    }
-
-    #[test]
-    fn per_needs_a_unit_of_time() {
-        let errs = parse_errs("param x = 5 per fortnight");
-        assert!(errs[0].message.contains("after `per`"), "{errs:?}");
-        let errs = parse_errs("param x = 5 per years");
-        assert!(errs[0].message.contains("after `per`"), "{errs:?}");
-    }
-
-    #[test]
-    fn old_unit_annotations_are_errors() {
-        let errs = parse_errs("param x : usd/years = 5");
-        assert_eq!(
-            errs[0].message,
-            "units go after the value now: write `per year` after it"
-        );
-        let errs = parse_errs("param x : usd = 5");
-        assert!(errs[0].message.contains("use a comment"), "{errs:?}");
-    }
-
-    #[test]
-    fn parses_import() {
-        let prog = parse_prog("import \"loans.saldo\"\naccount A");
-        let Decl::Import { path } = &prog.decls[0].0 else {
-            panic!("expected import");
-        };
-        assert_eq!(path, &("loans.saldo".to_string(), Span::new(7, 20)));
-        let errs = parse_errs("import loans\naccount A");
-        assert_eq!(errs.len(), 1, "{errs:?}");
-        assert!(errs[0].message.contains("file path"), "{errs:?}");
-    }
-
-    #[test]
-    fn parses_min_call() {
-        let prog = parse_prog("entry monthly \"f\" { A:B = min(A:Cash, 2_000)\nC:D }");
-        match &prog.decls[0].0 {
-            Decl::Entry { postings, .. } => {
-                let Some(PostingAmount::Expr((e, _))) = &postings[0].amount else {
-                    panic!("expected expr amount");
-                };
-                assert!(
-                    matches!(e.as_ref(), Expr::Call(name, args) if name == "min" && args.len() == 2)
-                );
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn parses_if_expr() {
-        let prog = parse_prog("assert that if Assets:Cash > 0 then 1 else 0");
-        if let Decl::Assert {
-            asserted: (e, _), ..
-        } = &prog.decls[0].0
-        {
-            assert!(matches!(e.as_ref(), Expr::If { .. }));
-        } else {
-            panic!("expected if expression");
-        }
     }
 
     fn parse_errs(src: &str) -> Vec<Diagnostic> {
@@ -1242,40 +798,290 @@ mod tests {
         parse(tokens).unwrap_err()
     }
 
+    fn expr(src: &str) -> Expr {
+        *parse_expression(src)
+            .unwrap_or_else(|errs| panic!("{src}: {errs:?}"))
+            .0
+    }
+
     #[test]
-    fn if_requires_then() {
-        let errs = parse_errs("assert that if Assets:Cash > 0 1 else 0");
+    fn parses_lets() {
+        let prog = parse_prog(
+            "let rate = 5%
+             let salary {
+               2026   => 95_000/year
+               2027.. => 100_000/year compounding 3% every year
+               _      => 0
+             }",
+        );
+        let Decl::Let {
+            name,
+            body: LetBody::Expr(_),
+        } = &prog.decls[0].0
+        else {
+            panic!("not a let")
+        };
+        assert_eq!(name.0, "rate");
+        let Decl::Let {
+            body: LetBody::Arms(arms),
+            ..
+        } = &prog.decls[1].0
+        else {
+            panic!("not a let with arms")
+        };
+        assert_eq!(arms.len(), 3);
+        assert!(matches!(
+            arms[0].when.as_ref().map(|w| w.0.as_ref()),
+            Some(Expr::Num(_))
+        ));
+        assert!(matches!(
+            arms[1].when.as_ref().map(|w| w.0.as_ref()),
+            Some(Expr::Range { to: None, .. })
+        ));
+        assert!(matches!(&arms[1].growth, Some(g) if g.kind == GrowthKind::Compounding));
+        assert!(arms[2].when.is_none());
+    }
+
+    #[test]
+    fn parses_entries() {
+        let prog = parse_prog(
+            "entry paycheck \"Paycheck\" @ 15th | last {
+               let gross = salary
+               income.salary -> assets.cash : gross
+               assets.cash   -> assets.retirement : min(gross * 16%, 1_000)  #contribution
+             }
+             entry interest {
+               liabilities.accrued -> expenses.interest : liabilities.loan * 5%/year
+             }",
+        );
+        let Decl::Entry {
+            name,
+            label,
+            when,
+            body,
+        } = &prog.decls[0].0
+        else {
+            panic!("not an entry")
+        };
+        assert_eq!(name.0, "paycheck");
+        assert_eq!(label.as_deref(), Some("Paycheck"));
+        assert!(matches!(
+            when.as_ref().map(|w| w.0.as_ref()),
+            Some(Expr::Bin(_, BinOp::Union, _))
+        ));
+        assert_eq!(body.len(), 3);
+        let EntryStmt::Move(m) = &body[2] else {
+            panic!("not a move")
+        };
+        assert_eq!(m.from.0.join(), "assets.cash");
+        assert_eq!(m.to.0.join(), "assets.retirement");
+        assert!(
+            matches!(m.amount.0.as_ref(), Expr::Call(callee, args) if callee.join() == "min" && args.len() == 2)
+        );
+        assert_eq!(m.tag.as_ref().map(|t| t.0.as_str()), Some("contribution"));
+        let Decl::Entry { label, when, .. } = &prog.decls[1].0 else {
+            panic!("not an entry")
+        };
+        assert!(label.is_none() && when.is_none());
+    }
+
+    #[test]
+    fn parses_checks_balances_and_modules() {
+        let prog = parse_prog(
+            "check assets.cash >= 0
+             check ytd >= 1 @ 2026-12-31
+             balances @ 2026-01-01 {
+               assets.cash = 5_000
+               liabilities.loan = 30_000
+             }
+             mod loans
+             mod home { let rent = 3_000/month }",
+        );
+        assert!(matches!(&prog.decls[0].0, Decl::Check { when: None, .. }));
+        assert!(matches!(
+            &prog.decls[1].0,
+            Decl::Check { when: Some(_), .. }
+        ));
+        let Decl::Balances { balances, .. } = &prog.decls[2].0 else {
+            panic!("not balances")
+        };
+        assert_eq!(balances.len(), 2);
+        assert!(matches!(
+            &prog.decls[3].0,
+            Decl::Mod {
+                body: ModBody::File,
+                ..
+            }
+        ));
+        assert!(
+            matches!(&prog.decls[4].0, Decl::Mod { body: ModBody::Inline(decls), .. } if decls.len() == 1)
+        );
+    }
+
+    #[test]
+    fn parses_functions() {
+        let prog = parse_prog(
+            "fn net(gross, rate) {
+               let tax = gross * rate
+               gross - tax
+             }",
+        );
+        let Decl::Fn { params, body, .. } = &prog.decls[0].0 else {
+            panic!("not a function")
+        };
+        assert_eq!(params.len(), 2);
+        assert!(matches!(&body[..], [Stmt::Let { .. }, Stmt::Return(_)]));
+    }
+
+    #[test]
+    fn calls_need_their_paren_right_after_the_name() {
+        assert!(matches!(expr("min(a, b)"), Expr::Call(..)));
+        // The value of the first arm doesn't call the second's days.
+        let prog = parse_prog("let x { 2026 => prices\n (jan | feb) => 0 }");
+        let Decl::Let {
+            body: LetBody::Arms(arms),
+            ..
+        } = &prog.decls[0].0
+        else {
+            panic!()
+        };
+        assert_eq!(arms.len(), 2);
+        let errs = parse_errs("fn f(x) { min (x, 1) }");
+        assert!(
+            errs[0]
+                .extra
+                .iter()
+                .any(|(_, note)| note.contains("right after its name")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn percent_divides_by_100() {
+        assert!(matches!(expr("6.2%"), Expr::Num(n) if n == Decimal::new(62, 3)));
+        assert!(matches!(expr("-5%"), Expr::Neg(_)));
+        let Expr::Bin(x, BinOp::Div, hundred) = expr("rate%") else {
+            panic!()
+        };
+        assert!(matches!(*x.0, Expr::Ref(_)));
+        assert!(matches!(*hundred.0, Expr::Num(n) if n == Decimal::ONE_HUNDRED));
+    }
+
+    #[test]
+    fn units_bind_like_division() {
+        let Expr::Bin(_, BinOp::Sub, rhs) = expr("salary - 500/month") else {
+            panic!()
+        };
+        assert!(matches!(*rhs.0, Expr::Per(_, TimeUnit::Month)));
+        let Expr::Per(inner, TimeUnit::Year) = expr("(a + b)/year") else {
+            panic!()
+        };
+        assert!(matches!(*inner.0, Expr::Bin(_, BinOp::Add, _)));
+        let Expr::Bin(rate, BinOp::Mul, _) = expr("2_000/month * prices") else {
+            panic!()
+        };
+        assert!(matches!(*rate.0, Expr::Per(_, TimeUnit::Month)));
+        assert!(matches!(expr("x / months"), Expr::Bin(_, BinOp::Div, _)));
+    }
+
+    #[test]
+    fn totals_take_a_unit_in_brackets() {
+        let Expr::Period(inner, TimeUnit::Year) = expr("paycheck.contribution[year]") else {
+            panic!()
+        };
+        assert!(matches!(&*inner.0, Expr::Ref(path) if path.join() == "paycheck.contribution"));
+        let errs = parse_errs("check x[fortnight] > 0");
+        assert!(errs[0].message.contains("after `[`"), "{errs:?}");
+    }
+
+    #[test]
+    fn parses_day_literals() {
+        let cases = [
+            ("*", All),
+            ("fri", Weekday(Dow::Friday)),
+            ("weekday", Weekday(Dow::Weekday)),
+            ("15th", MonthDay(Ordinal::Nth(15))),
+            ("last", MonthDay(Ordinal::Last)),
+            ("2nd mon", NthWeekday(Ordinal::Nth(2), Dow::Monday)),
+            ("last fri", NthWeekday(Ordinal::Last, Dow::Friday)),
+            ("jan", Month(Month::January)),
+            ("jan 1", YearDay(Month::January, Ordinal::Nth(1))),
+            ("jul 4th", YearDay(Month::July, Ordinal::Nth(4))),
+            ("feb last", YearDay(Month::February, Ordinal::Last)),
+            ("jul 2026", MonthYear(Month::July, 2026)),
+            ("q2", Quarter(2)),
+            ("q3 2027", QuarterYear(3, 2027)),
+        ];
+        for (src, lit) in cases {
+            assert!(
+                matches!(expr(src), Expr::Days(found) if found == lit),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn day_set_operators() {
+        // `/` binds tighter than `&`, which binds tighter than `|`.
+        let Expr::Bin(range, BinOp::Inter, thin) = expr("2026-01-02.. & fri / 2") else {
+            panic!()
+        };
+        assert!(matches!(
+            *range.0,
+            Expr::Range {
+                to: None,
+                inclusive: false,
+                ..
+            }
+        ));
+        assert!(matches!(*thin.0, Expr::Bin(_, BinOp::Div, _)));
+        let Expr::Bin(_, BinOp::Union, inter) = expr("15th | last & q2") else {
+            panic!()
+        };
+        assert!(matches!(*inter.0, Expr::Bin(_, BinOp::Inter, _)));
+        assert!(matches!(
+            expr("sep..=jun"),
+            Expr::Range {
+                inclusive: true,
+                to: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(expr("* / 3"), Expr::Bin(_, BinOp::Div, _)));
+    }
+
+    #[test]
+    fn impossible_days_are_errors() {
+        let error = |src: &str| parse_expression(src).unwrap_err()[0].message.clone();
+        assert_eq!(error("32nd"), "no month has a 32nd day");
+        assert_eq!(error("feb 30"), "February has at most 29 days");
+        assert_eq!(error("6th mon"), "no month has a 6th Monday");
+    }
+
+    #[test]
+    fn if_requires_then_and_else() {
+        let errs = parse_errs("check if assets.cash > 0 1 else 0");
         assert!(errs.iter().any(|d| d.message.contains("then")));
-    }
-
-    #[test]
-    fn if_requires_else() {
-        let errs = parse_errs("assert that if Assets:Cash > 0 then 1 0");
+        let errs = parse_errs("check if assets.cash > 0 then 1 0");
         assert!(errs.iter().any(|d| d.message.contains("else")));
-    }
-
-    #[test]
-    fn malformed_inline_schedule_reports_the_schedule_error() {
-        let errs = parse_errs("entry every fortnight \"x\" { A = 1\nB }");
-        assert_eq!(errs.len(), 1, "{errs:?}");
-        assert!(errs[0].message.starts_with("expected period"), "{errs:?}");
     }
 
     #[test]
     fn malformed_declarations_are_never_dropped_silently() {
         let cases = [
-            ("param 5 = 3", "expected param name"),
-            ("schedule 5 = daily", "expected schedule name"),
-            ("account 5", "expected account name"),
-            ("fn 5(x) { x }", "expected function name"),
-            ("fn f(1) { 2 }", "expected parameter name"),
-            ("fn f(x) { let 5 = x; x }", "expected variable name"),
-            (
-                "entry monthly \"x\" { A = 1\nB } as 5",
-                "expected entry alias",
-            ),
-            ("entry monthly \"x\" { A = 1 as 5\nB }", "expected leg name"),
-            ("account A\nparam", "expected param name"),
+            ("let 5 = 3", "expected a name after `let`"),
+            ("fn 5(x) { x }", "expected a function name"),
+            ("fn f(1) { 2 }", "expected a parameter name"),
+            ("fn f(x) { let 5 = x\n x }", "expected a name after `let`"),
+            ("fn f(x) { }", "needs a value to return"),
+            ("entry e { assets.cash expenses.rent : 1 }", "expected `->`"),
+            ("entry e { assets.cash -> expenses.rent 1 }", "expected `:`"),
+            ("entry e { a -> b : 1 # }", "expected a tag"),
+            ("entry e fri { }", "expected `{` to start the entry"),
+            ("balances 2026-01-01 { }", "expected `@`"),
+            ("let x { 2026 = 1 }", "expected `=>`"),
+            ("check x\nlet", "expected a name after `let`"),
+            ("assets.cash", "expected a declaration"),
         ];
         for (src, expected) in cases {
             let tokens = crate::lexer::lex(src, 0).expect("lexer errored");

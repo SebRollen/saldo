@@ -6,9 +6,9 @@
 # Concepts
 
   - [Accounts](./accounts.md)
-  - [Schedules](./schedules.md)
-  - [Params](./params.md)
+  - [Sets of days](./schedules.md)
+  - [Values](./values.md)
   - [Entries](./entries.md)
-  - [Asserts](./asserts.md)
+  - [Checks](./checks.md)
   - [Functions](./fns.md)
-  - [Imports](./imports.md)
+  - [Modules](./modules.md)

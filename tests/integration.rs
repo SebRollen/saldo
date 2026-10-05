@@ -13,463 +13,8 @@ fn opts(from: &str, to: &str) -> RunOpts {
     }
 }
 
-// --- happy path ---
-
-#[test]
-fn ledger_output_contains_transactions() {
-    let src = "
-        account Assets:Cash = 1000 @ 2025-01-01
-        account Income:Salary
-
-        entry monthly \"Paycheck\" {
-          Assets:Cash = 500
-          Income:Salary
-        }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-03-31")).unwrap();
-    let ledger = output.to_ledger();
-    assert!(ledger.contains("opening-balances"));
-    assert!(
-        ledger
-            .lines()
-            .any(|line| line.split_whitespace().eq(["Assets:Cash", "1000"]))
-    );
-    assert!(ledger.contains("Paycheck"));
-}
-
-#[test]
-fn csv_output_has_header_and_rows() {
-    let src = "
-        account Assets:Cash = 200 @ 2025-01-01
-        account Liabilities:Loan = -500 @ 2025-01-01
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
-    let csv = output.to_csv();
-    let lines: Vec<&str> = csv.lines().collect();
-    assert_eq!(lines[0], r#""date","Assets:Cash","Liabilities:Loan""#);
-    assert_eq!(lines.len(), 4); // header + 3 days
-}
-
-#[test]
-fn single_day_range_is_accepted() {
-    let output = run(
-        "account Assets:Cash = 100 @ 2025-06-01",
-        &opts("2025-06-01", "2025-06-01"),
-    )
-    .unwrap();
-    assert!(output.to_ledger().contains("opening-balances"));
-}
-
-#[test]
-fn log_is_accessible_directly() {
-    let src = "
-        account Assets:Cash = 1000 @ 2025-01-01
-        account Income:Salary
-
-        entry monthly \"Paycheck\" {
-          Assets:Cash = 500
-          Income:Salary
-        }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
-    assert_eq!(output.log.snapshots.len(), 31);
-    assert_eq!(output.log.transactions.len(), 1);
-    assert_eq!(&*output.log.transactions[0].label, "Paycheck");
-}
-
-// --- option validation ---
-
-#[test]
-fn from_after_to_returns_error() {
-    let errors = run("account Assets:Cash", &opts("2025-12-31", "2025-01-01")).unwrap_err();
-    assert!(matches!(errors[0], saldo::Error::InvalidDateRange { .. }));
-}
-
-// --- lex / parse errors ---
-
-#[test]
-fn lexer_error_is_a_diagnostic() {
-    let errors = run(
-        "account Assets:Cash\n####",
-        &opts("2025-01-01", "2025-01-31"),
-    )
-    .unwrap_err();
-    assert!(matches!(errors[0], saldo::Error::Diagnostic(_)));
-}
-
-#[test]
-fn parse_error_is_a_diagnostic() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-
-        entry monthly \"Broken\" {
-          Assets:Cash = 100
-    ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(matches!(errors[0], saldo::Error::Diagnostic(_)));
-}
-
-// --- resolve errors ---
-
-#[test]
-fn unknown_account_in_posting_is_a_diagnostic() {
-    let src = "
-        account Assets:Cash
-
-        entry monthly \"Paycheck\" {
-          Assets:Cash    = 500
-          Income:Nowhere
-        }
-    ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(errors.iter().any(
-        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("unknown account"))
-    ));
-}
-
-#[test]
-fn unknown_param_in_expr_is_a_diagnostic() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-
-        entry monthly \"Paycheck\" {
-          Assets:Cash = ghost_param
-          Income:Salary
-        }
-    ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(errors.iter().any(
-        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("unknown reference"))
-    ));
-}
-
-// --- runtime / assertion errors ---
-
-#[test]
-fn failing_assertion_is_a_diagnostic() {
-    let src = "
-        account Assets:Cash = 100 @ 2025-01-01
-        assert that Assets:Cash >= 200
-    ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(errors.iter().any(
-        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("assertion failed"))
-    ));
-}
-
-#[test]
-fn passing_assertion_succeeds() {
-    let src = "
-        account Assets:Cash = 500 @ 2025-01-01
-        assert that Assets:Cash >= 0
-    ";
-    run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
-}
-
-#[test]
-fn opening_balance_before_sim_start_warms_up() {
-    let src = "
-        account Assets:Cash = 1000 @ 2024-01-01
-        account Income:Salary
-
-        entry monthly \"Paycheck\" {
-          Assets:Cash = 500
-          Income:Salary
-        }
-    ";
-    // Simulate from 2025-01-01, with opening on 2024-01-01.
-    // The warm-up should apply 12 monthly entries, so opening at 2025-01-01 is 1000 + 12*500 = 7000.
-    let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
-    let opening_cash = output
-        .log
-        .opening
-        .get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()]))
-        .copied()
-        .unwrap_or_default();
-    assert_eq!(opening_cash, rust_decimal::Decimal::new(7000, 0));
-}
-
-#[test]
-fn reference_before_opening_date_is_error() {
-    let src = "
-        account Assets:Cash = 1000 @ 2025-06-01
-        account Income:Salary
-
-        entry monthly \"Paycheck\" {
-          Assets:Cash = 500
-          Income:Salary
-        }
-    ";
-    // Simulation starts 2025-01-01, before Assets:Cash opens on 2025-06-01.
-    // The entry fires in January and references Assets:Cash before it opens.
-    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(
-        errors
-            .iter()
-            .any(|e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("opens on")))
-    );
-}
-
-// --- user-defined functions ---
-
-#[test]
-fn fn_doubles_a_constant_param() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-
-        fn double(x) { return x * 2; }
-        param salary = 100
-        param gross = double(salary)
-
-        entry monthly \"pay\" {
-          Assets:Cash = gross / 12
-          Income:Salary
-        }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
-    assert_eq!(output.log.transactions.len(), 1);
-    let posting = output.log.transactions[0]
-        .postings
-        .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
-        .unwrap();
-    // gross = 200, gross/12 ≈ 16.67
-    assert_eq!(posting.1.round_dp(2), Decimal::new(1667, 2));
-}
-
-#[test]
-fn fn_with_let_binding() {
-    let src = "
-        account Assets:Cash
-        account Expenses:Tax
-
-        fn net(gross, rate) {
-          let tax = gross * rate;
-          return gross - tax;
-        }
-
-        entry monthly \"salary\" {
-          Assets:Cash = net(6000, 0.3)
-          Expenses:Tax
-        }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
-    let posting = output.log.transactions[0]
-        .postings
-        .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
-        .unwrap();
-    // net(6000, 0.3) = 6000 - 1800 = 4200
-    assert_eq!(posting.1, Decimal::new(4200, 0));
-}
-
-#[test]
-fn fn_with_time_varying_param() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-
-        fn double(x) { return x * 2; }
-
-        param salary {
-          from 2025-01-01 to 2025-07-01 = 100
-          from 2025-07-01               = 200
-        }
-        param doubled = double(salary)
-
-        entry monthly \"pay\" {
-          Assets:Cash = doubled
-          Income:Salary
-        }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-12-31")).unwrap();
-    assert_eq!(output.log.transactions.len(), 12);
-    // January: doubled = 200
-    let jan = &output.log.transactions[0];
-    let jan_cash = jan
-        .postings
-        .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
-        .unwrap();
-    assert_eq!(jan_cash.1, Decimal::new(200, 0));
-    // July: doubled = 400
-    let jul = &output.log.transactions[6];
-    let jul_cash = jul
-        .postings
-        .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
-        .unwrap();
-    assert_eq!(jul_cash.1, Decimal::new(400, 0));
-}
-
-#[test]
-fn fn_calling_another_fn() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-
-        fn double(x) { return x * 2; }
-        fn quad(x)   { return double(double(x)); }
-
-        entry monthly \"pay\" {
-          Assets:Cash = quad(10)
-          Income:Salary
-        }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
-    let posting = output.log.transactions[0]
-        .postings
-        .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
-        .unwrap();
-    assert_eq!(posting.1, Decimal::new(40, 0));
-}
-
-#[test]
-fn fn_calling_builtin() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-
-        fn positive(x) { return max(x, 0); }
-
-        entry monthly \"pay\" {
-          Assets:Cash = positive(-50) + positive(30)
-          Income:Salary
-        }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
-    let posting = output.log.transactions[0]
-        .postings
-        .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
-        .unwrap();
-    // max(-50, 0) + max(30, 0)
-    assert_eq!(posting.1, Decimal::new(30, 0));
-}
-
-#[test]
-fn fn_with_if_expr() {
-    let src = "
-        account Assets:Cash
-        account Income:Bonus
-
-        fn bonus(salary, target) {
-          return if target > 0 then salary * 0.1 else 0;
-        }
-
-        entry monthly \"bonus\" {
-          Assets:Cash = bonus(10000, 1)
-          Income:Bonus
-        }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
-    let posting = output.log.transactions[0]
-        .postings
-        .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
-        .unwrap();
-    assert_eq!(posting.1, Decimal::new(1000, 0));
-}
-
-#[test]
-fn fn_referencing_global_param_is_rejected() {
-    let src = "
-        param rate = 0.3
-        fn bad(x) { return x * rate; }
-    ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(errors.iter().any(
-        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("function bodies can only reference"))
-    ));
-}
-
-#[test]
-fn opening_balance_date_equals_sim_start() {
-    let src = "
-        account Assets:Cash = 500 @ 2025-03-01
-        account Income:Salary
-
-        entry monthly \"Paycheck\" {
-          Assets:Cash = 100
-          Income:Salary
-        }
-    ";
-    let output = run(src, &opts("2025-03-01", "2025-03-31")).unwrap();
-    let opening_cash = output
-        .log
-        .opening
-        .get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()]))
-        .copied()
-        .unwrap_or_default();
-    assert_eq!(opening_cash, rust_decimal::Decimal::new(500, 0));
-}
-
-#[test]
-fn recursive_fn_is_rejected() {
-    let src = "fn loop_(x) { return loop_(x); }";
-    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(errors.iter().any(
-        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("recursive call cycle"))
-    ));
-}
-
-#[test]
-fn duplicate_fn_name_is_rejected() {
-    let src = "fn f(x) { return x; }\nfn f(y) { return y; }";
-    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(errors.iter().any(
-        |e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("duplicate function"))
-    ));
-}
-
-#[test]
-fn fn_implicit_return() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-
-        fn double(x) { x * 2 }
-        fn net(gross, rate) {
-          let tax = gross * rate;
-          gross - tax
-        }
-
-        entry monthly \"pay\" {
-          Assets:Cash = net(double(50), 0.2)
-          Income:Salary
-        }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
-    let posting = output.log.transactions[0]
-        .postings
-        .iter()
-        .find(|(p, _)| p.0 == vec!["Assets".to_string(), "Cash".to_string()])
-        .unwrap();
-    // double(50) = 100; net(100, 0.2) = 100 - 20 = 80
-    assert_eq!(posting.1, Decimal::new(80, 0));
-}
-
-#[test]
-fn fn_arity_mismatch_is_rejected() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-        fn double(x) { return x * 2; }
-        entry monthly \"pay\" {
-          Assets:Cash = double(1, 2)
-          Income:Salary
-        }
-    ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(
-        errors
-            .iter()
-            .any(|e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains("argument")))
-    );
+fn path(name: &str) -> saldo::Path {
+    saldo::Path(name.split('.').map(str::to_string).collect())
 }
 
 fn has_error(errors: &[saldo::Error], needle: &str) -> bool {
@@ -478,49 +23,7 @@ fn has_error(errors: &[saldo::Error], needle: &str) -> bool {
         .any(|e| matches!(e, saldo::Error::Diagnostic(d) if d.message.contains(needle)))
 }
 
-// --- balancing ---
-
-#[test]
-fn unbalanced_explicit_postings_are_rejected() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-
-        entry monthly \"Paycheck\" {
-          Assets:Cash   = 500
-          Income:Salary = -400
-        }
-    ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(has_error(&errors, "does not balance"));
-}
-
-#[test]
-fn balanced_explicit_postings_are_accepted() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-
-        entry monthly \"Paycheck\" {
-          Assets:Cash   = 500
-          Income:Salary = -500
-        }
-    ";
-    run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
-}
-
-#[test]
-fn single_posting_entry_is_rejected() {
-    let src = "
-        account Assets:Cash
-        entry monthly \"Free money\" { Assets:Cash = 500 }
-    ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(has_error(&errors, "at least two postings"));
-}
-
-// --- params & opening balances ---
-
+/// What transaction `tx` posts to `account`.
 fn posting(output: &saldo::Output, tx: usize, account: &str) -> Decimal {
     output.log.transactions[tx]
         .postings
@@ -530,272 +33,293 @@ fn posting(output: &saldo::Output, tx: usize, account: &str) -> Decimal {
         .unwrap_or_else(|| panic!("no posting to {account} in transaction {tx}"))
 }
 
-#[test]
-fn param_is_an_error_once_its_interval_ends() {
-    let src = "
-        account Assets:Cash
-        account Income:Bonus
-        param bonus { from 2025-01-01 to 2025-01-02 = 1000 }
-        entry daily \"Bonus\" {
-          Assets:Cash = bonus
-          Income:Bonus
-        }
-    ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-03")).unwrap_err();
-    assert!(has_error(
-        &errors,
-        "param `bonus` has no value on 2025-01-02"
-    ));
-}
-
-#[test]
-fn unused_param_without_a_value_is_not_an_error() {
-    let src = "
-        param bonus { from 2025-01-01 to 2025-01-02 = 1000 }
-        param half = bonus / 2
-    ";
-    run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
-}
-
-#[test]
-fn opening_balance_can_reference_a_param() {
-    let src = "
-        param initial = 5_000
-        account Assets:Cash = initial @ 2025-01-01
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
-    let opening = output
-        .log
-        .opening
-        .get(&saldo::Path(vec!["Assets".to_string(), "Cash".to_string()]));
-    assert_eq!(opening, Some(&Decimal::new(5000, 0)));
-}
-
-#[test]
-fn param_can_read_an_account_once_it_opens() {
-    let src = "
-        account Assets:Savings = 10 @ 2025-01-03
-        account Assets:Cash
-        account Income:Interest
-        param doubled = Assets:Savings * 2
-        entry 2025-01-03 \"Interest\" {
-          Assets:Cash = doubled
-          Income:Interest
-        }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
-    let tx = output
+/// The sum of the postings to `account` dated in `year`.
+fn posted_in(output: &saldo::Output, account: &str, year: i32) -> Decimal {
+    use chrono::Datelike;
+    output
         .log
         .transactions
         .iter()
-        .position(|t| &*t.label == "Interest")
-        .unwrap();
-    assert_eq!(posting(&output, tx, "Assets:Cash"), Decimal::new(20, 0));
+        .filter(|tx| tx.date.year() == year)
+        .flat_map(|tx| &tx.postings)
+        .filter(|(p, _)| p.to_string() == account)
+        .map(|(_, v)| *v)
+        .sum()
 }
 
-#[test]
-fn param_sees_earlier_entries_that_day() {
-    let src = "
-        account Assets:Cash = 100 @ 2025-01-01
-        account Assets:Savings
-        account Income:Salary
-        param half = Assets:Cash / 2
-        entry 2025-01-02 \"Paycheck\" {
-          Assets:Cash = 1_000
-          Income:Salary
-        }
-        entry 2025-01-02 \"Save half\" {
-          Assets:Savings = half
-          Assets:Cash
-        }
-        assert 2025-01-02 that half >= 275
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-01-02")).unwrap();
-    assert_eq!(postings_to(&output, "Assets:Savings"), [usd("550")]);
+/// The amounts posted to `account`, in order.
+fn postings_to(output: &saldo::Output, account: &str) -> Vec<Decimal> {
+    output
+        .log
+        .transactions
+        .iter()
+        .flat_map(|tx| &tx.postings)
+        .filter(|(p, _)| p.to_string() == account)
+        .map(|(_, v)| *v)
+        .collect()
 }
 
+fn usd(amount: &str) -> Decimal {
+    amount.parse().unwrap()
+}
+
+// --- happy path ---
+
 #[test]
-fn totals_include_earlier_entries_that_day() {
-    let src = "
-        account Assets:Cash
-        account Assets:Retirement
-        account Expense:Tax
-        account Expense:Fees
-        account Income:Salary
-        entry monthly \"Paycheck\" {
-          Assets:Retirement = 100 as k401
-          Assets:Cash       = 900
-          Income:Salary
-        } as paycheck
-        param deducted = paycheck.k401.ytd
-        entry monthly \"Year end\" {
-          Expense:Tax  = deducted
-          Expense:Fees = paycheck.k401.ytd
-          Assets:Cash
+fn ledger_output_contains_transactions() {
+    let src = r#"
+        balances @ 2025-01-01 { assets.cash = 1000 }
+        entry paycheck "Paycheck" @ last {
+          income.salary -> assets.cash : 500
         }
-    ";
-    let output = run(src, &opts("2025-01-01", "2025-02-28")).unwrap();
-    assert_eq!(
-        postings_to(&output, "Expense:Tax"),
-        [usd("100"), usd("200")]
+    "#;
+    let output = run(src, &opts("2025-01-01", "2025-03-31")).unwrap();
+    let ledger = output.to_ledger();
+    assert!(ledger.contains("opening-balances"));
+    assert!(
+        ledger
+            .lines()
+            .any(|line| line.split_whitespace().eq(["Assets:Cash", "1000"]))
     );
-    assert_eq!(
-        postings_to(&output, "Expense:Fees"),
-        [usd("100"), usd("200")]
+    assert!(
+        ledger.contains("2025-01-31 Paycheck\n  Assets:Cash     500\n  Income:Salary  -500\n"),
+        "{ledger}"
     );
 }
 
 #[test]
-fn account_opening_after_start_gets_an_opening_transaction() {
-    let src = "account Assets:Cash = 1000 @ 2025-01-02";
+fn csv_output_reads_each_kind_positive() {
+    let src = "
+        balances @ 2025-01-01 {
+          liabilities.loan = 500
+          assets.cash      = 200
+        }
+    ";
     let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
-    let tx = &output.log.transactions[0];
-    assert_eq!(tx.date, d("2025-01-02"));
-    assert_eq!(posting(&output, 0, "Assets:Cash"), Decimal::new(1000, 0));
-    assert_eq!(
-        posting(&output, 0, "Equity:OpeningBalances"),
-        Decimal::new(-1000, 0)
-    );
+    let csv = output.to_csv();
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines[0], r#""date","Assets:Cash","Liabilities:Loan""#);
+    assert_eq!(lines[1], "2025-01-01,200.00,500.00");
+    assert_eq!(lines.len(), 4); // header + 3 days
+    // The ledger shows what's owed as negative, as ledger tools expect.
+    assert!(output.to_ledger().contains("Liabilities:Loan        -500"));
 }
 
-// --- hostile input ---
+#[test]
+fn single_day_range_is_accepted() {
+    let output = run(
+        "balances @ 2025-06-01 { assets.cash = 100 }",
+        &opts("2025-06-01", "2025-06-01"),
+    )
+    .unwrap();
+    assert!(output.to_ledger().contains("opening-balances"));
+}
 
 #[test]
-fn arithmetic_overflow_is_a_diagnostic() {
+fn log_is_accessible_directly() {
+    let src = r#"
+        balances @ 2025-01-01 { assets.cash = 1000 }
+        entry paycheck "Paycheck" @ last {
+          income.salary -> assets.cash : 500
+        }
+    "#;
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    assert_eq!(output.log.snapshots.len(), 31);
+    assert_eq!(output.log.transactions.len(), 1);
+    assert_eq!(&*output.log.transactions[0].label, "Paycheck");
+}
+
+#[test]
+fn an_entry_without_a_label_is_named_by_its_path() {
     let src = "
-        account Assets:Cash = 1 @ 2025-01-01
-        account Income:Magic
-        entry daily \"Grow\" {
-          Assets:Cash = Assets:Cash * 1_000_000
-          Income:Magic
+        mod pay {
+          entry salary @ last { income.salary -> assets.cash : 500 }
         }
     ";
-    let errors = run(src, &opts("2025-01-01", "2025-12-31")).unwrap_err();
-    assert!(has_error(&errors, "overflow"));
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    assert_eq!(&*output.log.transactions[0].label, "pay.salary");
+}
+
+// --- option validation ---
+
+#[test]
+fn from_after_to_returns_error() {
+    let errors = run("", &opts("2025-12-31", "2025-01-01")).unwrap_err();
+    assert!(matches!(errors[0], saldo::Error::InvalidDateRange { .. }));
+}
+
+// --- lex / parse errors ---
+
+#[test]
+fn lexer_error_is_a_diagnostic() {
+    let errors = run("let x = 1\n$$$$", &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(matches!(errors[0], saldo::Error::Diagnostic(_)));
 }
 
 #[test]
-fn non_ascii_outside_a_string_is_a_diagnostic() {
-    for src in ["account Caf€", "param p = 1s€"] {
-        let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-        assert!(has_error(&errors, "unexpected character `€`"), "{src}");
-        // Rendering must not split the multi-byte character.
-        saldo::format_errors("test.saldo", src, &errors, true);
-    }
+fn parse_error_is_a_diagnostic() {
+    let src = r#"
+        entry broken "Broken" @ last {
+          income.salary -> assets.cash : 100
+    "#;
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(matches!(errors[0], saldo::Error::Diagnostic(_)));
 }
 
-#[test]
-fn deeply_nested_expressions_are_rejected() {
-    let parens = format!("param p = {}1{}", "(".repeat(20_000), ")".repeat(20_000));
-    let negations = format!("param p = {}1", "-".repeat(20_000));
-    let chain = format!("param p = {}", vec!["1"; 20_000].join(" + "));
-    for src in [parens, negations, chain] {
-        let errors = run(&src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-        assert!(has_error(&errors, "nested too deeply"));
-    }
-}
+// --- resolve errors ---
 
 #[test]
-fn expressions_near_the_nesting_limit_evaluate() {
-    let src = format!(
-        "param p = {}1{}\nparam q = {}\nassert that p + q == 251",
-        "(".repeat(250),
-        ")".repeat(250),
-        vec!["1"; 250].join(" + "),
-    );
-    run(&src, &opts("2025-01-01", "2025-01-01")).unwrap();
-}
-
-// --- name resolution ---
-
-#[test]
-fn invalid_date_is_a_diagnostic() {
-    let errors = run("param p = 2025-13-01", &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(has_error(&errors, "invalid date `2025-13-01`"));
-}
-
-#[test]
-fn fn_named_like_a_builtin_is_rejected() {
-    let errors = run("fn min(a, b) { a + b }", &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(has_error(&errors, "same name as a built-in"));
-}
-
-#[test]
-fn param_cycles_are_reported_once_with_their_path() {
+fn reading_an_account_nothing_moves_is_a_diagnostic() {
     let src = "
-        param a = b
-        param b = c + 1
-        param c = a
-        param d = a
-        param e = e * 2
+        entry paycheck @ last { income.salary -> assets.cash : 500 }
+        check assets.csh >= 0
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(has_error(
+        &errors,
+        "no entry or balance moves money into or out of `assets.csh`"
+    ));
+}
+
+#[test]
+fn unknown_name_in_expr_is_a_diagnostic() {
+    let src = "entry paycheck @ last { income.salary -> assets.cash : ghost }";
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(has_error(&errors, "unknown name `ghost`"));
+}
+
+// --- runtime / check errors ---
+
+#[test]
+fn failing_check_is_a_diagnostic() {
+    let src = "
+        balances @ 2025-01-01 { assets.cash = 100 }
+        check assets.cash >= 200
     ";
     let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert_eq!(errors.len(), 2, "{errors:?}");
-    assert!(has_error(
-        &errors,
-        "param `a` depends on itself (a → b → c → a)"
-    ));
-    assert!(has_error(&errors, "param `e` depends on itself (e → e)"));
+    assert!(has_error(&errors, "check failed on 2025-01-01: 100 >= 200"));
 }
 
 #[test]
-fn leg_name_conflicting_with_a_later_param_is_rejected() {
+fn passing_check_succeeds() {
     let src = "
-        account Assets:Cash
-        account Income:Salary
-        entry monthly \"Paycheck\" {
-          Assets:Cash = 10 as rate
-          Income:Salary
-        }
-        param rate = 0.5
+        balances @ 2025-01-01 { assets.cash = 500 }
+        check assets.cash >= 0
     ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(has_error(&errors, "leg name `rate` conflicts with a param"));
+    run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
 }
 
 #[test]
-fn leg_name_conflicting_with_an_account_is_rejected() {
+fn opening_balance_before_sim_start_warms_up() {
     let src = "
-        account Cash
-        account Income
-        entry monthly \"Paycheck\" {
-          Cash = 10 as Income
-          Income
+        balances @ 2024-01-01 { assets.cash = 1000 }
+        entry paycheck @ last { income.salary -> assets.cash : 500 }
+    ";
+    // The warm-up applies 12 monthly entries, so the opening balance on
+    // 2025-01-01 is 1000 + 12 * 500 = 7000.
+    let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
+    assert_eq!(
+        output.log.opening[&path("assets.cash")],
+        Decimal::new(7000, 0)
+    );
+}
+
+#[test]
+fn reference_before_opening_date_is_error() {
+    let src = "
+        balances @ 2025-06-01 { assets.cash = 1000 }
+        entry paycheck @ last { income.salary -> assets.cash : 500 }
+    ";
+    // The entry fires in January, before `assets.cash` opens.
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(has_error(&errors, "opens on"));
+}
+
+#[test]
+fn opening_balance_date_equals_sim_start() {
+    let src = "
+        balances @ 2025-03-01 { assets.cash = 500 }
+        entry paycheck @ last { income.salary -> assets.cash : 100 }
+    ";
+    let output = run(src, &opts("2025-03-01", "2025-03-31")).unwrap();
+    assert_eq!(
+        output.log.opening[&path("assets.cash")],
+        Decimal::new(500, 0)
+    );
+}
+
+// --- moves and accounts ---
+
+#[test]
+fn moves_through_an_account_net_out_in_its_transaction() {
+    let src = "
+        let salary   = 120_000/year
+        let max_401k = 24_000/year
+        entry paycheck @ last {
+          income.salary -> assets.cash       : salary
+          assets.cash   -> assets.retirement : max_401k
         }
     ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(has_error(
-        &errors,
-        "leg name `Income` conflicts with an account"
-    ));
+    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "assets.retirement"), usd("2000.00"));
+    assert_eq!(posting(&output, 0, "assets.cash"), usd("8000.00"));
+    assert_eq!(posting(&output, 0, "income.salary"), usd("-10000.00"));
+    assert_eq!(output.log.transactions[0].postings.len(), 3);
 }
 
 #[test]
-fn referencing_the_auto_balanced_leg_is_rejected() {
+fn accounts_read_positive_for_their_kind() {
     let src = "
-        account Assets:Cash
-        account Expenses:Tax
-        account Income:Salary
-        entry monthly \"Paycheck\" {
-          Assets:Cash  = 100 + gross
-          Expenses:Tax = 5
-          Income:Salary as gross
+        balances @ 2026-01-01 {
+          assets.cash      = 1_000
+          liabilities.loan = 3_000
+        }
+        entry salary @ 2026-01-15 { income.salary -> assets.cash : 500 }
+        entry rent @ 2026-01-20 { assets.cash -> expenses.rent : 200 }
+        check assets.cash == 1_300 and liabilities.loan == 3_000 @ 2026-01-31
+        check income.salary == 500 and expenses.rent == 200 @ 2026-01-31
+        check assets - liabilities == -1_700 @ 2026-01-31
+    ";
+    run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+}
+
+#[test]
+fn a_group_reads_the_sum_of_its_accounts() {
+    let src = "
+        balances @ 2026-01-01 {
+          assets.retirement.alex = 100
+          assets.retirement.sam  = 200
+        }
+        balances @ 2026-06-01 { assets.retirement.new = 50 }
+        // A group counts accounts that haven't opened yet as zero.
+        check assets.retirement == 300 @ 2026-01-01
+        check assets.retirement == 350 @ 2026-06-01
+    ";
+    run(src, &opts("2026-01-01", "2026-06-01")).unwrap();
+}
+
+#[test]
+fn paying_off_an_account_with_its_balance() {
+    let src = "
+        balances @ 2025-01-01 { liabilities.accrued = 50 }
+        entry clear @ * {
+          assets.cash -> liabilities.accrued : liabilities.accrued
         }
     ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
-    assert!(has_error(&errors, "`gross` is the auto-balanced leg"));
+    let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
+    // Only the first day has a balance to clear; entries that move no money
+    // are skipped.
+    assert_eq!(output.log.transactions.len(), 1);
+    assert_eq!(output.log.transactions[0].date, d("2025-01-01"));
+    assert_eq!(posting(&output, 0, "liabilities.accrued"), usd("50"));
+    assert_eq!(posting(&output, 0, "assets.cash"), usd("-50"));
 }
 
-// --- amounts ---
-
 #[test]
-fn clearing_an_empty_account_posts_zero_not_negative_zero() {
+fn moving_nothing_posts_no_negative_zero() {
     let src = "
-        account Liabilities:Accrued
-        account Assets:Cash
-        entry daily \"Clear\" {
-          Liabilities:Accrued = all
-          Assets:Cash
+        entry clear {
+          assets.cash -> liabilities.accrued : liabilities.accrued
         }
     ";
     let ledger = run(src, &opts("2025-01-01", "2025-01-01"))
@@ -808,37 +332,378 @@ fn clearing_an_empty_account_posts_zero_not_negative_zero() {
 }
 
 #[test]
-fn entries_that_move_no_money_are_skipped() {
+fn opening_balances_are_rounded_like_moves() {
     let src = "
-        account Liabilities:Accrued = 50 @ 2025-01-01
-        account Assets:Cash
-        entry daily \"Clear\" {
-          Liabilities:Accrued = all
-          Assets:Cash
+        balances @ 2025-01-01 { liabilities.accrued = 100 / 3 }
+        entry clear {
+          assets.cash -> liabilities.accrued : liabilities.accrued
         }
+        check liabilities.accrued == 0
     ";
-    let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
-    // Only the first day has a balance to clear.
-    assert_eq!(output.log.transactions.len(), 1);
-    assert_eq!(output.log.transactions[0].date, d("2025-01-01"));
+    let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
+    assert_eq!(posting(&output, 0, "liabilities.accrued"), usd("33.33"));
 }
 
 #[test]
-fn opening_balances_are_rounded_like_postings() {
+fn accounts_have_totals_like_tags() {
     let src = "
-        account Liabilities:Accrued = 100 / 3 @ 2025-01-01
-        account Assets:Cash
-        entry daily \"Clear\" {
-          Liabilities:Accrued = all
-          Assets:Cash
-        }
-        assert that Liabilities:Accrued == 0
+        entry paycheck @ 15th | last { income.salary -> assets.cash : 1_000 }
+        entry rent @ 1st { assets.cash -> expenses.rent : 400 }
+        check income.salary[year] == 6_000 and income.salary[month] == 2_000 @ 2026-03-31
+        check assets.cash[quarter] == 4_800 @ 2026-03-31
+        check income[year] == 6_000 @ 2026-03-31
+    ";
+    run(src, &opts("2026-01-01", "2026-03-31")).unwrap();
+}
+
+#[test]
+fn an_account_cant_also_be_a_group() {
+    let src = "
+        entry a { income.x -> assets.cash : 1 }
+        entry b { income.x -> assets.cash.checking : 1 }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(
+        &errors,
+        "`assets.cash` holds money, so it can't also be a group"
+    ));
+}
+
+#[test]
+fn near_identical_accounts_warn() {
+    let src = "
+        entry a { income.salary -> assets.retirement : 1 }
+        entry b { income.salary -> assets.retirment : 1 }
     ";
     let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
     assert_eq!(
-        posting(&output, 0, "Liabilities:Accrued"),
-        Decimal::new(-3333, 2)
+        output.warnings[0].message,
+        "`assets.retirement` and `assets.retirment` are both accounts; is one of them a typo?"
     );
+}
+
+// --- functions ---
+
+#[test]
+fn fn_doubles_a_constant_value() {
+    let src = "
+        fn double(x) { x * 2 }
+        let salary = 100
+        let gross = double(salary)
+        entry pay @ last { income.salary -> assets.cash : gross / 12 }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    assert_eq!(output.log.transactions.len(), 1);
+    // gross = 200, gross/12 ≈ 16.67
+    assert_eq!(posting(&output, 0, "assets.cash"), Decimal::new(1667, 2));
+}
+
+#[test]
+fn fn_with_let_binding() {
+    let src = "
+        fn net(gross, rate) {
+          let tax = gross * rate
+          gross - tax
+        }
+        entry salary @ last { expenses.tax -> assets.cash : net(6000, 0.3) }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    // net(6000, 0.3) = 6000 - 1800 = 4200
+    assert_eq!(posting(&output, 0, "assets.cash"), Decimal::new(4200, 0));
+}
+
+#[test]
+fn fn_with_time_varying_value() {
+    let src = "
+        fn double(x) { x * 2 }
+        let salary {
+          2025-01-01..2025-07-01 => 100
+          2025-07-01..           => 200
+        }
+        let doubled = double(salary)
+        entry pay @ last { income.salary -> assets.cash : doubled }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-12-31")).unwrap();
+    assert_eq!(output.log.transactions.len(), 12);
+    assert_eq!(posting(&output, 0, "assets.cash"), Decimal::new(200, 0));
+    assert_eq!(posting(&output, 6, "assets.cash"), Decimal::new(400, 0));
+}
+
+#[test]
+fn fn_calling_another_fn_and_builtins() {
+    let src = "
+        fn double(x) { x * 2 }
+        fn quad(x)   { double(double(x)) }
+        fn positive(x) { max(x, 0) }
+        entry pay @ last { income.salary -> assets.cash : quad(10) + positive(-50) + positive(30) }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "assets.cash"), Decimal::new(70, 0));
+}
+
+#[test]
+fn fn_with_if_expr() {
+    let src = "
+        fn bonus(salary, target) {
+          if target > 0 then salary * 0.1 else 0
+        }
+        entry bonus_pay @ last { income.bonus -> assets.cash : bonus(10000, 1) }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "assets.cash"), Decimal::new(1000, 0));
+}
+
+#[test]
+fn functions_read_values_but_not_balances() {
+    let src = "
+        let rate = 0.3
+        fn taxed(x) { x * rate }
+        entry pay @ last { income.salary -> assets.cash : taxed(1_000) }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "assets.cash"), usd("300"));
+
+    let src = "
+        balances @ 2025-01-01 { assets.cash = 1 }
+        fn bad(x) { x * assets.cash }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(&errors, "function `bad` can't read balances"));
+}
+
+#[test]
+fn recursive_fn_is_rejected() {
+    let errors = run(
+        "fn loop_(x) { loop_(x) }",
+        &opts("2025-01-01", "2025-01-01"),
+    )
+    .unwrap_err();
+    assert!(has_error(&errors, "function `loop_` calls itself"));
+}
+
+#[test]
+fn duplicate_fn_name_is_rejected() {
+    let src = "fn f(x) { x }\nfn f(y) { y }";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(&errors, "`f` is already declared"));
+}
+
+#[test]
+fn fn_arity_mismatch_is_rejected() {
+    let src = "
+        fn double(x) { x * 2 }
+        entry pay @ last { income.salary -> assets.cash : double(1, 2) }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(&errors, "`double` takes 1 argument, got 2"));
+}
+
+// --- values & opening balances ---
+
+#[test]
+fn value_is_an_error_once_its_interval_ends() {
+    let src = "
+        let bonus { 2025-01-01..2025-01-02 => 1000 }
+        entry bonus_pay @ * { income.bonus -> assets.cash : bonus }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-03")).unwrap_err();
+    assert!(has_error(&errors, "`bonus` has no value on 2025-01-02"));
+}
+
+#[test]
+fn unused_value_without_a_value_is_not_an_error() {
+    let src = "
+        let bonus { 2025-01-01..2025-01-02 => 1000 }
+        let half = bonus / 2
+    ";
+    run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
+}
+
+#[test]
+fn opening_balance_can_reference_a_value() {
+    let src = "
+        let initial = 5_000
+        balances @ 2025-01-01 { assets.cash = initial }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
+    assert_eq!(
+        output.log.opening.get(&path("assets.cash")),
+        Some(&Decimal::new(5000, 0))
+    );
+}
+
+#[test]
+fn value_can_read_an_account_once_it_opens() {
+    let src = r#"
+        balances @ 2025-01-03 { assets.savings = 10 }
+        let doubled = assets.savings * 2
+        entry interest "Interest" @ 2025-01-03 { income.interest -> assets.cash : doubled }
+    "#;
+    let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
+    let tx = output
+        .log
+        .transactions
+        .iter()
+        .position(|t| &*t.label == "Interest")
+        .unwrap();
+    assert_eq!(posting(&output, tx, "assets.cash"), Decimal::new(20, 0));
+}
+
+#[test]
+fn value_sees_earlier_entries_that_day() {
+    let src = "
+        balances @ 2025-01-01 { assets.cash = 100 }
+        let half = assets.cash / 2
+        entry paycheck @ 2025-01-02 { income.salary -> assets.cash : 1_000 }
+        entry save @ 2025-01-02 { assets.cash -> assets.savings : half }
+        check half >= 275 @ 2025-01-02
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-02")).unwrap();
+    assert_eq!(postings_to(&output, "assets.savings"), [usd("550")]);
+}
+
+#[test]
+fn totals_include_earlier_entries_that_day() {
+    let src = "
+        entry paycheck @ last {
+          income.salary -> assets.cash       : 1_000
+          assets.cash   -> assets.retirement : 100 #k401
+        }
+        let deducted = paycheck.k401[year]
+        entry year_end @ last {
+          assets.cash -> expenses.tax  : deducted
+          assets.cash -> expenses.fees : paycheck.k401[year]
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-02-28")).unwrap();
+    assert_eq!(
+        postings_to(&output, "expenses.tax"),
+        [usd("100"), usd("200")]
+    );
+    assert_eq!(
+        postings_to(&output, "expenses.fees"),
+        [usd("100"), usd("200")]
+    );
+}
+
+#[test]
+fn account_opening_after_start_gets_an_opening_transaction() {
+    let src = "balances @ 2025-01-02 { assets.cash = 1000 }";
+    let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
+    let tx = &output.log.transactions[0];
+    assert_eq!(tx.date, d("2025-01-02"));
+    assert_eq!(posting(&output, 0, "assets.cash"), Decimal::new(1000, 0));
+    assert_eq!(
+        posting(&output, 0, "equity.opening_balances"),
+        Decimal::new(-1000, 0)
+    );
+}
+
+#[test]
+fn an_account_opens_once() {
+    let src = "
+        balances @ 2025-01-01 { assets.cash = 1 }
+        balances @ 2025-02-01 { assets.cash = 2 }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(
+        &errors,
+        "`assets.cash` already has an opening balance"
+    ));
+}
+
+// --- hostile input ---
+
+#[test]
+fn arithmetic_overflow_is_a_diagnostic() {
+    let src = "
+        balances @ 2025-01-01 { assets.cash = 1 }
+        entry grow { income.magic -> assets.cash : assets.cash * 1_000_000 }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-12-31")).unwrap_err();
+    assert!(has_error(&errors, "overflow"));
+}
+
+#[test]
+fn non_ascii_outside_a_string_is_a_diagnostic() {
+    for src in ["check Caf€", "let p = 1s€"] {
+        let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+        assert!(has_error(&errors, "unexpected character `€`"), "{src}");
+        // Rendering must not split the multi-byte character.
+        saldo::format_errors("test.saldo", src, &errors, true);
+    }
+}
+
+#[test]
+fn deeply_nested_expressions_are_rejected() {
+    let parens = format!("let p = {}1{}", "(".repeat(20_000), ")".repeat(20_000));
+    let negations = format!("let p = {}1", "-".repeat(20_000));
+    let chain = format!("let p = {}", vec!["1"; 20_000].join(" + "));
+    for src in [parens, negations, chain] {
+        let errors = run(&src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+        assert!(has_error(&errors, "nested too deeply"));
+    }
+}
+
+#[test]
+fn expressions_near_the_nesting_limit_evaluate() {
+    let src = format!(
+        "let p = {}1{}\nlet q = {}\ncheck p + q == 251",
+        "(".repeat(250),
+        ")".repeat(250),
+        vec!["1"; 250].join(" + "),
+    );
+    run(&src, &opts("2025-01-01", "2025-01-01")).unwrap();
+}
+
+// --- name resolution ---
+
+#[test]
+fn invalid_date_is_a_diagnostic() {
+    let errors = run("let p = 2025-13-01", &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(&errors, "invalid date `2025-13-01`"));
+}
+
+#[test]
+fn fn_named_like_a_builtin_is_rejected() {
+    let errors = run("fn min(a, b) { a + b }", &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert!(has_error(&errors, "`min` is a built-in function"));
+}
+
+#[test]
+fn value_cycles_are_reported_once_with_their_path() {
+    let src = "
+        let a = b
+        let b = c + 1
+        let c = a
+        let d = a
+        let e = e * 2
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(has_error(&errors, "`a` depends on itself (a → b → c → a)"));
+    assert!(has_error(&errors, "`e` depends on itself (e → e)"));
+}
+
+#[test]
+fn modules_name_their_contents_in_full() {
+    let src = r#"
+        let rate = 1
+        mod loans {
+          let rate = 2
+          mod car {
+            let payment = 300
+            entry repay "Car loan" @ last {
+              assets.cash -> liabilities.car : payment * loans.rate * rate
+            }
+          }
+        }
+        check loans.car.payment == 300
+    "#;
+    let output = run(src, &opts("2025-01-01", "2025-01-31")).unwrap();
+    // `rate` in `loans.car` is the one at the top: modules don't see their
+    // parents' names.
+    assert_eq!(posting(&output, 0, "liabilities.car"), usd("600"));
 }
 
 // --- diagnostic spans ---
@@ -859,37 +724,37 @@ fn highlighted<'a>(src: &'a str, errors: &[saldo::Error], needle: &str) -> &'a s
 fn resolver_errors_point_at_the_offending_text() {
     let cases = [
         (
-            "account A\nentry daily \"x\" {\n A = 1\n Nowhere:Else\n}",
-            "unknown account",
-            "Nowhere:Else",
+            "entry x { income.a -> assets.b : 1 }\ncheck assets.nowhere >= 0",
+            "no entry or balance moves money",
+            "assets.nowhere",
         ),
         (
-            "account A\naccount B\nentry daily \"x\" {\n A = 1 as leg\n B as leg\n}",
-            "duplicate leg name",
-            "leg",
+            "entry x { cash -> assets.b : 1 }",
+            "isn't an account",
+            "cash",
         ),
         (
-            "account A\naccount B\naccount C\nentry daily \"x\" {\n A = 1\n B\n C\n}",
-            "only one posting",
-            "C",
-        ),
-        (
-            "param p {\n from 2025-01-01 = 1\n from 2025-06-01 = 2\n}",
+            "let p {\n 2025-01-01.. => 1\n 2025-06-01.. => 2\n}",
             "never applies",
-            "from 2025-06-01 = 2",
+            "2025-06-01.. => 2",
         ),
         (
-            "param p {\n from 2025-06-01 to 2025-01-01 = 1\n}",
-            "`to` must come after `from`",
-            "from 2025-06-01 to 2025-01-01 = 1",
+            "let p {\n 2025-06-01..2025-01-01 => 1\n}",
+            "ends before it starts",
+            "2025-06-01..2025-01-01",
         ),
         (
-            "account A\naccount B\nentry payday \"x\" {\n A = 1\n B\n}",
-            "not defined",
+            "entry x @ payday { income.a -> assets.b : 1 }",
+            "unknown name `payday`",
             "payday",
         ),
-        ("fn f(x, y, x) { x }", "duplicate parameter", "x"),
-        ("fn f(x) { x.ytd }", "cannot use", "x.ytd"),
+        ("fn f(x, y, x) { x }", "already a parameter", "x"),
+        ("fn f(x) { x[year] }", "can't read totals", "x[year]"),
+        (
+            "let payday = 15th | last\nlet x = payday * 2",
+            "is a set of days",
+            "payday",
+        ),
     ];
     for (src, needle, expected) in cases {
         let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
@@ -898,44 +763,48 @@ fn resolver_errors_point_at_the_offending_text() {
 }
 
 #[test]
-fn param_arm_errors_point_at_the_offending_text() {
+fn arm_errors_point_at_the_offending_text() {
     let cases = [
         (
-            "param p {\n in jul 2027 through 2026 = 1\n}",
+            "let p {\n jul 2027..=2026 => 1\n}",
             "ends before it starts",
-            "jul 2027 through 2026",
+            "jul 2027..=2026",
         ),
         (
-            "param p {\n in may through 2027 = 1\n}",
-            "both ends of `through`",
-            "may through 2027",
+            "let p {\n may..=2027 => 1\n}",
+            "both ends of a range need a year",
+            "may..=2027",
         ),
-        ("param p {\n from may = 1\n}", "`from` needs a year", "may"),
-        ("param p {\n in 26 = 1\n}", "year written in full", "26"),
         (
-            "param p {\n during may = 1\n}",
-            "expected `from`, `in` or `else`",
+            "let p {\n may.. => 1\n}",
+            "a range of months needs an end",
+            "may..",
+        ),
+        ("let p {\n 26 => 1\n}", "year written in full", "26"),
+        (
+            "let p {\n during => 1\n}",
+            "unknown name `during`",
             "during",
         ),
         (
-            "param p {\n else = 1\n in may = 2\n}",
-            "comes after `else`",
-            "in may = 2",
+            "let p {\n _ => 1\n may => 2\n}",
+            "comes after `_`",
+            "may => 2",
         ),
         (
-            "param p {\n in q2 = 1\n in may = 2\n}",
+            "let p {\n q2 => 1\n may => 2\n}",
             "never applies",
-            "in may = 2",
+            "may => 2",
         ),
         (
-            "param p {\n in 2027 = 1\n from 2027-03-01 to 2027-04-01 = 2\n}",
+            "let p {\n 2027 => 1\n 2027-03-01..2027-04-01 => 2\n}",
             "never applies",
-            "from 2027-03-01 to 2027-04-01 = 2",
+            "2027-03-01..2027-04-01 => 2",
         ),
         (
-            "param p {\n in jan through jun, jul through dec = 1\n else = 2\n}",
+            "let p {\n jan..=jun | jul..=dec => 1\n _ => 2\n}",
             "never applies",
-            "else = 2",
+            "_ => 2",
         ),
     ];
     for (src, needle, expected) in cases {
@@ -945,20 +814,15 @@ fn param_arm_errors_point_at_the_offending_text() {
 }
 
 #[test]
-fn param_arms_repeat_every_year_and_the_first_match_wins() {
+fn arms_repeat_every_year_and_the_first_match_wins() {
     let src = "
-        account Assets:Cash
-        account Expense:Tuition
-        param tuition {
-          in jan 2027     = 0
-          in jul, aug     = 0
-          from 2027-09-01 = 2_100
-          else            = 1_950
+        let tuition {
+          jan 2027        => 0
+          jul | aug       => 0
+          2027-09-01..    => 2_100
+          _               => 1_950
         }
-        entry monthly on the 1st \"Tuition\" {
-          Expense:Tuition = tuition
-          Assets:Cash
-        }
+        entry tuition_pay @ 1st { assets.cash -> expenses.tuition : tuition }
     ";
     let output = run(src, &opts("2026-10-01", "2027-10-31")).unwrap();
     let paid: Vec<(NaiveDate, Decimal)> = output
@@ -989,86 +853,72 @@ fn param_arms_repeat_every_year_and_the_first_match_wins() {
 }
 
 #[test]
-fn param_arms_take_quarters_years_and_month_ranges() {
+fn arms_take_quarters_years_and_month_ranges() {
     let src = "
-        account Assets:Cash
-        account Expense:Power
-        param power {
-          in q3 2027         = 300 per month
-          in dec through feb = 900 per month
-          in 2026            = 100 per month
-          else               = 400 per month
+        let power {
+          q3 2027   => 300/month
+          dec..=feb => 900/month
+          2026      => 100/month
+          _         => 400/month
         }
-        entry monthly \"Power\" {
-          Expense:Power = power
-          Assets:Cash
-        }
+        entry power_bill @ last { assets.cash -> expenses.power : power }
     ";
     let output = run(src, &opts("2026-11-01", "2027-10-31")).unwrap();
     let expected = [100, 900, 900, 900, 400, 400, 400, 400, 300, 300, 300, 400].map(Decimal::from);
-    assert_eq!(postings_to(&output, "Expense:Power"), expected);
+    assert_eq!(postings_to(&output, "expenses.power"), expected);
 }
 
+const QUARTER_ENDS: &str = "mar 31 | jun 30 | sep 30 | dec 31";
+
 #[test]
-fn a_param_changing_in_periods_without_a_firing_is_an_error() {
-    let src = "
-        account Assets:Cash
-        account Expense:Power
-        param power {
-          in jan = 100 per month
-          in feb = 200 per month
-          else   = 300 per month
-        }
-        entry quarterly \"Power bill\" {
-          Expense:Power = power
-          Assets:Cash
-        }
-    ";
-    let errors = run(src, &opts("2027-01-01", "2027-03-31")).unwrap_err();
+fn a_value_changing_in_periods_without_a_firing_is_an_error() {
+    let src = format!(
+        r#"
+        let power {{
+          jan => 100/month
+          feb => 200/month
+          _   => 300/month
+        }}
+        entry bill "Power bill" @ {QUARTER_ENDS} {{
+          assets.cash -> expenses.power : power
+        }}
+    "#
+    );
+    let errors = run(&src, &opts("2027-01-01", "2027-03-31")).unwrap_err();
     assert_eq!(
-        highlighted(src, &errors, "changes during the months before 2027-03-01"),
+        highlighted(&src, &errors, "changes during the months before 2027-03-01"),
         "power"
     );
 }
 
 #[test]
-fn a_param_may_change_where_every_period_has_a_firing() {
-    let src = "
-        account Assets:Cash
-        account Expense:Rent
-        account Expense:Insurance
-        param rent {
-          from 2027-03-10 = 2_000 per month
-          else            = 1_800 per month
-        }
-        param insurance {
-          in q1 = 300 per quarter
-          else  = 600 per quarter
-        }
-        entry monthly on the 15th \"Rent\" {
-          Expense:Rent = rent
-          Assets:Cash
-        }
-        entry quarterly \"Insurance\" {
-          Expense:Insurance = insurance
-          Assets:Cash
-        }
-    ";
-    let output = run(src, &opts("2027-01-01", "2027-06-30")).unwrap();
+fn a_value_may_change_where_every_period_has_a_firing() {
+    let src = format!(
+        "
+        let rent {{
+          2027-03-10.. => 2_000/month
+          _            => 1_800/month
+        }}
+        let insurance {{
+          q1 => 300/quarter
+          _  => 600/quarter
+        }}
+        entry rent_pay @ 15th {{ assets.cash -> expenses.rent : rent }}
+        entry insurance_pay @ {QUARTER_ENDS} {{ assets.cash -> expenses.insurance : insurance }}
+    "
+    );
+    let output = run(&src, &opts("2027-01-01", "2027-06-30")).unwrap();
     let rent = [1_800, 1_800, 2_000, 2_000, 2_000, 2_000].map(Decimal::from);
-    assert_eq!(postings_to(&output, "Expense:Rent"), rent);
+    assert_eq!(postings_to(&output, "expenses.rent"), rent);
     let insurance = [300, 600].map(Decimal::from);
-    assert_eq!(postings_to(&output, "Expense:Insurance"), insurance);
+    assert_eq!(postings_to(&output, "expenses.insurance"), insurance);
 }
 
 #[test]
 fn a_schedule_in_some_months_splits_a_yearly_rate_over_its_firings() {
     let src = "
-        account Assets:Cash
-        account Expense:Tuition
-        entry monthly on the 1st in sep through jun \"Tuition\" {
-          Expense:Tuition = 24_000 per year
-          Assets:Cash
+        entry tuition @ 1st & sep..=jun {
+          assets.cash -> expenses.tuition : 24_000/year
         }
     ";
     let output = run(src, &opts("2027-01-01", "2027-12-31")).unwrap();
@@ -1082,24 +932,19 @@ fn a_schedule_in_some_months_splits_a_yearly_rate_over_its_firings() {
         })
         .collect();
     assert_eq!(months, [1, 2, 3, 4, 5, 6, 9, 10, 11, 12]);
-    assert_eq!(postings_to(&output, "Expense:Tuition"), [usd("2400"); 10]);
+    assert_eq!(postings_to(&output, "expenses.tuition"), [usd("2400"); 10]);
 }
 
 #[test]
 fn periods_a_schedule_leaves_out_dont_roll_into_the_next_firing() {
     let src = "
-        account Assets:Cash
-        account Expense:Monthly
-        account Expense:Weekly
-        entry monthly on the 1st in sep through jun \"Monthly\" {
-          Expense:Monthly = 1_000 per month
-          Assets:Cash
+        entry monthly @ 1st & sep..=jun {
+          assets.cash -> expenses.monthly : 1_000/month
         }
         // July 2 is a Friday, so the week of June 28 has days in June but
         // its firing is left out.
-        entry every friday in sep through jun \"Weekly\" {
-          Expense:Weekly = 100 per week
-          Assets:Cash
+        entry weekly @ fri & sep..=jun {
+          assets.cash -> expenses.weekly : 100/week
         }
     ";
     let output = run(src, &opts("2027-06-01", "2027-09-30")).unwrap();
@@ -1112,19 +957,16 @@ fn periods_a_schedule_leaves_out_dont_roll_into_the_next_firing() {
             .unwrap_or_else(|| panic!("nothing posted to {account} on {date}"));
         posting(&output, tx, account)
     };
-    assert_eq!(on("2027-09-01", "Expense:Monthly"), usd("1000"));
-    assert_eq!(on("2027-06-25", "Expense:Weekly"), usd("100"));
-    assert_eq!(on("2027-09-03", "Expense:Weekly"), usd("100"));
+    assert_eq!(on("2027-09-01", "expenses.monthly"), usd("1000"));
+    assert_eq!(on("2027-06-25", "expenses.weekly"), usd("100"));
+    assert_eq!(on("2027-09-03", "expenses.weekly"), usd("100"));
 }
 
 #[test]
 fn a_counted_schedule_keeps_its_rhythm_through_months_it_leaves_out() {
     let src = "
-        account Assets:Cash
-        account Income:Pay
-        entry every second friday in sep through jun from 2027-01-01 \"Pay\" {
-          Assets:Cash = 100
-          Income:Pay
+        entry pay @ 2027-01-01.. & fri / 2 & sep..=jun {
+          income.pay -> assets.cash : 100
         }
     ";
     let output = run(src, &opts("2027-06-01", "2027-09-30")).unwrap();
@@ -1136,44 +978,68 @@ fn a_counted_schedule_keeps_its_rhythm_through_months_it_leaves_out() {
 }
 
 #[test]
-fn schedule_in_errors_point_at_the_offending_text() {
-    let src = "account A\naccount B\nentry monthly in may through 2027 \"x\" {\n A = 1\n B\n}";
-    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+fn day_sets_combine_with_operators() {
+    let src = "
+        let payday = 15th | last
+        entry pay @ payday - dec 31 & 2026-11-01.. {
+          income.pay -> assets.cash : 1
+        }
+        entry gym @ 2026-12-01.. & * / 10 {
+          assets.cash -> expenses.gym : 1
+        }
+    ";
+    let output = run(src, &opts("2026-11-01", "2026-12-31")).unwrap();
+    let dates = |label: &str| -> Vec<NaiveDate> {
+        output
+            .log
+            .transactions
+            .iter()
+            .filter(|tx| &*tx.label == label)
+            .map(|tx| tx.date)
+            .collect()
+    };
     assert_eq!(
-        highlighted(src, &errors, "both ends of `through`"),
-        "may through 2027"
+        dates("pay"),
+        ["2026-11-15", "2026-11-30", "2026-12-15"].map(d)
     );
+    assert_eq!(
+        dates("gym"),
+        ["2026-12-01", "2026-12-11", "2026-12-21", "2026-12-31"].map(d)
+    );
+}
+
+#[test]
+fn every_nth_without_a_start_is_reported_once() {
+    let src = "
+        let biweekly = sun / 2
+        entry x @ biweekly { income.a -> assets.b : 1 }
+        check assets.b >= 0 @ biweekly
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(has_error(&errors, "no date to count from"));
 }
 
 #[test]
 fn compounding_steps_up_on_each_anniversary_of_the_arms_start() {
     let src = "
-        account Assets:Cash
-        account Expense:Tuition
-        account Expense:Other
-        param tuition {
-          from jul 2026 = 1_000 compounding 10% every year
+        let tuition {
+          jul 2026.. => 1_000 compounding 10% every year
         }
-        param inflation = 3%
-        param prices {
-          from 2026 = 1 compounding inflation every year
+        let inflation = 3%
+        let prices {
+          2026.. => 1 compounding inflation every year
         }
-        entry yearly on jun 30, jul 1 \"Tuition\" {
-          Expense:Tuition = tuition
-          Assets:Cash
-        }
-        entry yearly on dec 31 \"Other\" {
-          Expense:Other = 10_000 * prices
-          Assets:Cash
-        }
+        entry tuition_pay @ jun 30 | jul 1 { assets.cash -> expenses.tuition : tuition }
+        entry other @ dec 31 { assets.cash -> expenses.other : 10_000 * prices }
     ";
     let output = run(src, &opts("2026-07-01", "2028-12-31")).unwrap();
     assert_eq!(
-        postings_to(&output, "Expense:Tuition"),
+        postings_to(&output, "expenses.tuition"),
         ["1000", "1000", "1100", "1100", "1210"].map(usd)
     );
     assert_eq!(
-        postings_to(&output, "Expense:Other"),
+        postings_to(&output, "expenses.other"),
         ["10000", "10300", "10609"].map(usd)
     );
 }
@@ -1181,53 +1047,44 @@ fn compounding_steps_up_on_each_anniversary_of_the_arms_start() {
 #[test]
 fn adding_steps_up_by_the_same_amount_in_the_values_unit() {
     let src = "
-        account Assets:Cash
-        account Expense:Rent
-        account Expense:Parking
-        param rent {
-          from jan 2027 = 1_000 per month adding 100 per month every year
+        let rent {
+          jan 2027.. => 1_000/month adding 100/month every year
         }
-        param parking {
-          from jan 2027 = 200 per month adding 10 every year
+        let parking {
+          jan 2027.. => 200/month adding 10 every year
         }
-        entry monthly on the 1st \"Rent\" {
-          Expense:Rent    = rent
-          Expense:Parking = parking
-          Assets:Cash
+        entry rent_pay @ 1st {
+          assets.cash -> expenses.rent    : rent
+          assets.cash -> expenses.parking : parking
         }
     ";
     let output = run(src, &opts("2027-11-01", "2029-01-31")).unwrap();
     assert_eq!(
-        postings_to(&output, "Expense:Rent"),
+        postings_to(&output, "expenses.rent"),
         [
             1_000, 1_000, 1_100, 1_100, 1_100, 1_100, 1_100, 1_100, 1_100, 1_100, 1_100, 1_100,
             1_100, 1_100, 1_200
         ]
         .map(Decimal::from)
     );
-    assert_eq!(postings_to(&output, "Expense:Parking")[2], usd("210"));
+    assert_eq!(postings_to(&output, "expenses.parking")[2], usd("210"));
 }
 
 #[test]
 fn each_step_compounds_at_the_rate_on_its_day() {
     let src = "
-        account Assets:Cash
-        account Expense:Other
-        param inflation {
-          in 2027 = 10%
-          else    = 5%
+        let inflation {
+          2027 => 10%
+          _    => 5%
         }
-        param prices {
-          from 2026 = 1_000 compounding inflation every year
+        let prices {
+          2026.. => 1_000 compounding inflation every year
         }
-        entry yearly on dec 31 \"Other\" {
-          Expense:Other = prices
-          Assets:Cash
-        }
+        entry other @ dec 31 { assets.cash -> expenses.other : prices }
     ";
     let output = run(src, &opts("2026-01-01", "2029-12-31")).unwrap();
     assert_eq!(
-        postings_to(&output, "Expense:Other"),
+        postings_to(&output, "expenses.other"),
         ["1000", "1100", "1155", "1212.75"].map(usd)
     );
 }
@@ -1236,37 +1093,37 @@ fn each_step_compounds_at_the_rate_on_its_day() {
 fn growth_errors_point_at_the_offending_text() {
     let cases = [
         (
-            "param p {\n else = 1 compounding 3% every year\n}",
+            "let p {\n _ => 1 compounding 3% every year\n}",
             "needs an arm with a start",
             "compounding 3% every year",
         ),
         (
-            "param p {\n in may = 1 adding 1 every year\n}",
+            "let p {\n may => 1 adding 1 every year\n}",
             "needs an arm with a start",
             "adding 1 every year",
         ),
         (
-            "param p {\n from 2026 = 1 compounding 3% per year every year\n}",
+            "let p {\n 2026.. => 1 compounding 3%/year every year\n}",
             "takes a plain number",
-            "3% per year",
+            "3%/year",
         ),
         (
-            "param p {\n from 2026 = 1 per month adding 1 per year every year\n}",
+            "let p {\n 2026.. => 1/month adding 1/year every year\n}",
             "`adding` adds an amount per year to an amount per month",
-            "1 per year",
+            "1/year",
         ),
         (
-            "account A = 1 @ 2026-01-01\nparam p {\n from 2026 = 1 compounding A every year\n}",
+            "balances @ 2026-01-01 { assets.a = 1 }\nlet p {\n 2026.. => 1 compounding assets.a every year\n}",
             "can only use numbers",
-            "A",
+            "assets.a",
         ),
         (
-            "param p {\n from 2026 = 1 compounding 3%\n}",
+            "let p {\n 2026.. => 1 compounding 3%\n}",
             "expected `every`",
             "}",
         ),
         (
-            "param p {\n from 2026 = 1 adding 1 every fortnight\n}",
+            "let p {\n 2026.. => 1 adding 1 every fortnight\n}",
             "expected `day`, `week`",
             "fortnight",
         ),
@@ -1279,20 +1136,17 @@ fn growth_errors_point_at_the_offending_text() {
 
 #[test]
 fn growth_steps_count_as_changes_in_periods_without_a_firing() {
-    let monthly = "
-        account Assets:Cash
-        account Expense:Fee
-        param fee {
-          from 2027 = 100 per month adding 10 per month every month
-        }
-        entry quarterly \"Fee\" {
-          Expense:Fee = fee
-          Assets:Cash
-        }
-    ";
-    let errors = run(monthly, &opts("2027-01-01", "2027-03-31")).unwrap_err();
+    let monthly = format!(
+        "
+        let fee {{
+          2027.. => 100/month adding 10/month every month
+        }}
+        entry fee_pay @ {QUARTER_ENDS} {{ assets.cash -> expenses.fee : fee }}
+    "
+    );
+    let errors = run(&monthly, &opts("2027-01-01", "2027-03-31")).unwrap_err();
     assert_eq!(
-        highlighted(monthly, &errors, "changes during the months"),
+        highlighted(&monthly, &errors, "changes during the months"),
         "fee"
     );
     // Yearly steps fall on January 1st, which a quarterly entry's firings
@@ -1300,28 +1154,14 @@ fn growth_steps_count_as_changes_in_periods_without_a_firing() {
     let yearly = monthly.replace("every month", "every year");
     let output = run(&yearly, &opts("2027-01-01", "2028-06-30")).unwrap();
     assert_eq!(
-        postings_to(&output, "Expense:Fee"),
+        postings_to(&output, "expenses.fee"),
         [300, 300, 300, 300, 330, 330].map(Decimal::from)
     );
 }
 
 #[test]
-fn named_schedule_missing_from_is_reported_once() {
-    let src = "
-        schedule biweekly = every 2 weeks
-        account A
-        account B
-        entry biweekly \"x\" { A = 1
-          B }
-        assert biweekly that A >= 0
-    ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert_eq!(errors.len(), 1, "{errors:?}");
-}
-
-#[test]
 fn errors_render_without_color_when_asked() {
-    let src = "param p = ghost";
+    let src = "let p = ghost";
     let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
     let plain = saldo::format_errors("test.saldo", src, &errors, false);
     assert!(!plain.contains('\x1b'), "{plain}");
@@ -1330,52 +1170,47 @@ fn errors_render_without_color_when_asked() {
 
 // --- invariants ---
 
-/// A model exercising most features: warm-up, late openings, params with
-/// intervals, named legs and aggregates, `all`, functions and schedules.
-const KITCHEN_SINK: &str = "
-    account Assets:Cash                 =   5_000 @ 2025-01-01
-    account Assets:Retirement           =  10_000 @ 2025-01-01
-    account Assets:Savings              =   2_500 @ 2026-03-01
-    account Liabilities:Loan            = -30_000 @ 2025-01-01
-    account Liabilities:AccruedInterest
-    account Income:Salary
-    account Expenses:Interest
-    account Expenses:Rent
+/// A model exercising most features: warm-up, late openings, values with
+/// intervals, tags and totals, paying off balances, functions and schedules.
+const KITCHEN_SINK: &str = r#"
+    balances @ 2025-01-01 {
+      assets.cash       =  5_000
+      assets.retirement = 10_000
+      liabilities.loan  = 30_000
+    }
+    balances @ 2026-03-01 { assets.savings = 2_500 }
 
-    schedule payday = monthly on the 15th and last day
-    param interest_rate = 0.05
-    param max_401k = 23_000
-    param salary {
-        from 2025-01-01 to 2026-04-16 = 80_000
-        from 2026-04-16               = 95_000
+    let payday = 15th | last
+    let interest_rate = 0.05
+    let max_401k = 23_000
+    let salary {
+        2025-01-01..2026-04-16 => 80_000
+        2026-04-16..           => 95_000
     }
 
     fn per_paycheck(annual) { annual / 24 }
 
-    entry payday \"Paycheck\" {
-      Assets:Retirement = min(max_401k - k401.ytd, per_paycheck(salary) * 0.15) as k401
-      Assets:Cash       = per_paycheck(salary) - k401
-      Income:Salary
-    } as paycheck
-
-    entry daily \"Interest accrual\" {
-      Liabilities:AccruedInterest = Liabilities:Loan * interest_rate / 365
-      Expenses:Interest
+    entry paycheck "Paycheck" @ payday {
+      let gross = per_paycheck(salary)
+      income.salary -> assets.cash       : gross
+      assets.cash   -> assets.retirement : min(max_401k - k401[year], gross * 0.15) #k401
     }
 
-    entry monthly on the 17th \"Loan payment\" {
-      Liabilities:AccruedInterest = all
-      Liabilities:Loan            = 1_000
-      Assets:Cash
+    entry accrual "Interest accrual" {
+      liabilities.accrued_interest -> expenses.interest : liabilities.loan * interest_rate / 365
     }
 
-    entry every 2 weeks on friday from 2025-01-03 \"Rent\" {
-      Expenses:Rent = 1_200
-      Assets:Cash
+    entry loan_payment "Loan payment" @ 17th {
+      assets.cash -> liabilities.accrued_interest : liabilities.accrued_interest
+      assets.cash -> liabilities.loan             : 1_000
     }
 
-    assert that paycheck.k401.ytd <= max_401k
-";
+    entry rent "Rent" @ 2025-01-03.. & fri / 2 {
+      assets.cash -> expenses.rent : 1_200
+    }
+
+    check paycheck.k401[year] <= max_401k
+"#;
 
 #[test]
 fn every_transaction_balances() {
@@ -1423,11 +1258,7 @@ fn cli_exits_cleanly_when_the_reader_stops_early() {
     let dir = std::env::temp_dir().join(format!("saldo-cli-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("model.saldo");
-    std::fs::write(
-        &path,
-        "account A\naccount B\nentry daily \"x\" { A = 1\n B }\n",
-    )
-    .unwrap();
+    std::fs::write(&path, "entry x { income.b -> assets.a : 1 }\n").unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_saldo"))
         .arg(&path)
@@ -1458,21 +1289,16 @@ fn cli_exits_cleanly_when_the_reader_stops_early() {
 fn keywords_are_lowercase_only() {
     // Capitalized keywords are ordinary names.
     let src = "
-        account Assets:Cash
-        account Income:Gifts
-        param All = 5
-        param If = 1
-        schedule Monthly = monthly on the 1st
-        entry Monthly \"Gift\" {
-          Assets:Cash = All + If
-          Income:Gifts
-        }
+        let All = 5
+        let If = 1
+        let Monthly = 1st
+        entry gift @ Monthly { income.gifts -> assets.cash : All + If }
     ";
     let output = run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
-    assert_eq!(posting(&output, 0, "Assets:Cash"), Decimal::new(6, 0));
+    assert_eq!(posting(&output, 0, "assets.cash"), Decimal::new(6, 0));
 
     let errors = run(
-        "param p = IF true THEN 1 ELSE 2",
+        "let p = IF true THEN 1 ELSE 2",
         &opts("2025-01-01", "2025-01-01"),
     );
     assert!(errors.is_err());
@@ -1481,7 +1307,7 @@ fn keywords_are_lowercase_only() {
 // --- logical operators ---
 
 fn assert_holds(condition: &str) {
-    let src = format!("assert that {condition}");
+    let src = format!("check {condition}");
     if let Err(errors) = run(&src, &opts("2025-01-01", "2025-01-01")) {
         panic!("`{condition}` failed: {errors:?}");
     }
@@ -1503,13 +1329,13 @@ fn logical_operators() {
 
 #[test]
 fn chained_comparisons_are_rejected() {
-    let errors = run("assert that 1 < 2 < 3", &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    let errors = run("check 1 < 2 < 3", &opts("2025-01-01", "2025-01-01")).unwrap_err();
     assert!(has_error(&errors, "comparisons can't be chained"));
 }
 
 #[test]
 fn logical_operators_require_bools() {
-    let errors = run("assert that 1 and true", &opts("2025-01-01", "2025-01-01")).unwrap_err();
+    let errors = run("check 1 and true", &opts("2025-01-01", "2025-01-01")).unwrap_err();
     assert!(has_error(
         &errors,
         "an operand of `and` must be a bool, but this is a number"
@@ -1523,41 +1349,38 @@ fn type_errors_are_reported_before_simulating() {
     let cases = [
         // Only evaluated from 2040 on, but reported up front.
         (
-            "account A\naccount B\nentry daily \"x\" {\n A = if Assets > 0 then true else 1\n B\n}\naccount Assets",
+            "entry x { income.b -> assets.a : if assets.c > 0 then true else 1 }\nbalances @ 2025-01-01 { assets.c = 1 }",
             "`if` branches must have the same type, but are a bool and a number",
         ),
         (
-            "param p = 1 > 0",
-            "a param must be a number, but this is a bool",
+            "let p = 1 > 0",
+            "a value must be a number, but this is a bool",
         ),
         (
-            "assert that 1 + 1",
-            "an assertion must be a bool, but this is a number",
+            "check 1 + 1",
+            "a check must be a bool, but this is a number",
         ),
+        ("check 1 == true", "`==` compares a number with a bool"),
+        ("check not 1", "the operand of `not` must be a bool"),
+        ("let p = -(1 > 0)", "the operand of `-` must be a number"),
         (
-            "assert that 1 == true",
-            "`==` compares a number with a bool",
-        ),
-        ("assert that not 1", "the operand of `not` must be a bool"),
-        ("param p = -(1 > 0)", "the operand of `-` must be a number"),
-        (
-            "param p = if 1 then 2 else 3",
+            "let p = if 1 then 2 else 3",
             "an `if` condition must be a bool",
         ),
         (
-            "param p = max(1 > 0, 2)",
+            "let p = max(1 > 0, 2)",
             "an argument to `max` must be a number",
         ),
         (
-            "fn positive(x) { x > 0 }\nparam p = positive(1)",
-            "a param must be a number, but this is a bool",
+            "fn positive(x) { x > 0 }\nlet p = positive(1)",
+            "a value must be a number, but this is a bool",
         ),
         (
-            "fn f(x) { let y = x > 0; x }",
-            "a `let` binding must be a number",
+            "entry x {\n let big = 1 > 0\n income.b -> assets.a : big\n}",
+            "an amount must be a number, but this is a bool",
         ),
         (
-            "account A = 1 > 0 @ 2025-01-01",
+            "balances @ 2025-01-01 { assets.a = 1 > 0 }",
             "an opening balance must be a number",
         ),
     ];
@@ -1571,22 +1394,19 @@ fn type_errors_are_reported_before_simulating() {
 fn functions_can_return_bools() {
     let src = "
         fn positive(x) { x > 0 }
-        param p = 5
-        assert that positive(p) and not positive(-p)
+        let p = 5
+        check positive(p) and not positive(-p)
     ";
     run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
 }
 
-// --- missed aggregate warnings ---
+// --- missed total warnings ---
 
 const CAPPED_CONTRIBUTIONS: &str = "
-    account Assets:Retirement
-    account Income:Salary
-    entry monthly on the 15th \"Paycheck\" {
-      Assets:Retirement = min(1_000 - k401.ytd, 300) + k401.qtd * 0 as k401
-      Income:Salary
-    } as paycheck
-    assert that paycheck.k401.ytd <= 1_000
+    entry paycheck @ 15th {
+      income.salary -> assets.retirement : min(1_000 - k401[year], 300) + k401[quarter] * 0 #k401
+    }
+    check paycheck.k401[year] <= 1_000
 ";
 
 fn warnings(src: &str, from: &str) -> Vec<String> {
@@ -1595,23 +1415,35 @@ fn warnings(src: &str, from: &str) -> Vec<String> {
 }
 
 #[test]
-fn warns_when_an_aggregate_misses_earlier_firings() {
+fn warns_when_a_total_misses_earlier_firings() {
     let output = run(CAPPED_CONTRIBUTIONS, &opts("2025-05-20", "2025-12-31")).unwrap();
     let messages: Vec<&str> = output.warnings.iter().map(|w| w.message.as_str()).collect();
-    // One warning per aggregate, even though `paycheck.k401.ytd` repeats it.
+    // One warning per total, even though `paycheck.k401[year]` repeats it.
     assert_eq!(
         messages,
         [
-            "`k401.ytd` is missing amounts from before 2025-05-20",
-            "`k401.qtd` is missing amounts from before 2025-05-20",
+            "`paycheck.k401[year]` is missing amounts from before 2025-05-20",
+            "`paycheck.k401[quarter]` is missing amounts from before 2025-05-20",
         ]
     );
     let span = output.warnings[0].span;
-    assert_eq!(&CAPPED_CONTRIBUTIONS[span.start..span.end], "k401.ytd");
+    assert_eq!(&CAPPED_CONTRIBUTIONS[span.start..span.end], "k401[year]");
     assert!(
         output.warnings[1].extra[0]
             .1
             .contains("would have fired on 2025-04-15")
+    );
+}
+
+#[test]
+fn warns_when_an_account_total_misses_earlier_firings() {
+    let src = "
+        entry pay @ 15th { income.salary -> assets.cash : 100 }
+        check income.salary[year] >= 0
+    ";
+    assert_eq!(
+        warnings(src, "2025-05-20"),
+        ["`income.salary[year]` is missing amounts from before 2025-05-20"]
     );
 }
 
@@ -1622,87 +1454,46 @@ fn no_warning_when_nothing_was_missed() {
     // Starting mid-period, but before the entry first fires.
     assert!(warnings(CAPPED_CONTRIBUTIONS, "2025-01-10").is_empty());
     // Starting mid-year, but an account opening on Jan 1 warms up from there.
-    let warmed_up = CAPPED_CONTRIBUTIONS.replace(
-        "account Assets:Retirement",
-        "account Assets:Retirement = 0 @ 2025-01-01",
-    );
+    let warmed_up =
+        format!("balances @ 2025-01-01 {{ assets.retirement = 0 }}\n{CAPPED_CONTRIBUTIONS}");
     assert!(warnings(&warmed_up, "2025-06-01").is_empty());
 }
 
 #[test]
 fn unicode_account_names_work_and_align() {
     let src = "
-        account Aktiva:Geld = 100 @ 2025-01-01
-        account Ausgaben:Café
-        entry daily \"Kaffee\" {
-          Ausgaben:Café = 3
-          Aktiva:Geld
-        }
+        balances @ 2025-01-01 { assets.geld = 100 }
+        entry kaffee { assets.geld -> expenses.café : 3 }
     ";
     let ledger = run(src, &opts("2025-01-01", "2025-01-01"))
         .unwrap()
         .to_ledger();
     assert!(
-        ledger.contains("  Ausgaben:Café   3\n  Aktiva:Geld    -3\n"),
+        ledger.contains("  Expenses:Café   3\n  Assets:Geld    -3\n"),
         "{ledger}"
     );
 }
 
 // --- rates ---
 
-/// The sum of the postings to `account` dated in `year`.
-fn posted_in(output: &saldo::Output, account: &str, year: i32) -> Decimal {
-    use chrono::Datelike;
-    output
-        .log
-        .transactions
-        .iter()
-        .filter(|tx| tx.date.year() == year)
-        .flat_map(|tx| &tx.postings)
-        .filter(|(p, _)| p.to_string() == account)
-        .map(|(_, v)| *v)
-        .sum()
-}
-
-/// The amounts posted to `account`, in order.
-fn postings_to(output: &saldo::Output, account: &str) -> Vec<Decimal> {
-    output
-        .log
-        .transactions
-        .iter()
-        .flat_map(|tx| &tx.postings)
-        .filter(|(p, _)| p.to_string() == account)
-        .map(|(_, v)| *v)
-        .collect()
-}
-
-fn usd(amount: &str) -> Decimal {
-    amount.parse().unwrap()
-}
-
 #[test]
 fn per_year_amounts_add_up_exactly_whatever_the_number_of_paydays() {
     // 2021 starts and ends on a Friday, so it has 27 biweekly paydays; 2022
     // has 26.
     let src = "
-        account Assets:Retirement:SemiMonthly
-        account Assets:Retirement:Biweekly
-        account Income:Salary
-        param max_401k = 24_500 per year
-        entry every month on the 15th and last day \"Semi-monthly\" {
-          Assets:Retirement:SemiMonthly = max_401k
-          Income:Salary
+        let max_401k = 24_500/year
+        entry semi_monthly @ 15th | last {
+          income.salary -> assets.retirement.semi_monthly : max_401k
         }
-        entry every second friday from 2021-01-01 \"Biweekly\" {
-          Assets:Retirement:Biweekly = max_401k
-          Income:Salary
+        entry biweekly @ 2021-01-01.. & fri / 2 {
+          income.salary -> assets.retirement.biweekly : max_401k
         }
     ";
     let output = run(src, &opts("2021-01-01", "2022-12-31")).unwrap();
     for year in [2021, 2022] {
         for account in [
-            "Assets:Retirement:SemiMonthly",
-            "Assets:Retirement:Biweekly",
+            "assets.retirement.semi_monthly",
+            "assets.retirement.biweekly",
         ] {
             assert_eq!(
                 posted_in(&output, account, year),
@@ -1711,7 +1502,7 @@ fn per_year_amounts_add_up_exactly_whatever_the_number_of_paydays() {
             );
         }
     }
-    let biweekly = postings_to(&output, "Assets:Retirement:Biweekly");
+    let biweekly = postings_to(&output, "assets.retirement.biweekly");
     assert_eq!(biweekly.len(), 27 + 26);
     assert_eq!(biweekly[0], usd("907.41")); // 24_500 / 27
     assert_eq!(biweekly[27], usd("942.31")); // 24_500 / 26
@@ -1720,66 +1511,38 @@ fn per_year_amounts_add_up_exactly_whatever_the_number_of_paydays() {
 #[test]
 fn a_raise_applies_from_the_next_paycheck() {
     let src = "
-        account Assets:Cash
-        account Income:Salary
-        param salary {
-          from 2026-01-01 to 2026-07-01 = 100_000 per year
-          from 2026-07-01               = 110_000 per year
+        let salary {
+          2026-01-01..2026-07-01 => 100_000/year
+          2026-07-01..           => 110_000/year
         }
-        entry every month on the 15th and last day \"Paycheck\" {
-          Assets:Cash = salary
-          Income:Salary
-        }
+        entry paycheck @ 15th | last { income.salary -> assets.cash : salary }
     ";
     let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
-    let cash = postings_to(&output, "Assets:Cash");
+    let cash = postings_to(&output, "assets.cash");
     assert_eq!(cash[..2], [usd("4166.67"), usd("4166.66")]);
     assert_eq!(cash[12], usd("4583.33")); // 110_000 / 24
-    assert_eq!(posted_in(&output, "Assets:Cash", 2026), usd("105000.00"));
-}
-
-#[test]
-fn a_posting_spreads_rates_but_not_the_legs_it_subtracts() {
-    let src = "
-        account Assets:Cash
-        account Assets:Retirement
-        account Income:Salary
-        param salary   = 120_000 per year
-        param max_401k = 24_000 per year
-        entry monthly \"Paycheck\" {
-          Assets:Retirement = max_401k as contribution
-          Assets:Cash       = salary - contribution
-          Income:Salary
-        }
-    ";
-    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
-    assert_eq!(posting(&output, 0, "Assets:Retirement"), usd("2000.00"));
-    assert_eq!(posting(&output, 0, "Assets:Cash"), usd("8000.00"));
-    assert_eq!(posting(&output, 0, "Income:Salary"), usd("-10000.00"));
+    assert_eq!(posted_in(&output, "assets.cash", 2026), usd("105000.00"));
 }
 
 #[test]
 fn a_rate_minus_its_period_total_is_whats_left_of_it() {
     // Contribute 16% of each paycheck until the yearly limit is reached.
     let src = "
-        account Assets:Retirement
-        account Income:Salary
-        param salary   = 300_000 per year
-        param max_401k = 24_500 per year
-        entry every month on the 15th and last day \"Paycheck\" {
-          Assets:Retirement = min(salary * 0.16, max_401k - contribution.ytd) as contribution
-          Income:Salary
-        } as pay
-        assert that pay.contribution.ytd <= max_401k
+        let salary   = 300_000/year
+        let max_401k = 24_500/year
+        entry pay @ 15th | last {
+          income.salary -> assets.retirement : min(salary * 0.16, max_401k - contribution[year]) #contribution
+        }
+        check pay.contribution[year] <= max_401k
     ";
     let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
-    let contributions = postings_to(&output, "Assets:Retirement");
+    let contributions = postings_to(&output, "assets.retirement");
     assert_eq!(
         contributions[..13],
         [[usd("2000.00"); 12].as_slice(), &[usd("500.00")]].concat()
     );
     assert_eq!(
-        posted_in(&output, "Assets:Retirement", 2026),
+        posted_in(&output, "assets.retirement", 2026),
         usd("24500.00")
     );
 }
@@ -1787,21 +1550,18 @@ fn a_rate_minus_its_period_total_is_whats_left_of_it() {
 #[test]
 fn interest_accrues_by_the_actual_days_in_the_year() {
     let src = "
-        account Liabilities:Loan = -100_000 @ 2026-01-01
-        account Liabilities:AccruedInterest
-        account Expenses:Interest
-        param rate = 5% per year
-        entry daily \"Interest\" {
-          Liabilities:AccruedInterest = Liabilities:Loan * rate
-          Expenses:Interest
+        balances @ 2026-01-01 { liabilities.loan = 100_000 }
+        let rate = 5%/year
+        entry interest {
+          liabilities.accrued_interest -> expenses.interest : liabilities.loan * rate
         }
     ";
     let output = run(src, &opts("2026-01-01", "2028-12-31")).unwrap();
-    let interest = postings_to(&output, "Liabilities:AccruedInterest");
+    let interest = postings_to(&output, "liabilities.accrued_interest");
     assert_eq!(interest[0], usd("-13.70")); // 5_000 / 365
     // 2028 has 366 days.
     for year in [2026, 2027, 2028] {
-        let total = posted_in(&output, "Liabilities:AccruedInterest", year);
+        let total = posted_in(&output, "liabilities.accrued_interest", year);
         assert_eq!(total, usd("-5000.00"), "{year}");
     }
 }
@@ -1809,61 +1569,41 @@ fn interest_accrues_by_the_actual_days_in_the_year() {
 #[test]
 fn a_schedule_starting_midyear_gets_part_of_a_yearly_amount() {
     let src = "
-        account Assets:Cash
-        account Income:Salary
-        param salary = 120_000 per year
-        entry every month from 2026-07-01 \"Paycheck\" {
-          Assets:Cash = salary
-          Income:Salary
-        }
+        let salary = 120_000/year
+        entry paycheck @ 2026-07-01.. & last { income.salary -> assets.cash : salary }
     ";
     let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
-    assert_eq!(postings_to(&output, "Assets:Cash"), [usd("10000.00"); 6]);
+    assert_eq!(postings_to(&output, "assets.cash"), [usd("10000.00"); 6]);
 }
 
 #[test]
 fn entries_firing_less_often_than_the_rate_collect_the_periods_between() {
-    let src = "
-        account Assets:Cash
-        account Expenses:Rent
-        account Expenses:Stipend
-        param rent    = 1_000 per month
-        param stipend = 200 per week
-        entry quarterly \"Rent\" {
-          Expenses:Rent = rent
-          Assets:Cash
-        }
-        entry every second friday from 2025-12-26 \"Stipend\" {
-          Expenses:Stipend = stipend
-          Assets:Cash
-        }
-    ";
-    let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
-    assert_eq!(postings_to(&output, "Expenses:Rent"), [usd("3000.00"); 4]);
+    let src = format!(
+        "
+        let rent    = 1_000/month
+        let stipend = 200/week
+        entry rent_pay @ {QUARTER_ENDS} {{ assets.cash -> expenses.rent : rent }}
+        entry stipend_pay @ 2025-12-26.. & fri / 2 {{ assets.cash -> expenses.stipend : stipend }}
+    "
+    );
+    let output = run(&src, &opts("2026-01-01", "2026-12-31")).unwrap();
+    assert_eq!(postings_to(&output, "expenses.rent"), [usd("3000.00"); 4]);
     assert_eq!(
-        postings_to(&output, "Expenses:Stipend"),
+        postings_to(&output, "expenses.stipend"),
         [usd("400.00"); 26]
     );
 }
 
 #[test]
-fn per_converts_rates_between_months_and_years() {
-    let src = "
-        account Assets:Cash
-        account Income:Salary
-        param salary  = 120_000 per year
-        param monthly = salary per month
-        param raise = 1_200
-        param raised  = (monthly + raise / 12) per year
-        entry yearly \"Pay\" {
-          Assets:Cash = monthly
-          Income:Salary
-        }
-        entry monthly \"Raise\" {
-          Assets:Cash = raised - salary
-          Income:Salary
-        }
-    ";
+fn units_convert_rates_between_months_and_years() {
+    let src = r#"
+        let salary  = 120_000/year
+        let monthly = salary/month
+        let raise   = 1_200
+        let raised  = (monthly + raise / 12)/year
+        entry pay "Pay" @ dec 31 { income.salary -> assets.cash : monthly }
+        entry raise_pay "Raise" @ last { income.salary -> assets.cash : raised - salary }
+    "#;
     let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
     let pay = |label: &str| {
         let tx = output
@@ -1871,88 +1611,89 @@ fn per_converts_rates_between_months_and_years() {
             .transactions
             .iter()
             .position(|t| &*t.label == label);
-        posting(&output, tx.unwrap(), "Assets:Cash")
+        posting(&output, tx.unwrap(), "assets.cash")
     };
     assert_eq!(pay("Pay"), usd("120000.00"));
     assert_eq!(pay("Raise"), usd("100.00"));
 }
 
 #[test]
-fn functions_pass_rates_through() {
+fn a_unit_applies_to_what_is_on_its_left() {
+    // `130_000 / 52/week` is a weekly rate: the units bind like `/`.
     let src = "
-        account Assets:Cash
-        account Income:Salary
-        fn net(gross, rate) { gross - gross * rate }
-        param salary = 120_000 per year
-        entry monthly \"Paycheck\" {
-          Assets:Cash = net(salary, 0.25)
-          Income:Salary
-        }
+        let salary = 130_000 / 52/week
+        entry pay @ sun { income.salary -> assets.cash : salary }
     ";
     let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
-    assert_eq!(posting(&output, 0, "Assets:Cash"), usd("7500.00"));
+    assert_eq!(postings_to(&output, "assets.cash")[1], usd("2500.00"));
 }
 
 #[test]
-fn rates_and_amounts_dont_mix_outside_postings() {
+fn functions_pass_rates_through() {
+    let src = "
+        fn net(gross, rate) { gross - gross * rate }
+        let salary = 120_000/year
+        entry paycheck @ last { income.salary -> assets.cash : net(salary, 0.25) }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "assets.cash"), usd("7500.00"));
+}
+
+#[test]
+fn rates_and_amounts_dont_mix_outside_entries() {
     let cases = [
         (
-            "param x = salary + Assets:Cash",
+            "let x = salary + assets.cash",
             "`+` mixes an amount per year with an amount",
         ),
         (
-            "assert that Assets:Cash >= salary",
+            "check assets.cash >= salary",
             "`>=` mixes an amount with an amount per year",
         ),
         (
-            "param x = salary + rent",
+            "let x = salary + rent",
             "`+` mixes an amount per year with an amount per month",
         ),
         (
-            "param x = salary * rent",
+            "let x = salary * rent",
             "can't multiply an amount per year by an amount per month",
         ),
         (
-            "param x = 1 / salary",
+            "let x = 1 / salary",
             "can't divide a number by an amount per year",
         ),
         (
-            "account Assets:Odd = salary @ 2026-01-01",
+            "balances @ 2026-01-01 { assets.odd = salary }",
             "an opening balance must be an amount, but this is an amount per year",
         ),
         (
-            "param x = salary per week",
+            "let x = salary/week",
             "can't convert an amount per year to per week: \
              a year isn't a fixed number of weeks",
         ),
         (
-            "param x = job.pay.ytd per year",
-            "`per year` can't apply to a year-to-date total, \
+            "let x = job.paid[year]/year",
+            "`/year` can't apply to a year-to-date total, \
              which is an amount so far, not per period",
         ),
         (
-            "fn monthly(x) { x per month }\nparam x = monthly(salary)",
+            "fn monthly(x) { x/month }\nlet x = monthly(salary)",
             "can't convert an amount per year to per month inside a function",
         ),
         (
-            "param x { from 2026-01-01 to 2026-02-01 = salary\n from 2026-02-01 = Assets:Cash }",
-            "param `x` is an amount per year in one arm but an amount in another",
+            "let x {\n 2026-01-01..2026-02-01 => salary\n 2026-02-01.. => assets.cash\n}",
+            "`x` is an amount per year in one arm but an amount in another",
         ),
         (
-            "fn f(a, b) { a - b }\nparam x = f(salary, Assets:Cash)",
+            "fn f(a, b) { a - b }\nlet x = f(salary, assets.cash)",
             "`-` mixes an amount per year with an amount",
         ),
     ];
     for (decl, message) in cases {
         let src = format!(
-            "account Assets:Cash
-             account Income:Salary
-             param salary = 120_000 per year
-             param rent   = 1_000 per month
-             entry monthly \"Pay\" {{
-               Assets:Cash = 1 as pay
-               Income:Salary
-             }} as job
+            "let salary = 120_000/year
+             let rent   = 1_000/month
+             entry job @ last {{ income.salary -> assets.cash : 1 #paid }}
              {decl}"
         );
         let errors = run(&src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
@@ -1961,31 +1702,15 @@ fn rates_and_amounts_dont_mix_outside_postings() {
 }
 
 #[test]
-fn dividing_by_a_per_points_at_its_precedence() {
-    let src = "param salary = 130_000 / 52 per week";
-    let errors = run(src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
-    let [saldo::Error::Diagnostic(d)] = errors.as_slice() else {
-        panic!("{errors:?}");
-    };
-    assert_eq!(d.message, "can't divide a number by an amount per week");
-    assert!(
-        d.extra[0].1.contains("`per` binds tighter than `/`"),
-        "{d:?}"
-    );
-}
-
-#[test]
 fn per_day_interest_matches_an_amortization_schedule() {
     // Actual/365 interest on each period's days, rounded once: the first
     // period runs from Jan 10 to Jan 31.
     let src = "
-        account Assets:Cash
-        account Liabilities:Loan = -10_000 @ 2026-01-10
-        account Expenses:Interest
-        entry every month from 2026-01-11 \"Loan payment\" {
-          Expenses:Interest = (-Liabilities:Loan * 6% / 365) per day as interest
-          Liabilities:Loan  = min(300, interest - Liabilities:Loan) - interest
-          Assets:Cash
+        balances @ 2026-01-10 { liabilities.loan = 10_000 }
+        entry loan_payment @ 2026-01-11.. & last {
+          let interest = (liabilities.loan * 6% / 365)/day
+          liabilities.loan -> expenses.interest : interest
+          assets.cash      -> liabilities.loan  : min(300, liabilities.loan + interest)
         }
     ";
     let output = run(src, &opts("2026-01-01", "2029-12-31")).unwrap();
@@ -1993,44 +1718,39 @@ fn per_day_interest_matches_an_amortization_schedule() {
                     35.15 30.53 32.43 30.06 29.69 27.40 26.92 25.53 23.36 22.72 20.62 19.89 \
                     18.46 15.93 15.58 13.67 12.67 10.84 9.73 8.25 6.55 5.27 3.65 2.26 0.74";
     let expected: Vec<Decimal> = expected.split_whitespace().map(usd).collect();
-    assert_eq!(postings_to(&output, "Expenses:Interest"), expected);
-    let payments = postings_to(&output, "Assets:Cash");
+    assert_eq!(postings_to(&output, "expenses.interest"), expected);
+    let payments = postings_to(&output, "assets.cash");
     assert_eq!(payments.last(), Some(&usd("-146.19")));
-    assert_eq!(posted_in(&output, "Liabilities:Loan", 2029), usd("145.45"));
+    assert_eq!(posted_in(&output, "liabilities.loan", 2029), usd("145.45"));
 }
 
 // --- fill ---
 
 #[test]
 fn fill_reaches_a_yearly_target_after_a_midyear_start() {
-    let src = "
-        account Assets:Cash
-        account Assets:Retirement
-        account Income:Salary
-        account Income:OldSalary
-        param salary   = 150_000 per year
-        param max_401k = 24_500 per year
-        param old_contribution {
-          from 2026-01-01 to 2026-07-01 = 1_000 per month
-          from 2026-07-01               = 0
+    let src = r#"
+        let salary   = 150_000/year
+        let max_401k = 24_500/year
+        let old_contribution {
+          2026-01-01..2026-07-01 => 1_000/month
+          2026-07-01..           => 0
         }
-        entry monthly \"Old job\" {
-          Assets:Retirement = old_contribution as contribution
-          Income:OldSalary
-        } as old_job
-        entry every second friday from 2026-07-10 \"New job\" {
-          Assets:Retirement = fill(max_401k - old_job.contribution.ytd) as contribution
-          Assets:Cash       = salary - contribution
-          Income:Salary
+        entry old_job "Old job" @ last {
+          income.old_salary -> assets.retirement : old_contribution #contribution
         }
-    ";
+        entry new_job "New job" @ 2026-07-10.. & fri / 2 {
+          income.salary -> assets.cash       : salary
+          assets.cash   -> assets.retirement : fill(max_401k - old_job.contribution[year]) #contribution
+        }
+    "#;
     let output = run(src, &opts("2026-01-01", "2027-12-31")).unwrap();
     let new_job: Vec<Decimal> = output
         .log
         .transactions
         .iter()
-        .filter(|tx| &*tx.label == "New job")
-        .map(|tx| tx.postings[0].1)
+        .enumerate()
+        .filter(|(_, tx)| &*tx.label == "New job")
+        .map(|(i, _)| posting(&output, i, "assets.retirement"))
         .collect();
     // 18_500 left after the old job, over the 13 paydays left in 2026.
     assert_eq!(new_job[0], usd("1423.08"));
@@ -2039,66 +1759,62 @@ fn fill_reaches_a_yearly_target_after_a_midyear_start() {
     assert_eq!(new_job[13], usd("942.31"));
     for year in [2026, 2027] {
         assert_eq!(
-            posted_in(&output, "Assets:Retirement", year),
+            posted_in(&output, "assets.retirement", year),
             usd("24500.00")
         );
     }
     // The salary is still spread, so half a year's worth arrives in 2026.
-    assert_eq!(posted_in(&output, "Income:Salary", 2026), usd("-75000.00"));
+    assert_eq!(posted_in(&output, "income.salary", 2026), usd("-75000.00"));
 }
 
 #[test]
 fn fill_makes_up_for_firings_held_back() {
     let src = "
-        account Assets:Retirement
-        account Income:Salary
-        param cap {
-          from 2026-01-01 to 2026-07-01 = 500
-          from 2026-07-01               = 10_000
+        let cap {
+          2026-01-01..2026-07-01 => 500
+          2026-07-01..           => 10_000
         }
-        entry monthly \"Paycheck\" {
-          Assets:Retirement = min(fill(24_000 per year), cap)
-          Income:Salary
+        entry paycheck @ last {
+          income.salary -> assets.retirement : min(fill(24_000/year), cap)
         }
     ";
     let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
-    let contributions = postings_to(&output, "Assets:Retirement");
+    let contributions = postings_to(&output, "assets.retirement");
     assert_eq!(contributions[..6], [usd("500.00"); 6]);
     // (24_000 - 3_000) / 6 months left
     assert_eq!(contributions[6..], [usd("3500.00"); 6]);
 }
 
 #[test]
-fn fill_has_to_be_what_a_posting_posts() {
+fn fill_has_to_be_what_a_move_moves() {
     let cases = [
         (
-            "param x = fill(max_401k)",
-            "`fill` can only be the amount a posting posts",
+            "let x = fill(max_401k)",
+            "`fill` can only be the amount a move moves",
         ),
         (
-            "entry monthly \"A\" {\n Assets:Cash = fill(max_401k) + 100\n Income:Salary }",
-            "`fill` can only be the amount a posting posts",
+            "entry a @ last { income.salary -> assets.cash : fill(max_401k) + 100 }",
+            "`fill` can only be the amount a move moves",
         ),
         (
-            "entry monthly \"A\" {\n Assets:Cash = fill(500)\n Income:Salary }",
+            "entry a @ last {\n let f = fill(max_401k)\n income.salary -> assets.cash : f\n}",
+            "`fill` can only be the amount a move moves",
+        ),
+        (
+            "entry a @ last { income.salary -> assets.cash : fill(500) }",
             "`fill` needs an amount per period",
         ),
         (
-            "entry monthly \"A\" {\n Assets:Cash = fill(max_401k - paid.ytd) as paid\n Income:Salary }",
-            "`fill` already subtracts what this posting has posted",
+            "entry a @ last { income.salary -> assets.cash : fill(max_401k - paid[year]) #paid }",
+            "`fill` already subtracts what this move has moved",
         ),
         (
-            "fn f(x) { fill(x) }\nentry monthly \"A\" {\n Assets:Cash = f(max_401k)\n Income:Salary }",
-            "`fill` can only be the amount a posting posts",
+            "fn f(x) { fill(x) }\nentry a @ last { income.salary -> assets.cash : f(max_401k) }",
+            "`fill` can only be the amount a move moves",
         ),
     ];
     for (decl, message) in cases {
-        let src = format!(
-            "account Assets:Cash
-             account Income:Salary
-             param max_401k = 24_500 per year
-             {decl}"
-        );
+        let src = format!("let max_401k = 24_500/year\n{decl}");
         let errors = run(&src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
         assert!(has_error(&errors, message), "{decl}: {errors:?}");
     }
@@ -2107,24 +1823,21 @@ fn fill_has_to_be_what_a_posting_posts() {
 #[test]
 fn fill_warns_when_the_simulation_starts_partway_through_its_period() {
     let src = "
-        account Assets:Retirement
-        account Income:Salary
-        entry monthly \"Paycheck\" {
-          Assets:Retirement = fill(24_000 per year)
-          Income:Salary
+        entry paycheck @ last {
+          income.salary -> assets.retirement : fill(24_000/year)
         }
     ";
     let output = run(src, &opts("2026-03-15", "2026-12-31")).unwrap();
     assert_eq!(output.warnings.len(), 1);
     assert_eq!(
         output.warnings[0].message,
-        "`fill` is missing what was posted before 2026-03-15"
+        "`fill` is missing what was moved before 2026-03-15"
     );
     let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
     assert!(output.warnings.is_empty());
 }
 
-// --- imports ---
+// --- modules ---
 
 /// Writes `files` into a fresh directory named after `test` and returns it.
 fn write_model(test: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
@@ -2138,37 +1851,34 @@ fn write_model(test: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
     dir
 }
 
-const LOAN_ACCOUNTS: &str = "
-    account Liabilities:Loan = -10_000 @ 2025-01-01
-    account Expenses:Interest
+const LOAN_BALANCES: &str = "
+    balances @ 2025-01-01 { liabilities.loan = 10_000 }
 ";
 
-const LOAN_PAYMENTS: &str = "
-    param loan_rate = 6% per year
-    entry monthly \"Loan payment\" {
-      Liabilities:Loan  = 500
-      Expenses:Interest = -Liabilities:Loan * loan_rate
-      Assets:Cash
+const LOAN_PAYMENTS: &str = r#"
+    let loan_rate = 6%/year
+    entry payment "Loan payment" @ last {
+      assets.cash -> expenses.interest : liabilities.loan * loan_rate
+      assets.cash -> liabilities.loan  : 500
     }
-";
+"#;
 
 #[test]
-fn imported_files_join_the_model_where_they_are_imported() {
+fn modules_in_files_are_like_modules_written_inline() {
     let main = "
-        account Assets:Cash = 20_000 @ 2025-01-01
-        import \"loans/payments.saldo\"
-        account Income:Salary
-        assert that Assets:Cash >= 0
+        balances @ 2025-01-01 { assets.cash = 20_000 }
+        mod loans
+        check assets.cash >= 0 and loans.loan_rate > 0
     ";
-    // Imports are relative to the file that imports them, and can use
-    // anything declared in any other file.
-    let payments = format!("import \"accounts.saldo\"\n{LOAN_PAYMENTS}");
+    // `mod accounts` in `loans.saldo` reads `loans/accounts.saldo`, as Rust
+    // does.
+    let loans = format!("mod accounts\n{LOAN_PAYMENTS}");
     let dir = write_model(
-        "imports_join",
+        "modules_join",
         &[
             ("main.saldo", main),
-            ("loans/payments.saldo", &payments),
-            ("loans/accounts.saldo", LOAN_ACCOUNTS),
+            ("loans.saldo", &loans),
+            ("loans/accounts.saldo", LOAN_BALANCES),
         ],
     );
     let mut sources = saldo::Sources::default();
@@ -2176,88 +1886,54 @@ fn imported_files_join_the_model_where_they_are_imported() {
     let output = saldo::run_file(dir.join("main.saldo"), &range, &mut sources).unwrap();
 
     let single = format!(
-        "account Assets:Cash = 20_000 @ 2025-01-01
-         {LOAN_ACCOUNTS}
-         {LOAN_PAYMENTS}
-         account Income:Salary
-         assert that Assets:Cash >= 0"
+        "balances @ 2025-01-01 {{ assets.cash = 20_000 }}
+         mod loans {{
+           mod accounts {{ {LOAN_BALANCES} }}
+           {LOAN_PAYMENTS}
+         }}
+         check assets.cash >= 0 and loans.loan_rate > 0"
     );
     let expected = run(&single, &range).unwrap();
     assert_eq!(output.to_ledger(), expected.to_ledger());
     assert_eq!(output.to_csv(), expected.to_csv());
-    assert!(output.to_csv().starts_with(
-        r#""date","Assets:Cash","Liabilities:Loan","Expenses:Interest","Income:Salary""#
-    ));
-}
-
-#[test]
-fn files_imported_more_than_once_are_read_once() {
-    // `a` and `b` both import `accounts`, and `b` imports `main` back.
-    let dir = write_model(
-        "imports_once",
-        &[
-            (
-                "main.saldo",
-                "import \"a.saldo\"\nimport \"b.saldo\"\naccount Assets:Cash",
-            ),
-            ("a.saldo", "import \"./accounts.saldo\"\n"),
-            (
-                "b.saldo",
-                &format!("import \"accounts.saldo\"\nimport \"main.saldo\"\n{LOAN_PAYMENTS}"),
-            ),
-            ("accounts.saldo", LOAN_ACCOUNTS),
-        ],
-    );
-    let mut sources = saldo::Sources::default();
-    let output = saldo::run_file(
-        dir.join("main.saldo"),
-        &opts("2025-01-01", "2025-01-31"),
-        &mut sources,
-    )
-    .unwrap();
-    assert_eq!(
-        posting(&output, 0, "Liabilities:Loan"),
-        Decimal::new(500, 0)
+    assert!(
+        output
+            .to_csv()
+            .starts_with(r#""date","Assets:Cash","Expenses:Interest","Liabilities:Loan""#)
     );
 }
 
 #[test]
 fn errors_name_the_file_they_are_in() {
     let dir = write_model(
-        "imports_errors",
+        "modules_errors",
         &[
-            (
-                "main.saldo",
-                "import \"loans.saldo\"\naccount Assets:Cash\naccount Liabilities:Loan",
-            ),
-            ("loans.saldo", LOAN_ACCOUNTS),
+            ("main.saldo", "mod loans\nlet a = 1\nlet b = nope"),
+            ("loans.saldo", "\n    let c = nada"),
         ],
     );
     let mut sources = saldo::Sources::default();
     let main = dir.join("main.saldo");
     let errors =
         saldo::run_file(&main, &opts("2025-01-01", "2025-01-01"), &mut sources).unwrap_err();
-    assert!(has_error(&errors, "duplicate account `Liabilities:Loan`"));
+    assert!(has_error(&errors, "unknown name `nope`"));
     let rendered = sources.format_errors(&errors, false);
     let main_name = main.display().to_string();
     let loans_name = dir.join("loans.saldo").display().to_string();
-    assert!(rendered.contains(&format!("{main_name}:3:1")), "{rendered}");
+    assert!(rendered.contains(&format!("{main_name}:3:9")), "{rendered}");
     assert!(
-        rendered.contains(&format!("{loans_name}:2:5")),
+        rendered.contains(&format!("{loans_name}:2:13")),
         "{rendered}"
     );
 }
 
 #[test]
-fn errors_in_imported_files_point_into_them() {
+fn errors_in_module_files_point_into_them() {
     let dir = write_model(
-        "imports_parse_error",
+        "modules_parse_error",
         &[
-            (
-                "main.saldo",
-                "account A\nimport \"bad.saldo\"\nimport \"gone.saldo\"",
-            ),
-            ("bad.saldo", "account B\nparam p = (1"),
+            ("main.saldo", "let a = 1\nmod bad\nmod gone"),
+            ("bad.saldo", "let b = 1\nlet p = (1"),
         ],
     );
     let mut sources = saldo::Sources::default();
@@ -2271,12 +1947,12 @@ fn errors_in_imported_files_point_into_them() {
     let rendered = sources.format_errors(&errors, false);
     let bad = dir.join("bad.saldo").display().to_string();
     let gone = dir.join("gone.saldo").display().to_string();
-    assert!(rendered.contains(&format!("{bad}:2:12")), "{rendered}");
+    assert!(rendered.contains(&format!("{bad}:2:")), "{rendered}");
     assert!(
         rendered.contains(&format!("could not read `{gone}`")),
         "{rendered}"
     );
-    assert!(rendered.contains("main.saldo:3:8"), "{rendered}");
+    assert!(rendered.contains("main.saldo:3:5"), "{rendered}");
 }
 
 #[test]
@@ -2291,7 +1967,18 @@ fn an_unreadable_model_is_a_read_error() {
 }
 
 #[test]
-fn models_given_as_text_cannot_import() {
-    let errors = run("import \"loans.saldo\"", &opts("2025-01-01", "2025-01-01")).unwrap_err();
+fn models_given_as_text_cannot_read_module_files() {
+    let errors = run("mod loans", &opts("2025-01-01", "2025-01-01")).unwrap_err();
     assert!(has_error(&errors, "only works in a model read from a file"));
+}
+
+#[test]
+fn a_named_every_nth_counts_from_where_its_used() {
+    let src = "
+        let biweekly = fri / 2
+        entry pay @ 2026-01-02.. & biweekly { income.pay -> assets.cash : 1 }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    let dates: Vec<NaiveDate> = output.log.transactions.iter().map(|tx| tx.date).collect();
+    assert_eq!(dates, ["2026-01-02", "2026-01-16", "2026-01-30"].map(d));
 }

@@ -16,16 +16,12 @@ pub enum Token<'src> {
     // keywords
     True,
     False,
-    Account,
-    Assert,
-    That,
+    Balances,
+    Check,
     Entry,
     Fn,
-    Import,
     Let,
-    Param,
-    Return,
-    Schedule,
+    Mod,
 
     // punctuation
     Eq,
@@ -48,7 +44,19 @@ pub enum Token<'src> {
     RParen,
     LBrace,
     RBrace,
-    Semicolon,
+    LBracket,
+    RBracket,
+    /// `->`, between the accounts of a move.
+    Arrow,
+    /// `=>`, between an arm's days and its value.
+    FatArrow,
+    /// `..`, a range that leaves out its end.
+    DotDot,
+    /// `..=`, a range that includes its end.
+    DotDotEq,
+    Pipe,
+    Amp,
+    Hash,
     Eof,
 }
 
@@ -62,16 +70,12 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Ordinal(i) => write!(f, "{i}{}", ordinal_suffix(*i)),
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),
-            Token::Account => write!(f, "account"),
-            Token::Assert => write!(f, "assert"),
-            Token::That => write!(f, "that"),
+            Token::Balances => write!(f, "balances"),
+            Token::Check => write!(f, "check"),
             Token::Entry => write!(f, "entry"),
             Token::Fn => write!(f, "fn"),
-            Token::Import => write!(f, "import"),
             Token::Let => write!(f, "let"),
-            Token::Param => write!(f, "param"),
-            Token::Return => write!(f, "return"),
-            Token::Schedule => write!(f, "schedule"),
+            Token::Mod => write!(f, "mod"),
             Token::Eq => write!(f, "="),
             Token::EqEq => write!(f, "=="),
             Token::LtEq => write!(f, "<="),
@@ -92,7 +96,15 @@ impl<'src> fmt::Display for Token<'src> {
             Token::RParen => write!(f, ")"),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
-            Token::Semicolon => write!(f, ";"),
+            Token::LBracket => write!(f, "["),
+            Token::RBracket => write!(f, "]"),
+            Token::Arrow => write!(f, "->"),
+            Token::FatArrow => write!(f, "=>"),
+            Token::DotDot => write!(f, ".."),
+            Token::DotDotEq => write!(f, "..="),
+            Token::Pipe => write!(f, "|"),
+            Token::Amp => write!(f, "&"),
+            Token::Hash => write!(f, "#"),
             Token::Eof => write!(f, "EOF"),
         }
     }
@@ -319,16 +331,12 @@ impl<'src> Lexer<'src> {
         let token = match word {
             "true" => Token::True,
             "false" => Token::False,
-            "account" => Token::Account,
-            "assert" => Token::Assert,
-            "that" => Token::That,
+            "balances" => Token::Balances,
+            "check" => Token::Check,
             "entry" => Token::Entry,
             "fn" => Token::Fn,
-            "import" => Token::Import,
             "let" => Token::Let,
-            "param" => Token::Param,
-            "return" => Token::Return,
-            "schedule" => Token::Schedule,
+            "mod" => Token::Mod,
             _ => Token::Ident(word),
         };
 
@@ -387,11 +395,24 @@ impl<'src> Lexer<'src> {
 
         match c {
             b'+' => return self.emit_token(Token::Plus),
-            b'-' => return self.emit_token(Token::Minus),
+            b'-' => {
+                if self.matches(b'>') {
+                    return self.emit_token(Token::Arrow);
+                }
+                return self.emit_token(Token::Minus);
+            }
             b'*' => return self.emit_token(Token::Star),
             b'/' => return self.emit_token(Token::Slash),
             b':' => return self.emit_token(Token::Colon),
-            b'.' => return self.emit_token(Token::Period),
+            b'.' => {
+                if self.matches(b'.') {
+                    if self.matches(b'=') {
+                        return self.emit_token(Token::DotDotEq);
+                    }
+                    return self.emit_token(Token::DotDot);
+                }
+                return self.emit_token(Token::Period);
+            }
             b',' => return self.emit_token(Token::Comma),
             b'%' => return self.emit_token(Token::Percent),
             b'@' => return self.emit_token(Token::At),
@@ -399,9 +420,16 @@ impl<'src> Lexer<'src> {
             b')' => return self.emit_token(Token::RParen),
             b'{' => return self.emit_token(Token::LBrace),
             b'}' => return self.emit_token(Token::RBrace),
+            b'[' => return self.emit_token(Token::LBracket),
+            b']' => return self.emit_token(Token::RBracket),
+            b'|' => return self.emit_token(Token::Pipe),
+            b'&' => return self.emit_token(Token::Amp),
+            b'#' => return self.emit_token(Token::Hash),
             b'=' => {
                 if self.matches(b'=') {
                     return self.emit_token(Token::EqEq);
+                } else if self.matches(b'>') {
+                    return self.emit_token(Token::FatArrow);
                 } else {
                     return self.emit_token(Token::Eq);
                 }
@@ -425,7 +453,6 @@ impl<'src> Lexer<'src> {
                     return self.emit_token(Token::NotEq);
                 }
             }
-            b';' => return self.emit_token(Token::Semicolon),
             b'"' => return self.lex_string(),
             _ => {}
         }
@@ -471,16 +498,16 @@ mod tests {
 
     #[test]
     fn lexes_unicode_identifiers() {
-        let toks = lex("Assets:Café Ausgaben:Lebensmittel_2 日本");
+        let toks = lex("assets.café ausgaben.lebensmittel_2 日本");
         assert_eq!(
             toks,
             vec![
-                Token::Ident("Assets"),
-                Token::Colon,
-                Token::Ident("Café"),
-                Token::Ident("Ausgaben"),
-                Token::Colon,
-                Token::Ident("Lebensmittel_2"),
+                Token::Ident("assets"),
+                Token::Period,
+                Token::Ident("café"),
+                Token::Ident("ausgaben"),
+                Token::Period,
+                Token::Ident("lebensmittel_2"),
                 Token::Ident("日本"),
             ]
         );
@@ -497,9 +524,9 @@ mod tests {
     fn spans_start_at_the_offset() {
         let errs = super::lex("a\n  \"b", 100).unwrap_err();
         assert_eq!(errs[0].span, Span::new(104, 106));
-        let toks = super::lex("import x", 7).unwrap();
-        assert_eq!(toks[0], (Token::Import, Span::new(7, 13)));
-        assert_eq!(toks[1], (Token::Ident("x"), Span::new(14, 15)));
+        let toks = super::lex("mod x", 7).unwrap();
+        assert_eq!(toks[0], (Token::Mod, Span::new(7, 10)));
+        assert_eq!(toks[1], (Token::Ident("x"), Span::new(11, 12)));
     }
 
     #[test]
@@ -513,8 +540,35 @@ mod tests {
 
     #[test]
     fn lexes_multi_char_ops() {
-        let toks = lex(">= <= ==");
-        assert_eq!(toks, vec![Token::GtEq, Token::LtEq, Token::EqEq]);
+        let toks = lex(">= <= == -> => .. ..=");
+        assert_eq!(
+            toks,
+            vec![
+                Token::GtEq,
+                Token::LtEq,
+                Token::EqEq,
+                Token::Arrow,
+                Token::FatArrow,
+                Token::DotDot,
+                Token::DotDotEq,
+            ]
+        );
+    }
+
+    #[test]
+    fn ranges_of_numbers_and_dates_lex_as_ranges() {
+        let date = |y, m, d| Token::Date(NaiveDate::from_ymd_opt(y, m, d).unwrap());
+        assert_eq!(
+            lex("2026..2028 2026-01-02.. 1.5"),
+            vec![
+                Token::Number(Decimal::new(2026, 0)),
+                Token::DotDot,
+                Token::Number(Decimal::new(2028, 0)),
+                date(2026, 1, 2),
+                Token::DotDot,
+                Token::Number(Decimal::new(15, 1)),
+            ]
+        );
     }
 
     #[test]

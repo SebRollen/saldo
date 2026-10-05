@@ -83,8 +83,8 @@ pub enum Error {
         from: NaiveDate,
         to: NaiveDate,
     },
-    /// The file saldo was asked to run couldn't be read. Imports that can't be
-    /// read are diagnostics instead, pointing at the import.
+    /// The file saldo was asked to run couldn't be read. Module files that
+    /// can't be read are diagnostics instead, pointing at their `mod`.
     Read {
         path: PathBuf,
         error: std::io::Error,

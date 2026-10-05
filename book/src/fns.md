@@ -1,20 +1,19 @@
 # Functions
 
-User-defined functions let you name and reuse a computation across params,
-entries, and assertions. They are pure — they take explicit arguments and
-return a value; they cannot read global params or account balances.
+Functions name and reuse a computation across values, entries and checks.
+They take arguments and return a value.
 
 ## Syntax
 
 ```
-fn <name>(<param>, ...) {
-  [let <name> = <expression>;]
+fn <name>(<parameter>, ...) {
+  [let <name> = <expression>]
   ...
-  [return] <expression>
+  <expression>
 }
 ```
 
-The final expression is the return value. The `return` keyword is optional.
+The final expression is the return value.
 
 ## Defining a function
 
@@ -22,31 +21,38 @@ The final expression is the return value. The `return` keyword is optional.
 fn double(x) { x * 2 }
 
 fn net(gross, rate) {
-  let tax = gross * rate;
+  let tax = gross * rate
   gross - tax
 }
 ```
 
-Local bindings introduced with `let` are available for the rest of the body.
+`let` names a value for the rest of the body.
 
 ## Calling a function
 
-A function call looks like any other expression and can appear anywhere an
-expression is valid: in a param definition, an entry amount, or an
-assertion.
+A call looks like any other expression and can go anywhere an expression can:
+in a value, an entry or a check. Write the `(` right after the function's
+name, as in `net(gross, 0.3)`; with a space between, it isn't a call.
 
 ```
-param gross = double(salary)
+let salary = 120_000
+let gross = double(salary)
 
-entry monthly "pay" {
-  Assets:Cash = net(gross / 12, 0.3)
-  Income:Salary
+entry pay @ last {
+  income.salary -> assets.cash : net(gross / 12, 0.3)
 }
 ```
 
-## Calling built-ins
+## Built-in functions
 
-User-defined functions can call built-in functions such as `min` and `max`.
+| Function | Returns |
+|----------|---------|
+| `min(a, b)`, `max(a, b)` | the smaller or larger |
+| `abs(x)` | `x` without its sign |
+| `floor(x)`, `ceil(x)`, `round(x)` | `x` rounded down, up, or to the nearest whole number (half to even) |
+| `fill(x)` | what's left of a target (see [Entries](./entries.md#filling-a-target)) |
+
+User-defined functions can call them:
 
 ```
 fn positive(x) { max(x, 0) }
@@ -54,8 +60,8 @@ fn positive(x) { max(x, 0) }
 
 ## Calling other functions
 
-A function can call any other function defined in the file, as long as there
-is no cycle.
+A function can call any other function, as long as no function ends up calling
+itself.
 
 ```
 fn double(x) { x * 2 }
@@ -64,66 +70,52 @@ fn quad(x)   { double(double(x)) }
 
 ## Conditional expressions
 
-`if … then … else …` works inside function bodies.
-
 ```
 fn bonus(salary, target) {
-  return if target > 0 then salary * 0.1 else 0;
+  if target > 0 then salary * 0.1 else 0
 }
 ```
 
-## Time-varying inputs
+## Values and balances
 
-Functions have no special awareness of time, but because params are
-evaluated as of the current simulation date before being passed in, a
-function automatically produces a different result on different days when
-its arguments are time-varying.
+A function can use [values](./values.md), which have a value on every day. It
+can't read account balances or totals, which change as entries fire; pass them
+in as arguments instead.
+
+```
+let tax_rate = 28%
+
+fn net(gross) { gross - gross * tax_rate }
+
+fn after_rent(cash) { cash - 3_000 }
+
+check after_rent(assets.cash) >= 0
+```
+
+Because values have the value for the current date, a function gives a
+different result on different days when the values it uses change:
 
 ```
 fn double(x) { x * 2 }
 
-param salary {
-  from 2025-01-01 to 2025-07-01 = 100
-  from 2025-07-01               = 200
+let salary {
+  2025-01-01..2025-07-01 => 100
+  2025-07-01..           => 200
 }
-param doubled = double(salary)
+let doubled = double(salary)
 ```
 
-During January `doubled` is `200`; from July onwards it is `400`. The
-function definition itself never changes — only the value of `salary` at
-the point it is called does.
+During January `doubled` is `200`; from July onwards it is `400`.
 
-## Restrictions
+## Rates
 
-- **No global params.** Function bodies can only reference their own
-  parameters and local `let` bindings. Referencing a global param or
-  account inside a function body is an error.
-- **No recursion.** A function cannot call itself, directly or through a
-  cycle of calls.
-- **No duplicate names.** Each function name must be unique within the file.
-- **Arity is checked.** Calling a function with the wrong number of arguments
-  is an error.
-
-## Full example
+Rates pass through functions: `salary` is per year, so `net(salary)` is too,
+and an entry moves a twelfth of it each month (see [Rates](./entries.md#rates)).
 
 ```
-fn net(gross, rate) {
-  let tax = gross * rate;
-  gross - tax
-}
+let salary = 120_000/year
 
-param salary {
-  from 2025-01-01 to 2026-01-01 = 120_000 per year
-  from 2026-01-01               = 140_000 per year
-}
-
-entry monthly "paycheck" {
-  Assets:Cash    = net(salary, 0.28)
-  Expenses:Tax   = salary * 0.28
-  Income:Salary
+entry paycheck @ last {
+  income.salary -> assets.cash : net(salary)
 }
 ```
-
-Rates pass through functions: `salary` is per year, so `net(salary, 0.28)`
-is too, and the entry posts a twelfth of it each month (see
-[Rates](./entries.md#rates)).

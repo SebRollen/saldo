@@ -15,8 +15,8 @@ transactions aren't printed. The opening balances you see are the balances on
 `--from`, after the warm-up.
 
 Accounts without an opening balance start at zero on the first simulated day.
-Period totals (`.ytd`, `.qtd`, `.mtd`) also start at zero on the first
-simulated day. If that day falls partway through a period and the leg's entry
+Totals like `pay.contribution[year]` also start at zero on the first simulated
+day. If that day falls partway through a period and an entry the total counts
 would already have fired earlier in it, saldo warns that the total is missing
 amounts. To fix it, simulate from the start of the period, or open an account
 by then so the warm-up covers it.
@@ -25,22 +25,20 @@ by then so the warm-up covers it.
 
 Every simulated day runs these steps in order:
 
-1. Period totals reset if the day starts a new month, quarter or year.
-2. Params are evaluated. A param that reads an account sees the balance before
-   any entries fire that day.
-3. Accounts whose opening date is today get their opening balance, in
-   declaration order. If any account opened, params are evaluated again so
-   they can see it.
-4. Entries whose schedule matches today fire, in declaration order. Params
-   are evaluated again after each one, so a later entry, directly or through
-   a param, sees the balances and `.ytd` totals left by earlier ones. Within
-   one entry, every posting is evaluated against the balances from before
-   that entry fired, and its own legs' totals don't include the firing in
-   progress.
-5. Assertions whose schedule matches today are checked against the balances
-   and params after all entries fired.
+1. Totals reset if the day starts a new month, quarter or year.
+2. Values are evaluated. A value that reads an account sees the balance
+   before any entries fire that day.
+3. Accounts whose opening date is today get their opening balance. If any
+   account opened, values are evaluated again so they can see it.
+4. Entries whose days include today fire, in the order they're written.
+   Values are evaluated again after each one, so a later entry, directly or
+   through a value, sees the balances and totals left by earlier ones. Within
+   one entry, every move is worked out from the balances before the entry
+   fired, and its own tags' totals don't include the firing in progress.
+5. Checks whose days include today are checked against the balances and
+   values after all entries fired.
 
-The first failing assertion or evaluation error stops the simulation.
+The first failing check or evaluation error stops the simulation.
 
 ## Output
 
@@ -48,7 +46,9 @@ The ledger output (the default) starts with an `opening-balances` transaction
 for the balances on `--from`, balanced against `Equity:OpeningBalances`. An
 account that opens later gets its own `opening-balances` transaction on its
 opening date. After that comes one transaction per entry firing, skipping
-firings whose postings all come to zero.
+firings that move no money.
 
 The CSV output (`--format csv`) has one row per day with every account's
-balance at the end of that day, in the order the accounts are declared.
+balance at the end of that day, ordered by the accounts' names. Balances read
+as their kind reads (see [Accounts](./accounts.md#kinds)), so what you owe on a
+loan is positive.

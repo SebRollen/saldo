@@ -1,28 +1,49 @@
-use crate::ast::schedule::{Period, Periodic};
+//! Resolves the names in a model: what each name in each module stands for,
+//! which accounts exist, and which `let`s are values and which are sets of
+//! days. Produces a [`Model`] in which every name is spelled out in full.
+
+use crate::ast::schedule::{self, DaySet, Dow, Month, quarter_from_name};
 use crate::ast::{
-    Arm, Decl, Expr, ParamBody, Path, Posting, PostingAmount, Program, Schedule, ScheduleRef, Span,
-    SpannedExpr, Stmt, When, Window,
+    AccountKind, AggKind, BinOp, Decl, EntryStmt, Expr, Growth, LetBody, ModBody, Move, Path,
+    Program, Schedule, Span, Spanned, SpannedExpr, Stmt, TimeUnit,
 };
 use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
 use chrono::NaiveDate;
 use indexmap::IndexMap;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
 pub struct Account {
+    /// Its opening balance, read as its kind reads, and the day it opens.
     pub opening: Option<(SpannedExpr, NaiveDate)>,
 }
 
 #[derive(Debug)]
 pub struct EntryDef {
+    /// Its full name, like `loans.car`.
+    pub name: String,
     pub label: String,
-    /// Stable key for leg namespacing: equals the alias when present, otherwise a
-    /// synthetic "$N" index. Never derived from the label, so duplicate labels are fine.
-    pub key: String,
     pub schedule: Schedule,
-    pub postings: Vec<Posting>,
+    pub body: Vec<EntryStmt>,
+    /// The names of the tags on its moves.
+    pub tags: Vec<String>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArmDef {
+    pub when: DaySet,
+    pub value: SpannedExpr,
+    pub growth: Option<Growth>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ParamBody {
+    Const(SpannedExpr),
+    /// Arms, of which the first that covers a day gives the value.
+    Arms(Vec<ArmDef>),
 }
 
 #[derive(Debug, Clone)]
@@ -34,311 +55,1042 @@ pub struct FnDef {
 
 #[derive(Debug)]
 pub struct Model {
-    /// Accounts in declaration order (used as column order in CSV output).
-    pub stocks: IndexMap<Path, Account>,
+    /// The accounts money moves into or out of, ordered by path.
+    pub accounts: IndexMap<Path, Account>,
+    /// Values by full name, each after the values it reads.
     pub params: IndexMap<String, ParamBody>,
+    /// Functions by full name, each after the functions it calls.
     pub fns: IndexMap<String, FnDef>,
     pub entries: Vec<EntryDef>,
-    pub asserts: Vec<(Schedule, SpannedExpr)>,
+    pub checks: Vec<(Schedule, SpannedExpr)>,
+    /// Problems that don't stop the model from running.
+    pub warnings: Vec<Diagnostic>,
 }
 
-struct Resolver<'a> {
-    program: &'a Program,
-    diags: Vec<Diagnostic>,
+pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
+    let mut resolver = Resolver::default();
+    resolver.collect(&[], &program.decls);
+    resolver.classify_lets();
+    resolver.resolve_all();
+    if !resolver.diags.is_empty() {
+        // A set of days with an error is reported where it's declared and
+        // again wherever it's used.
+        resolver
+            .diags
+            .sort_by(|a, b| (a.span.start, &a.message).cmp(&(b.span.start, &b.message)));
+        resolver
+            .diags
+            .dedup_by(|a, b| a.span == b.span && a.message == b.message);
+        return Err(resolver.diags);
+    }
+    let model = resolver.into_model();
+    // Types are only meaningful once every name resolves.
+    let diags = crate::typecheck::check(&model);
+    if diags.is_empty() {
+        Ok(model)
+    } else {
+        Err(diags)
+    }
+}
 
-    schedules: IndexMap<String, Schedule>,
-    stocks: IndexMap<Path, Account>,
+/// What a name declared in a module is.
+#[derive(Clone, Debug)]
+enum Symbol {
+    /// A `let`, by its index in `Resolver::lets`.
+    Let(usize),
+    Fn(String),
+    /// An entry by full name, and the tags on its moves.
+    Entry(String, HashSet<String>),
+    Mod(Vec<String>),
+}
+
+/// What a path names.
+enum Target {
+    Let(usize),
+    Fn(String),
+    Entry,
+    Mod,
+    Tag(String, String),
+    Account(Path),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Class {
+    Value,
+    Days,
+}
+
+struct LetDecl<'a> {
+    module: Vec<String>,
+    full: String,
+    body: &'a LetBody,
+    span: Span,
+}
+
+struct FnDecl<'a> {
+    module: Vec<String>,
+    full: String,
+    params: &'a [Spanned<String>],
+    body: &'a [Stmt],
+    span: Span,
+}
+
+struct EntryDecl<'a> {
+    module: Vec<String>,
+    full: String,
+    label: Option<&'a String>,
+    when: Option<&'a SpannedExpr>,
+    body: &'a [EntryStmt],
+    tags: HashSet<String>,
+    span: Span,
+}
+
+/// An account and its opening balance, in a `balances` block.
+type OpeningBalance = (Spanned<Path>, SpannedExpr);
+
+/// Where the names in an expression resolve.
+struct Scope<'s> {
+    module: &'s [String],
+    /// Function parameters and `let`s in scope.
+    locals: &'s [String],
+    /// The entry being resolved, and its tags.
+    entry: Option<(&'s str, &'s HashSet<String>)>,
+    /// The function being resolved, which can't read accounts or totals.
+    function: Option<&'s str>,
+}
+
+#[derive(Default)]
+struct Resolver<'a> {
+    diags: Vec<Diagnostic>,
+    /// The names declared in each module, by module path.
+    namespaces: HashMap<Vec<String>, HashMap<String, (Symbol, Span)>>,
+    lets: Vec<LetDecl<'a>>,
+    classes: Vec<Option<Class>>,
+    fn_decls: Vec<FnDecl<'a>>,
+    entry_decls: Vec<EntryDecl<'a>>,
+    check_decls: Vec<(Vec<String>, &'a SpannedExpr, Option<&'a SpannedExpr>)>,
+    balance_decls: Vec<(Vec<String>, NaiveDate, &'a [OpeningBalance])>,
+
+    /// Accounts money moves into or out of, and where each is first named.
+    leaves: BTreeMap<Path, Span>,
+    /// Accounts and groups read, and where.
+    reads: Vec<(Path, Span)>,
+
+    accounts: BTreeMap<Path, Account>,
     params: HashMap<String, ParamBody>,
+    param_spans: HashMap<String, Span>,
     fns: HashMap<String, FnDef>,
     entries: Vec<EntryDef>,
-    asserts: Vec<(Schedule, SpannedExpr)>,
-    leg_names: HashSet<(String, String)>,
+    checks: Vec<(Schedule, SpannedExpr)>,
+    warnings: Vec<Diagnostic>,
+}
 
-    schedule_spans: HashMap<String, Span>,
-    stock_spans: HashMap<Path, Span>,
-    param_spans: HashMap<String, Span>,
-    fn_spans: HashMap<String, Span>,
-    entry_aliases: HashMap<String, Span>,
+/// Names that can't name a value, a function, an entry or a module.
+fn reserved(name: &str) -> Option<&'static str> {
+    if AccountKind::from_root(name).is_some() {
+        return Some("starts the names of accounts");
+    }
+    if Dow::from_name(name).is_some()
+        || Month::from_name(name).is_some()
+        || quarter_from_name(name).is_some()
+        || name == "last"
+    {
+        return Some("is a set of days");
+    }
+    if matches!(
+        name,
+        "_" | "and" | "or" | "not" | "if" | "then" | "else" | "compounding" | "adding" | "every"
+    ) {
+        return Some("is a keyword");
+    }
+    None
+}
+
+fn join(module: &[String], name: &str) -> String {
+    module
+        .iter()
+        .map(String::as_str)
+        .chain([name])
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 impl<'a> Resolver<'a> {
-    fn new(program: &'a Program) -> Self {
-        Resolver {
-            program,
-            diags: Vec::new(),
-            schedules: IndexMap::new(),
-            stocks: IndexMap::new(),
-            params: HashMap::new(),
-            fns: HashMap::new(),
-            entries: Vec::new(),
-            asserts: Vec::new(),
-            leg_names: HashSet::new(),
-            schedule_spans: HashMap::new(),
-            stock_spans: HashMap::new(),
-            param_spans: HashMap::new(),
-            fn_spans: HashMap::new(),
-            entry_aliases: HashMap::new(),
-        }
-    }
+    // ---- collecting declarations ----
 
-    fn resolve(mut self) -> Result<Model, Vec<Diagnostic>> {
-        self.collect_schedules();
-        self.collect_declarations();
-        validate_fn_bodies(&self.fns, &mut self.diags);
-        self.validate_references();
-        self.check_param_cycles();
-        self.check_growth_rates();
-        if self.diags.is_empty() {
-            // Types are only meaningful once every name and call resolves.
-            self.diags = crate::typecheck::check(self.program, &self.fns);
-        }
-        if self.diags.is_empty() {
-            Ok(self.into_model())
-        } else {
-            Err(self.diags)
-        }
-    }
-
-    fn collect_schedules(&mut self) {
-        let program = self.program;
-        for (decl, span) in &program.decls {
-            if let Decl::Schedule { name, schedule } = decl {
-                if let Some(prev) = self.schedule_spans.get(name) {
-                    self.diags.push(
-                        Diagnostic::new(*span, format!("duplicate schedule `{name}`"))
-                            .with_note(*prev, "previously declared here"),
-                    );
-                } else {
-                    check_periodic_schedule(schedule, *span, &mut self.diags);
-                    self.schedule_spans.insert(name.clone(), *span);
-                    self.schedules.insert(name.clone(), schedule.clone());
-                }
-            }
-        }
-    }
-
-    fn collect_declarations(&mut self) {
-        let program = self.program;
-        for (decl, span) in &program.decls {
+    fn collect(&mut self, module: &[String], decls: &'a [Spanned<Decl>]) {
+        self.namespaces.entry(module.to_vec()).or_default();
+        for (decl, span) in decls {
+            let span = *span;
             match decl {
-                Decl::Account { name, opening } => {
-                    if let Some(prev) = self.stock_spans.get(name) {
-                        self.diags.push(
-                            Diagnostic::new(*span, format!("duplicate account `{name}`"))
-                                .with_note(*prev, "previously declared here"),
-                        );
-                    } else {
-                        self.stock_spans.insert(name.clone(), *span);
-                        self.stocks.insert(
-                            name.clone(),
-                            Account {
-                                opening: opening.clone(),
-                            },
-                        );
+                Decl::Let { name, body } => {
+                    let index = self.lets.len();
+                    if self.declare(module, name, Symbol::Let(index)) {
+                        self.lets.push(LetDecl {
+                            module: module.to_vec(),
+                            full: join(module, &name.0),
+                            body,
+                            span,
+                        });
                     }
-                }
-                Decl::Schedule { .. } => {
-                    // already processed in collect_schedules
-                }
-                Decl::Import { .. } => {
-                    // replaced by the imported declarations when loading
-                }
-                Decl::Param { name, body } => {
-                    if let Some(prev) = self.param_spans.get(name) {
-                        self.diags.push(
-                            Diagnostic::new(*span, format!("duplicate param `{name}`"))
-                                .with_note(*prev, "previously declared here"),
-                        );
-                        continue;
-                    }
-                    match body {
-                        ParamBody::Const(e) => {
-                            self.params
-                                .insert(name.clone(), ParamBody::Const(e.clone()));
-                        }
-                        ParamBody::Arms(arms) => {
-                            self.check_arms(name, arms);
-                            self.params
-                                .insert(name.clone(), ParamBody::Arms(arms.clone()));
-                        }
-                    }
-                    self.param_spans.insert(name.clone(), *span);
-                }
-                Decl::Entry {
-                    label,
-                    alias,
-                    schedule,
-                    postings,
-                } => {
-                    if let Some(a) = alias
-                        && let Some(prev) = self.entry_aliases.get(a)
-                    {
-                        self.diags.push(
-                            Diagnostic::new(*span, format!("duplicate entry alias `{a}`"))
-                                .with_note(*prev, "previously declared here"),
-                        );
-                        continue;
-                    }
-                    if postings.len() < 2 {
-                        self.diags.push(Diagnostic::new(
-                            *span,
-                            format!("entry `{label}` needs at least two postings"),
-                        ));
-                    }
-                    let mut auto_postings = postings.iter().filter(|p| p.amount.is_none());
-                    if let (Some(first), Some(second)) =
-                        (auto_postings.next(), auto_postings.next())
-                    {
-                        self.diags.push(
-                            Diagnostic::new(
-                                second.span,
-                                "only one posting per entry can omit its amount",
-                            )
-                            .with_note(first.span, "this posting is already auto-balanced"),
-                        );
-                    }
-
-                    let key = alias
-                        .clone()
-                        .unwrap_or_else(|| format!("${}", self.entries.len()));
-
-                    let mut entry_leg_names: HashSet<String> = HashSet::new();
-                    for posting in postings {
-                        let Some(leg) = &posting.leg_name else {
-                            continue;
-                        };
-                        if !entry_leg_names.insert(leg.clone()) {
-                            self.diags.push(Diagnostic::new(
-                                posting.leg_span.unwrap_or(posting.span),
-                                format!("duplicate leg name `{leg}` in entry `{label}`"),
-                            ));
-                        } else {
-                            self.leg_names.insert((key.clone(), leg.clone()));
-                        }
-                    }
-
-                    if let Some(a) = alias {
-                        self.entry_aliases.insert(a.clone(), *span);
-                    }
-                    let Some(schedule) = self.resolve_schedule_ref(schedule, *span) else {
-                        continue;
-                    };
-                    let sorted_postings = topo_sort_postings(
-                        postings.clone(),
-                        &entry_leg_names,
-                        *span,
-                        label,
-                        &mut self.diags,
-                    );
-                    self.entries.push(EntryDef {
-                        label: label.clone(),
-                        key,
-                        schedule,
-                        postings: sorted_postings,
-                        span: *span,
-                    });
                 }
                 Decl::Fn { name, params, body } => {
-                    if let Some(prev) = self.fn_spans.get(name) {
-                        self.diags.push(
-                            Diagnostic::new(*span, format!("duplicate function `{name}`"))
-                                .with_note(*prev, "previously declared here"),
-                        );
-                    } else if BUILTINS.iter().any(|(builtin, _)| builtin == name) {
+                    let full = join(module, &name.0);
+                    if BUILTINS.iter().any(|(builtin, _)| *builtin == name.0) {
                         self.diags.push(Diagnostic::new(
-                            *span,
-                            format!("function `{name}` has the same name as a built-in function"),
+                            name.1,
+                            format!("`{}` is a built-in function", name.0),
                         ));
-                    } else {
-                        let mut seen_params: HashSet<&str> = HashSet::new();
-                        for (p, p_span) in params {
-                            if !seen_params.insert(p.as_str()) {
-                                self.diags.push(Diagnostic::new(
-                                    *p_span,
-                                    format!("duplicate parameter `{p}` in function `{name}`"),
-                                ));
-                            }
-                        }
-                        self.fn_spans.insert(name.clone(), *span);
-                        self.fns.insert(
-                            name.clone(),
-                            FnDef {
-                                params: params.iter().map(|(p, _)| p.clone()).collect(),
-                                body: body.clone(),
-                                span: *span,
-                            },
-                        );
+                    } else if self.declare(module, name, Symbol::Fn(full.clone())) {
+                        self.fn_decls.push(FnDecl {
+                            module: module.to_vec(),
+                            full,
+                            params,
+                            body,
+                            span,
+                        });
                     }
                 }
-                Decl::Assert { schedule, asserted } => {
-                    let schedule = match schedule {
-                        None => Schedule::Periodic(Periodic {
-                            period: Period::Day,
-                            nth: None,
-                            within: When::Always,
-                            start: None,
-                        }),
-                        Some(r) => match self.resolve_schedule_ref(r, *span) {
-                            Some(s) => s,
-                            None => continue,
-                        },
-                    };
-                    self.asserts.push((schedule, asserted.clone()));
+                Decl::Entry {
+                    name,
+                    label,
+                    when,
+                    body,
+                } => {
+                    let full = join(module, &name.0);
+                    let tags: HashSet<String> = body
+                        .iter()
+                        .filter_map(|stmt| match stmt {
+                            EntryStmt::Move(Move { tag: Some(tag), .. }) => Some(tag.0.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if self.declare(module, name, Symbol::Entry(full.clone(), tags.clone())) {
+                        self.entry_decls.push(EntryDecl {
+                            module: module.to_vec(),
+                            full,
+                            label: label.as_ref(),
+                            when: when.as_ref(),
+                            body,
+                            tags,
+                            span,
+                        });
+                    }
+                }
+                Decl::Check { expr, when } => {
+                    self.check_decls
+                        .push((module.to_vec(), expr, when.as_ref()));
+                }
+                Decl::Balances { date, balances } => {
+                    self.balance_decls.push((module.to_vec(), *date, balances));
+                }
+                Decl::Mod { name, body } => {
+                    let path: Vec<String> =
+                        module.iter().cloned().chain([name.0.clone()]).collect();
+                    if self.declare(module, name, Symbol::Mod(path.clone()))
+                        && let ModBody::Inline(decls) = body
+                    {
+                        self.collect(&path, decls);
+                    }
                 }
             }
         }
     }
 
-    /// Reports `from … to …` ranges that end before they start, and arms that
-    /// never apply because the arms above cover all their days.
-    fn check_arms(&mut self, name: &str, arms: &[Arm]) {
+    /// Declares `name` in `module`, unless it can't be: returns whether it was.
+    fn declare(
+        &mut self,
+        module: &[String],
+        (name, span): &Spanned<String>,
+        symbol: Symbol,
+    ) -> bool {
+        if let Some(why) = reserved(name) {
+            self.diags.push(Diagnostic::new(
+                *span,
+                format!("`{name}` {why}, so it can't name anything else"),
+            ));
+            return false;
+        }
+        let namespace = self.namespaces.entry(module.to_vec()).or_default();
+        if let Some((_, previous)) = namespace.get(name) {
+            let previous = *previous;
+            self.diags.push(
+                Diagnostic::new(*span, format!("`{name}` is already declared"))
+                    .with_note(previous, "declared here"),
+            );
+            return false;
+        }
+        namespace.insert(name.clone(), (symbol, *span));
+        true
+    }
+
+    // ---- looking up names ----
+
+    /// What `path` names in `module`: a name in the module, or else at the
+    /// top of the model, and then names inside that.
+    fn lookup(&self, module: &[String], path: &Path, span: Span) -> Result<Target, Diagnostic> {
+        let first = &path.0[0];
+        if AccountKind::from_root(first).is_some() {
+            return Ok(Target::Account(path.clone()));
+        }
+        let found = self
+            .namespaces
+            .get(module)
+            .and_then(|ns| ns.get(first))
+            .or_else(|| {
+                self.namespaces
+                    .get(&Vec::new())
+                    .and_then(|ns| ns.get(first))
+            });
+        let Some((mut symbol, _)) = found.cloned() else {
+            let visible = self
+                .namespaces
+                .get(module)
+                .into_iter()
+                .chain(self.namespaces.get(&Vec::new()))
+                .flat_map(|ns| ns.keys().map(String::as_str))
+                .chain(AccountKind::ROOTS);
+            let mut diag = Diagnostic::new(span, format!("unknown name `{first}`"));
+            if let Some(close) = crate::util::closest(first, visible) {
+                diag = diag.with_note(span, format!("did you mean `{close}`?"));
+            }
+            return Err(diag);
+        };
+        for (i, part) in path.0.iter().enumerate().skip(1) {
+            let so_far = Path(path.0[..i].to_vec());
+            match symbol {
+                Symbol::Mod(m) => {
+                    let Some((next, _)) = self.namespaces.get(&m).and_then(|ns| ns.get(part))
+                    else {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!("module `{so_far}` has nothing called `{part}`"),
+                        ));
+                    };
+                    symbol = next.clone();
+                }
+                Symbol::Entry(entry, tags) => {
+                    if tags.contains(part) && i + 1 == path.0.len() {
+                        return Ok(Target::Tag(entry, part.clone()));
+                    }
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("entry `{so_far}` has no tag `{part}`"),
+                    ));
+                }
+                Symbol::Let(_) | Symbol::Fn(_) => {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("`{so_far}` has nothing inside it, so `{path}` names nothing"),
+                    ));
+                }
+            }
+        }
+        Ok(match symbol {
+            Symbol::Let(i) => Target::Let(i),
+            Symbol::Fn(full) => Target::Fn(full),
+            Symbol::Entry(..) => Target::Entry,
+            Symbol::Mod(_) => Target::Mod,
+        })
+    }
+
+    // ---- values and sets of days ----
+
+    /// Works out which `let`s are sets of days.
+    fn classify_lets(&mut self) {
+        self.classes = vec![None; self.lets.len()];
+        for i in 0..self.lets.len() {
+            self.class_of(i, &mut Vec::new());
+        }
+    }
+
+    fn class_of(&mut self, i: usize, seen: &mut Vec<usize>) -> Class {
+        if let Some(class) = self.classes[i] {
+            return class;
+        }
+        // A cycle is reported when the values are resolved.
+        if seen.contains(&i) {
+            return Class::Value;
+        }
+        seen.push(i);
+        let class = match self.lets[i].body {
+            LetBody::Arms(_) => Class::Value,
+            LetBody::Expr(e) => {
+                let module = self.lets[i].module.clone();
+                self.class_of_expr(e, &module, seen)
+            }
+        };
+        seen.pop();
+        self.classes[i] = Some(class);
+        class
+    }
+
+    fn class_of_expr(
+        &mut self,
+        (expr, span): &SpannedExpr,
+        module: &[String],
+        seen: &mut Vec<usize>,
+    ) -> Class {
+        match expr.as_ref() {
+            Expr::Days(_) | Expr::Range { .. } | Expr::Bin(_, BinOp::Union | BinOp::Inter, _) => {
+                Class::Days
+            }
+            Expr::Bin(a, BinOp::Sub | BinOp::Div, _) => self.class_of_expr(a, module, seen),
+            Expr::Ref(path) => match self.lookup(module, path, *span) {
+                Ok(Target::Let(i)) => self.class_of(i, seen),
+                _ => Class::Value,
+            },
+            _ => Class::Value,
+        }
+    }
+
+    /// The set of days `expr` describes, in `module`.
+    fn lower_days(&self, expr: &SpannedExpr, module: &[String]) -> Result<DaySet, Diagnostic> {
+        schedule::lower(expr, &mut |path, span| {
+            self.named_days(module, path, span, &mut Vec::new())
+        })
+    }
+
+    /// The set of days `path` names in `module`, as part of a larger one.
+    /// `stack` holds the sets being read, to catch cycles.
+    fn named_days(
+        &self,
+        module: &[String],
+        path: &Path,
+        span: Span,
+        stack: &mut Vec<usize>,
+    ) -> Result<DaySet, Diagnostic> {
+        match self.lookup(module, path, span)? {
+            Target::Let(i) if self.classes[i] == Some(Class::Days) => {
+                if stack.contains(&i) {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("`{}` is defined in terms of itself", self.lets[i].full),
+                    ));
+                }
+                let LetBody::Expr(e) = self.lets[i].body else {
+                    unreachable!("sets of days don't have arms")
+                };
+                stack.push(i);
+                let module = &self.lets[i].module;
+                let set = schedule::lower_part(e, &mut |path, span| {
+                    self.named_days(module, path, span, stack)
+                });
+                stack.pop();
+                set
+            }
+            Target::Let(_) => Err(Diagnostic::new(
+                span,
+                format!("`{path}` is a number, not a set of days"),
+            )),
+            _ => Err(Diagnostic::new(
+                span,
+                format!("`{path}` isn't a set of days"),
+            )),
+        }
+    }
+
+    fn schedule(&mut self, when: Option<&SpannedExpr>, module: &[String]) -> Option<Schedule> {
+        let Some(when) = when else {
+            return Some(Schedule::every_day());
+        };
+        match self.lower_days(when, module) {
+            Ok(set) => Some(Schedule::new(set)),
+            Err(diag) => {
+                self.diags.push(diag);
+                None
+            }
+        }
+    }
+
+    // ---- resolving everything ----
+
+    fn resolve_all(&mut self) {
+        for i in 0..self.lets.len() {
+            self.resolve_let(i);
+        }
+        for i in 0..self.fn_decls.len() {
+            self.resolve_fn(i);
+        }
+        for i in 0..self.entry_decls.len() {
+            self.resolve_entry(i);
+        }
+        for i in 0..self.check_decls.len() {
+            let (module, expr, when) = self.check_decls[i].clone();
+            let scope = Scope {
+                module: &module,
+                locals: &[],
+                entry: None,
+                function: None,
+            };
+            let expr = self.resolve_expr(expr, &scope);
+            if let Some(schedule) = self.schedule(when, &module) {
+                self.checks.push((schedule, expr));
+            }
+        }
+        for i in 0..self.balance_decls.len() {
+            let (module, date, balances) = self.balance_decls[i].clone();
+            for ((path, span), value) in balances {
+                if !self.account_path(path, *span) {
+                    continue;
+                }
+                let scope = Scope {
+                    module: &module,
+                    locals: &[],
+                    entry: None,
+                    function: None,
+                };
+                let value = self.resolve_expr(value, &scope);
+                self.leaves.entry(path.clone()).or_insert(*span);
+                let account = self
+                    .accounts
+                    .entry(path.clone())
+                    .or_insert(Account { opening: None });
+                if account.opening.is_some() {
+                    self.diags.push(Diagnostic::new(
+                        *span,
+                        format!("`{path}` already has an opening balance"),
+                    ));
+                    continue;
+                }
+                account.opening = Some((value, date));
+            }
+        }
+        self.check_param_cycles();
+        self.check_growth_rates();
+        validate_fn_calls(&self.fns, &mut self.diags);
+        self.check_accounts();
+    }
+
+    fn resolve_let(&mut self, i: usize) {
+        if self.classes[i] == Some(Class::Days) {
+            // Sets of days are read where they're used; this reports their
+            // errors even if they aren't used. A `/ n` can get the range it
+            // counts from where it's used.
+            if let LetBody::Expr(e) = self.lets[i].body {
+                let module = &self.lets[i].module;
+                let mut stack = vec![i];
+                let set = schedule::lower_part(e, &mut |path, span| {
+                    self.named_days(module, path, span, &mut stack)
+                });
+                if let Err(diag) = set {
+                    self.diags.push(diag);
+                }
+            }
+            return;
+        }
+        let module = self.lets[i].module.clone();
+        let full = self.lets[i].full.clone();
+        let scope = Scope {
+            module: &module,
+            locals: &[],
+            entry: None,
+            function: None,
+        };
+        let body = match self.lets[i].body {
+            LetBody::Expr(e) => ParamBody::Const(self.resolve_expr(e, &scope)),
+            LetBody::Arms(arms) => {
+                let mut resolved: Vec<ArmDef> = Vec::new();
+                for arm in arms {
+                    let when = match &arm.when {
+                        None => DaySet::All,
+                        Some(when) => match self.lower_days(when, &module) {
+                            Ok(set) => set,
+                            Err(diag) => {
+                                self.diags.push(diag);
+                                continue;
+                            }
+                        },
+                    };
+                    let growth = arm.growth.as_ref().map(|g| Growth {
+                        by: self.resolve_expr(&g.by, &scope),
+                        ..g.clone()
+                    });
+                    if let Some(g) = &growth
+                        && when.first_day().is_none()
+                    {
+                        self.diags.push(Diagnostic::new(
+                            g.span,
+                            format!(
+                                "`{}` needs an arm with a start to count steps from, like `jul 2026.. =>`",
+                                g.kind.keyword()
+                            ),
+                        ));
+                    }
+                    resolved.push(ArmDef {
+                        when,
+                        value: self.resolve_expr(&arm.value, &scope),
+                        growth,
+                        span: arm.span,
+                    });
+                }
+                self.check_arms(&full, &resolved);
+                ParamBody::Arms(resolved)
+            }
+        };
+        self.param_spans.insert(full.clone(), self.lets[i].span);
+        self.params.insert(full, body);
+    }
+
+    /// Reports arms that never apply because the arms above cover all their
+    /// days.
+    fn check_arms(&mut self, name: &str, arms: &[ArmDef]) {
         for (i, arm) in arms.iter().enumerate() {
-            if let Some(growth) = &arm.growth
-                && arm.when.start().is_none()
-            {
-                self.diags.push(Diagnostic::new(
-                    growth.span,
-                    format!(
-                        "`{}` needs an arm with a start to count steps from, like `from jul 2026`",
-                        growth.kind.keyword()
-                    ),
-                ));
-            }
-            if let When::Windows(windows) = &arm.when
-                && windows
-                    .iter()
-                    .any(|w| matches!(*w, Window::Dates(from, Some(to)) if to <= from))
-            {
-                self.diags
-                    .push(Diagnostic::new(arm.span, "`to` must come after `from`"));
-                continue;
-            }
             let above = &arms[..i];
-            if let Some(otherwise) = above.iter().find(|a| a.when == When::Always) {
+            if let Some(otherwise) = above.iter().find(|a| a.when == DaySet::All) {
                 self.diags.push(
                     Diagnostic::new(
                         arm.span,
-                        format!(
-                            "this arm of param `{name}` comes after `else`, so it never applies"
-                        ),
+                        format!("this arm of `{name}` comes after `_`, so it never applies"),
                     )
-                    .with_note(otherwise.span, "`else` is here"),
+                    .with_note(otherwise.span, "`_` is here"),
                 );
             } else if arm
                 .when
                 .is_shadowed_by(&above.iter().map(|a| &a.when).collect::<Vec<_>>())
+                == Some(true)
             {
                 self.diags.push(Diagnostic::new(
                     arm.span,
                     format!(
-                        "this arm of param `{name}` never applies: the arms above cover all its days"
+                        "this arm of `{name}` never applies: the arms above cover all its days"
                     ),
                 ));
             }
         }
     }
 
-    /// Reports growth rates that read anything but numbers and params made of
+    fn resolve_fn(&mut self, i: usize) {
+        let decl = &self.fn_decls[i];
+        let (module, full, span) = (decl.module.clone(), decl.full.clone(), decl.span);
+        let (params, body) = (decl.params, decl.body);
+        let mut locals: Vec<String> = Vec::new();
+        for (param, param_span) in params {
+            if locals.contains(param) {
+                self.diags.push(Diagnostic::new(
+                    *param_span,
+                    format!("`{param}` is already a parameter of `{full}`"),
+                ));
+            }
+            locals.push(param.clone());
+        }
+        let mut resolved = Vec::new();
+        for stmt in body {
+            let scope = Scope {
+                module: &module,
+                locals: &locals,
+                entry: None,
+                function: Some(full.as_str()),
+            };
+            match stmt {
+                Stmt::Let { name, value } => {
+                    let value = self.resolve_expr(value, &scope);
+                    resolved.push(Stmt::Let {
+                        name: name.clone(),
+                        value,
+                    });
+                    locals.push(name.clone());
+                }
+                Stmt::Return(value) => {
+                    resolved.push(Stmt::Return(self.resolve_expr(value, &scope)))
+                }
+            }
+        }
+        self.fns.insert(
+            full,
+            FnDef {
+                params: params.iter().map(|(p, _)| p.clone()).collect(),
+                body: resolved,
+                span,
+            },
+        );
+    }
+
+    fn resolve_entry(&mut self, i: usize) {
+        let decl = &self.entry_decls[i];
+        let (module, full, span, when) =
+            (decl.module.clone(), decl.full.clone(), decl.span, decl.when);
+        let (label, body, tags) = (decl.label.cloned(), decl.body, decl.tags.clone());
+        let mut locals: Vec<String> = Vec::new();
+        let mut resolved = Vec::new();
+        for stmt in body {
+            let scope = Scope {
+                module: &module,
+                locals: &locals,
+                entry: Some((full.as_str(), &tags)),
+                function: None,
+            };
+            match stmt {
+                EntryStmt::Let { name, value } => {
+                    let value = self.resolve_expr(value, &scope);
+                    if locals.contains(&name.0) {
+                        self.diags.push(Diagnostic::new(
+                            name.1,
+                            format!("`{}` is already a `let` in this entry", name.0),
+                        ));
+                    }
+                    locals.push(name.0.clone());
+                    resolved.push(EntryStmt::Let {
+                        name: name.clone(),
+                        value,
+                    });
+                }
+                EntryStmt::Move(m) => {
+                    let amount = self.resolve_expr(&m.amount, &scope);
+                    for (path, path_span) in [&m.from, &m.to] {
+                        if self.account_path(path, *path_span) {
+                            self.leaves.entry(path.clone()).or_insert(*path_span);
+                        }
+                    }
+                    resolved.push(EntryStmt::Move(Move {
+                        amount,
+                        ..m.clone()
+                    }));
+                }
+            }
+        }
+        let Some(schedule) = self.schedule(when, &module) else {
+            return;
+        };
+        let mut tags: Vec<String> = tags.into_iter().collect();
+        tags.sort();
+        self.entries.push(EntryDef {
+            label: label.unwrap_or_else(|| full.clone()),
+            name: full,
+            schedule,
+            body: resolved,
+            tags,
+            span,
+        });
+    }
+
+    /// Checks that `path` can be an account that money moves into or out of,
+    /// or that starts with a balance.
+    fn account_path(&mut self, path: &Path, span: Span) -> bool {
+        if path.account_kind().is_none() {
+            let mut diag = Diagnostic::new(
+                span,
+                format!(
+                    "`{path}` isn't an account: accounts start with `assets`, `liabilities`, \
+                     `income`, `expenses` or `equity`"
+                ),
+            );
+            if let Some(close) = crate::util::closest(&path.0[0], AccountKind::ROOTS) {
+                diag = diag.with_note(span, format!("did you mean `{close}`?"));
+            }
+            self.diags.push(diag);
+            return false;
+        }
+        if path.0.len() < 2 {
+            self.diags.push(Diagnostic::new(
+                span,
+                format!("`{path}` holds every account of its kind; name one, like `{path}.cash`"),
+            ));
+            return false;
+        }
+        true
+    }
+
+    fn resolve_expr(&mut self, e: &SpannedExpr, scope: &Scope) -> SpannedExpr {
+        let (expr, span) = e;
+        let span = *span;
+        let resolved = match expr.as_ref() {
+            Expr::Num(_) | Expr::Bool(_) => return e.clone(),
+            Expr::Ref(path) => match self.resolve_ref(path, span, scope) {
+                Some(resolved) => resolved,
+                None => return e.clone(),
+            },
+            Expr::Neg(x) => Expr::Neg(self.resolve_expr(x, scope)),
+            Expr::Not(x) => Expr::Not(self.resolve_expr(x, scope)),
+            Expr::Bin(_, op @ (BinOp::Union | BinOp::Inter), _) => {
+                self.diags.push(Diagnostic::new(
+                    span,
+                    format!("`{op}` combines sets of days, but this needs a number"),
+                ));
+                return e.clone();
+            }
+            Expr::Bin(a, op, b) => Expr::Bin(
+                self.resolve_expr(a, scope),
+                *op,
+                self.resolve_expr(b, scope),
+            ),
+            Expr::If { cond, then, else_ } => Expr::If {
+                cond: self.resolve_expr(cond, scope),
+                then: self.resolve_expr(then, scope),
+                else_: self.resolve_expr(else_, scope),
+            },
+            Expr::Call(callee, args) => {
+                let args: Vec<SpannedExpr> =
+                    args.iter().map(|a| self.resolve_expr(a, scope)).collect();
+                match self.resolve_callee(callee, args.len(), span, scope) {
+                    Some(callee) => Expr::Call(callee, args),
+                    None => return e.clone(),
+                }
+            }
+            Expr::Per(x, unit) => Expr::Per(self.resolve_expr(x, scope), *unit),
+            Expr::Period(x, unit) => match self.resolve_total(x, *unit, span, scope) {
+                Some(resolved) => resolved,
+                None => return e.clone(),
+            },
+            Expr::Days(_) | Expr::Range { .. } => {
+                self.diags.push(Diagnostic::new(
+                    span,
+                    "this is a set of days, but this needs a number",
+                ));
+                return e.clone();
+            }
+            Expr::Global(_)
+            | Expr::Local(_)
+            | Expr::Balance(_)
+            | Expr::TagTotal { .. }
+            | Expr::AccountTotal(..) => return e.clone(),
+        };
+        (Box::new(resolved), span)
+    }
+
+    fn resolve_ref(&mut self, path: &Path, span: Span, scope: &Scope) -> Option<Expr> {
+        if path.0.len() == 1 && scope.locals.contains(&path.0[0]) {
+            return Some(Expr::Local(path.0[0].clone()));
+        }
+        let target = match self.lookup(scope.module, path, span) {
+            Ok(target) => target,
+            Err(diag) => {
+                self.diags.push(diag);
+                return None;
+            }
+        };
+        let message = match target {
+            Target::Account(path) => {
+                if let Some(function) = scope.function {
+                    format!(
+                        "function `{function}` can't read balances; pass `{path}` in as an argument"
+                    )
+                } else {
+                    self.reads.push((path.clone(), span));
+                    return Some(Expr::Balance(path));
+                }
+            }
+            Target::Let(i) if self.classes[i] == Some(Class::Days) => {
+                format!("`{path}` is a set of days, but this needs a number")
+            }
+            Target::Let(i) => return Some(Expr::Global(self.lets[i].full.clone())),
+            Target::Fn(_) => format!("`{path}` is a function; call it like `{path}(…)`"),
+            Target::Entry => format!(
+                "`{path}` is an entry; read what its tagged moves moved with `{path}.<tag>[year]`"
+            ),
+            Target::Tag(..) => {
+                format!("`{path}` is a tag; read what it moved so far with `{path}[year]`")
+            }
+            Target::Mod => format!("`{path}` is a module, not a value"),
+        };
+        self.diags.push(Diagnostic::new(span, message));
+        None
+    }
+
+    fn resolve_callee(
+        &mut self,
+        callee: &Path,
+        args: usize,
+        span: Span,
+        scope: &Scope,
+    ) -> Option<Path> {
+        let (name, arity) = if let [name] = callee.0.as_slice()
+            && let Some((_, arity)) = BUILTINS.iter().find(|(builtin, _)| builtin == name)
+        {
+            (name.clone(), *arity)
+        } else {
+            match self.lookup(scope.module, callee, span) {
+                Ok(Target::Fn(full)) => {
+                    let decl = self
+                        .fn_decls
+                        .iter()
+                        .find(|d| d.full == full)
+                        .expect("declared functions are collected");
+                    (full, decl.params.len())
+                }
+                Ok(_) => {
+                    self.diags.push(Diagnostic::new(
+                        span,
+                        format!("`{callee}` isn't a function"),
+                    ));
+                    return None;
+                }
+                Err(mut diag) => {
+                    diag.message = format!("unknown function `{callee}`");
+                    self.diags.push(diag);
+                    return None;
+                }
+            }
+        };
+        if args != arity {
+            let word = if arity == 1 { "argument" } else { "arguments" };
+            self.diags.push(Diagnostic::new(
+                span,
+                format!("`{callee}` takes {arity} {word}, got {args}"),
+            ));
+            return None;
+        }
+        Some(Path(vec![name]))
+    }
+
+    /// `x[unit]`: what a tag or an account has moved so far this period.
+    fn resolve_total(
+        &mut self,
+        x: &SpannedExpr,
+        unit: TimeUnit,
+        span: Span,
+        scope: &Scope,
+    ) -> Option<Expr> {
+        let Some(agg) = AggKind::from_unit(unit) else {
+            self.diags.push(Diagnostic::new(
+                span,
+                format!("totals are kept for a year, quarter or month, not a {unit}"),
+            ));
+            return None;
+        };
+        if let Some(function) = scope.function {
+            self.diags.push(Diagnostic::new(
+                span,
+                format!("function `{function}` can't read totals; pass them in as arguments"),
+            ));
+            return None;
+        }
+        let Expr::Ref(path) = x.0.as_ref() else {
+            self.diags.push(Diagnostic::new(
+                span,
+                "only tags and accounts have totals, like `paycheck.contribution[year]` or \
+                 `income.salary[year]`",
+            ));
+            return None;
+        };
+        if let ([tag], Some((entry, tags))) = (path.0.as_slice(), scope.entry)
+            && tags.contains(tag)
+        {
+            return Some(Expr::TagTotal {
+                entry: entry.to_string(),
+                tag: tag.clone(),
+                agg,
+            });
+        }
+        match self.lookup(scope.module, path, x.1) {
+            Ok(Target::Tag(entry, tag)) => Some(Expr::TagTotal { entry, tag, agg }),
+            Ok(Target::Account(path)) => {
+                self.reads.push((path.clone(), x.1));
+                Some(Expr::AccountTotal(path, agg))
+            }
+            Ok(_) => {
+                self.diags.push(Diagnostic::new(
+                    x.1,
+                    format!(
+                        "`{path}` has no total; only tags and accounts do, like \
+                         `paycheck.contribution[year]` or `income.salary[year]`"
+                    ),
+                ));
+                None
+            }
+            Err(diag) => {
+                self.diags.push(diag);
+                None
+            }
+        }
+    }
+
+    // ---- checks across the model ----
+
+    /// Checks that accounts are either accounts or groups of them, and that
+    /// every account read exists.
+    fn check_accounts(&mut self) {
+        let leaves: Vec<(&Path, &Span)> = self.leaves.iter().collect();
+        for (i, (leaf, span)) in leaves.iter().enumerate() {
+            // Descendants sort right after their ancestors.
+            if let Some((child, child_span)) = leaves.get(i + 1)
+                && child.starts_with(leaf)
+            {
+                self.diags.push(
+                    Diagnostic::new(
+                        **span,
+                        format!(
+                            "`{leaf}` holds money, so it can't also be a group of accounts like `{child}`"
+                        ),
+                    )
+                    .with_note(**child_span, format!("`{child}` is here")),
+                );
+            }
+        }
+        let groups: HashSet<Path> = self
+            .leaves
+            .keys()
+            .flat_map(|leaf| (1..leaf.0.len()).map(|n| Path(leaf.0[..n].to_vec())))
+            .collect();
+        for (path, span) in &self.reads {
+            if path.0.len() == 1 || self.leaves.contains_key(path) || groups.contains(path) {
+                continue;
+            }
+            let names: Vec<String> = self.leaves.keys().chain(&groups).map(Path::join).collect();
+            let mut diag = Diagnostic::new(
+                *span,
+                format!("no entry or balance moves money into or out of `{path}`"),
+            );
+            if let Some(close) =
+                crate::util::closest(&path.join(), names.iter().map(String::as_str))
+            {
+                diag = diag.with_note(*span, format!("did you mean `{close}`?"));
+            }
+            self.diags.push(diag);
+        }
+        // Accounts next to each other with nearly the same name may be typos.
+        let mut by_parent: BTreeMap<Path, Vec<(&Path, &Span)>> = BTreeMap::new();
+        for (leaf, span) in &self.leaves {
+            by_parent
+                .entry(Path(leaf.0[..leaf.0.len() - 1].to_vec()))
+                .or_default()
+                .push((leaf, span));
+        }
+        for siblings in by_parent.values() {
+            for (i, (a, _)) in siblings.iter().enumerate() {
+                for (b, b_span) in &siblings[i + 1..] {
+                    let (name_a, name_b) =
+                        (a.0.last().expect("a name"), b.0.last().expect("a name"));
+                    if name_a.chars().count() >= 4
+                        && crate::util::edit_distance(name_a, name_b) == 1
+                    {
+                        self.warnings.push(Diagnostic::new(
+                            **b_span,
+                            format!("`{a}` and `{b}` are both accounts; is one of them a typo?"),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_param_cycles(&mut self) {
+        let known: HashSet<String> = self.params.keys().cloned().collect();
+        let deps: HashMap<&str, Vec<String>> = self
+            .params
+            .iter()
+            .map(|(name, body)| (name.as_str(), param_deps(body, &known)))
+            .collect();
+        let mut names: Vec<&str> = deps.keys().copied().collect();
+        names.sort();
+        let mut reported: HashSet<&str> = HashSet::new();
+        for name in names {
+            if reported.contains(name) {
+                continue;
+            }
+            let Some(cycle) = find_cycle(name, &deps) else {
+                continue;
+            };
+            reported.extend(cycle.iter().copied());
+            let path: Vec<&str> = cycle.iter().copied().chain([name]).collect();
+            self.diags.push(Diagnostic::new(
+                self.param_spans[name],
+                format!("`{name}` depends on itself ({})", path.join(" → ")),
+            ));
+        }
+    }
+
+    /// Reports growth rates that read anything but numbers and values made of
     /// numbers, which have a value on any date without simulating it.
     fn check_growth_rates(&mut self) {
         let mut diags = Vec::new();
@@ -351,7 +1103,7 @@ impl<'a> Resolver<'a> {
                     diags.push(Diagnostic::new(
                         span,
                         format!(
-                            "`{}` can only use numbers, and params made of numbers",
+                            "`{}` can only use numbers, and values made of numbers",
                             growth.kind.keyword()
                         ),
                     ));
@@ -361,7 +1113,7 @@ impl<'a> Resolver<'a> {
         self.diags.extend(diags);
     }
 
-    /// The first part of `e` that isn't a number or a param made of numbers.
+    /// The first part of `e` that isn't a number or a value made of numbers.
     fn first_non_number(&self, e: &SpannedExpr, seen: &mut HashSet<String>) -> Option<Span> {
         match e.0.as_ref() {
             Expr::Num(_) => None,
@@ -369,9 +1121,8 @@ impl<'a> Resolver<'a> {
             Expr::Bin(a, _, b) => self
                 .first_non_number(a, seen)
                 .or_else(|| self.first_non_number(b, seen)),
-            Expr::Ref(path) if path.0.len() == 1 && self.params.contains_key(&path.0[0]) => {
-                let name = &path.0[0];
-                // A param in a cycle is reported elsewhere.
+            Expr::Global(name) if self.params.contains_key(name) => {
+                // A value in a cycle is reported elsewhere.
                 if !seen.insert(name.clone()) {
                     return None;
                 }
@@ -391,267 +1142,39 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Looks up a named schedule, or validates a literal one. Named schedules
-    /// were already validated where they were declared.
-    fn resolve_schedule_ref(&mut self, r: &ScheduleRef, decl_span: Span) -> Option<Schedule> {
-        match r {
-            ScheduleRef::Literal(s) => {
-                check_periodic_schedule(s, decl_span, &mut self.diags);
-                Some(s.clone())
-            }
-            ScheduleRef::Named(n, span) => {
-                let schedule = self.schedules.get(n).cloned();
-                if schedule.is_none() {
-                    self.diags.push(Diagnostic::new(
-                        *span,
-                        format!("schedule `{n}` is not defined"),
-                    ));
-                }
-                schedule
-            }
-        }
-    }
-
-    fn validate_references(&mut self) {
-        let stock_set: HashSet<Path> = self.stocks.keys().cloned().collect();
-        let param_set: HashSet<String> = self.params.keys().cloned().collect();
-        let no_extra: HashSet<String> = HashSet::new();
-
-        // `self.program` is &'a Program — copying the reference lets the loop iterate
-        // program.decls without borrowing `self`, so we can call &mut self methods inside.
-        let program = self.program;
-        for (decl, _span) in &program.decls {
-            match decl {
-                Decl::Account {
-                    opening: Some((e, _)),
-                    ..
-                } => {
-                    self.check_expr(e, None, &no_extra, &stock_set, &param_set);
-                }
-                Decl::Param { body, .. } => match body {
-                    ParamBody::Const(e) => {
-                        self.check_expr(e, None, &no_extra, &stock_set, &param_set);
-                    }
-                    ParamBody::Arms(arms) => {
-                        for arm in arms {
-                            self.check_expr(&arm.value, None, &no_extra, &stock_set, &param_set);
-                            if let Some(growth) = &arm.growth {
-                                self.check_expr(
-                                    &growth.by, None, &no_extra, &stock_set, &param_set,
-                                );
-                            }
-                        }
-                    }
-                },
-                Decl::Assert { asserted, .. } => {
-                    self.check_expr(asserted, None, &no_extra, &stock_set, &param_set);
-                }
-                _ => {}
-            }
-        }
-
-        // Take entries out so we can call &mut self methods while iterating.
-        let entries = std::mem::take(&mut self.entries);
-        for entry in &entries {
-            let entry_legs: HashSet<String> = entry
-                .postings
-                .iter()
-                .filter_map(|p| p.leg_name.as_ref())
-                .cloned()
-                .collect();
-            for posting in &entry.postings {
-                self.check_path_is_stock(&posting.account, posting.account_span, &stock_set);
-                if let Some(PostingAmount::Expr(e)) = &posting.amount {
-                    self.check_expr(e, Some(&entry.key), &entry_legs, &stock_set, &param_set);
-                }
-                if let Some(leg) = &posting.leg_name {
-                    let leg_span = posting.leg_span.unwrap_or(posting.span);
-                    if param_set.contains(leg) {
-                        self.diags.push(Diagnostic::new(
-                            leg_span,
-                            format!("leg name `{leg}` conflicts with a param of the same name"),
-                        ));
-                    }
-                    if stock_set.contains(&Path(vec![leg.clone()])) {
-                        self.diags.push(Diagnostic::new(
-                            leg_span,
-                            format!("leg name `{leg}` conflicts with an account of the same name"),
-                        ));
-                    }
-                }
-            }
-            self.check_auto_leg_not_referenced(entry);
-        }
-        self.entries = entries;
-    }
-
-    /// The auto-balanced posting's amount depends on every other posting, so
-    /// those postings can't refer to its leg.
-    fn check_auto_leg_not_referenced(&mut self, entry: &EntryDef) {
-        let Some(auto_leg) = entry
-            .postings
-            .iter()
-            .find(|p| p.amount.is_none())
-            .and_then(|p| p.leg_name.as_ref())
-        else {
-            return;
-        };
-        for posting in &entry.postings {
-            let Some(PostingAmount::Expr(e)) = &posting.amount else {
-                continue;
-            };
-            walk_expr(e, &mut |sub| {
-                if let Expr::Ref(path) = sub.0.as_ref()
-                    && path.0.len() == 1
-                    && path.0[0] == *auto_leg
-                {
-                    self.diags.push(Diagnostic::new(
-                        sub.1,
-                        format!(
-                            "`{auto_leg}` is the auto-balanced leg, so its amount isn't known \
-                             until the other postings are computed"
-                        ),
-                    ));
-                }
-            });
-        }
-    }
-
-    fn check_param_cycles(&mut self) {
-        let known: HashSet<String> = self.params.keys().cloned().collect();
-        let deps: HashMap<&str, Vec<String>> = self
-            .params
-            .iter()
-            .map(|(name, body)| (name.as_str(), collect_param_deps(body, &known)))
-            .collect();
-        let mut names: Vec<&str> = deps.keys().copied().collect();
-        names.sort();
-
-        let mut reported: HashSet<&str> = HashSet::new();
-        for name in names {
-            if reported.contains(name) {
-                continue;
-            }
-            let Some(cycle) = find_cycle(name, &deps) else {
-                continue;
-            };
-            reported.extend(cycle.iter().copied());
-            let path: Vec<&str> = cycle.iter().copied().chain([name]).collect();
-            self.diags.push(Diagnostic::new(
-                self.param_spans[name],
-                format!("param `{name}` depends on itself ({})", path.join(" → ")),
-            ));
-        }
-    }
-
-    fn check_expr(
-        &mut self,
-        e: &SpannedExpr,
-        entry_context: Option<&str>,
-        extra_refs: &HashSet<String>,
-        stock_set: &HashSet<Path>,
-        param_set: &HashSet<String>,
-    ) {
-        let mut local_diags: Vec<Diagnostic> = Vec::new();
-        let leg_names = &self.leg_names;
-        let fns = &self.fns;
-        walk_expr(e, &mut |sub: &SpannedExpr| {
-            if let Expr::Ref(path) = sub.0.as_ref()
-                && !is_known_ref(path, stock_set, param_set)
-                && !(path.0.len() == 1 && extra_refs.contains(&path.0[0]))
-            {
-                local_diags.push(Diagnostic::new(
-                    sub.1,
-                    format!("unknown reference `{path}`"),
-                ));
-            }
-            if let Expr::Call(name, args) = sub.0.as_ref() {
-                local_diags.extend(check_call(name, args.len(), sub.1, fns));
-            }
-            if let Expr::ParamAgg(entry_opt, leg, _) = sub.0.as_ref() {
-                let key: (String, String) = match entry_opt {
-                    Some(entry) => (entry.clone(), leg.clone()),
-                    None => match entry_context {
-                        Some(e) => (e.to_string(), leg.clone()),
-                        None => {
-                            local_diags.push(Diagnostic::new(
-                                sub.1,
-                                format!("unqualified leg `{leg}` — use `<entry>.{leg}.ytd` outside of an entry"),
-                            ));
-                            return;
-                        }
-                    },
-                };
-                if !leg_names.contains(&key) {
-                    local_diags.push(Diagnostic::new(
-                        sub.1,
-                        format!("unknown named leg `{}.{}`", key.0, key.1),
-                    ));
-                }
-            }
-        });
-        self.diags.extend(local_diags);
-    }
-
-    fn check_path_is_stock(&mut self, p: &Path, span: Span, stock_set: &HashSet<Path>) {
-        if !stock_set.contains(p) {
-            self.diags
-                .push(Diagnostic::new(span, format!("unknown account `{p}`")));
-        }
-    }
-
     fn into_model(self) -> Model {
         Model {
-            stocks: self.stocks,
-            params: topo_sort_by_deps(self.params, collect_param_deps),
-            fns: topo_sort_by_deps(self.fns, |def, known| {
-                collect_fn_call_deps(&def.body, known)
-            }),
+            accounts: self
+                .leaves
+                .keys()
+                .map(|path| {
+                    let account = self
+                        .accounts
+                        .get(path)
+                        .cloned()
+                        .unwrap_or(Account { opening: None });
+                    (path.clone(), account)
+                })
+                .collect(),
+            params: topo_sort_by_deps(self.params, param_deps),
+            fns: topo_sort_by_deps(self.fns, |def, known| fn_call_deps(&def.body, known)),
             entries: self.entries,
-            asserts: self.asserts,
+            checks: self.checks,
+            warnings: self.warnings,
         }
     }
 }
 
-pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
-    Resolver::new(program).resolve()
-}
-
-fn check_periodic_schedule(schedule: &Schedule, span: Span, diags: &mut Vec<Diagnostic>) {
-    if let Schedule::Periodic(Periodic {
-        nth: Some(_),
-        start: None,
-        period,
-        ..
-    }) = schedule
-    {
-        let label = match period {
-            Period::Day => "days",
-            Period::Week { .. } => "weeks",
-            Period::Weekday(_) => "weekdays",
-            Period::NamedMonth { .. } => "months",
-            Period::Month { .. } => "months",
-            Period::Quarter => "quarters",
-            Period::Year { .. } => "years",
-        };
-        diags.push(Diagnostic::new(
-            span,
-            format!("schedule with `every N {label}` requires a `from` date"),
-        ));
-    }
-}
-
-fn collect_param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> {
+fn param_deps(body: &ParamBody, known: &HashSet<String>) -> Vec<String> {
     let mut deps: Vec<String> = Vec::new();
     let mut visitor = |e: &SpannedExpr| {
-        if let Expr::Ref(path) = e.0.as_ref()
-            && path.0.len() == 1
-            && known.contains(&path.0[0])
+        if let Expr::Global(name) = e.0.as_ref()
+            && known.contains(name)
         {
-            deps.push(path.0[0].clone());
+            deps.push(name.clone());
         }
     };
-    match &body {
+    match body {
         ParamBody::Const(e) => walk_expr(e, &mut visitor),
         ParamBody::Arms(arms) => {
             for arm in arms {
@@ -737,83 +1260,19 @@ fn topo_sort_by_deps<T>(
     result
 }
 
-fn topo_sort_postings(
-    postings: Vec<Posting>,
-    entry_leg_names: &HashSet<String>,
-    span: Span,
-    entry_name: &str,
-    diags: &mut Vec<Diagnostic>,
-) -> Vec<Posting> {
-    let mut auto_leg: Option<Posting> = None;
-    let mut explicit: Vec<Posting> = Vec::new();
-    for p in postings {
-        if p.amount.is_none() {
-            auto_leg = Some(p);
-        } else {
-            explicit.push(p);
-        }
-    }
-
-    let n = explicit.len();
-    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
-    for (i, p) in explicit.iter().enumerate() {
-        if let Some(leg) = &p.leg_name {
-            name_to_idx.insert(leg.clone(), i);
-        }
-    }
-
-    let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
-    for (i, p) in explicit.iter().enumerate() {
-        if let Some(PostingAmount::Expr(e)) = &p.amount {
-            let mut seen: HashSet<usize> = HashSet::new();
-            walk_expr(e, &mut |sub| {
-                if let Expr::Ref(path) = sub.0.as_ref()
-                    && path.0.len() == 1
-                    && entry_leg_names.contains(&path.0[0])
-                    && let Some(&j) = name_to_idx.get(&path.0[0])
-                    && seen.insert(j)
-                {
-                    dependents[j].push(i);
-                }
-            });
-        }
-    }
-
-    let (order, had_cycle) = crate::util::topological_sort(&dependents);
-
-    if had_cycle {
-        diags.push(Diagnostic::new(
-            span,
-            format!("entry `{entry_name}` has a cycle among named legs"),
-        ));
-        let mut result = explicit;
-        if let Some(auto) = auto_leg {
-            result.push(auto);
-        }
-        return result;
-    }
-
-    let mut slots: Vec<Option<Posting>> = explicit.into_iter().map(Some).collect();
-    let mut sorted: Vec<Posting> = order
-        .into_iter()
-        .map(|i| slots[i].take().unwrap())
-        .collect();
-    if let Some(auto) = auto_leg {
-        sorted.push(auto);
-    }
-    sorted
-}
-
-/// Whether `path` names an account or a param.
-fn is_known_ref(path: &Path, stocks: &HashSet<Path>, params: &HashSet<String>) -> bool {
-    stocks.contains(path) || (path.0.len() == 1 && params.contains(&path.0[0]))
-}
-
 pub(crate) fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
     f(e);
     match e.0.as_ref() {
-        Expr::Num(_) | Expr::Bool(_) | Expr::Ref(_) | Expr::ParamAgg(..) => {}
-        Expr::Neg(x) | Expr::Not(x) | Expr::Per(x, _) => walk_expr(x, f),
+        Expr::Num(_)
+        | Expr::Bool(_)
+        | Expr::Ref(_)
+        | Expr::Days(_)
+        | Expr::Global(_)
+        | Expr::Local(_)
+        | Expr::Balance(_)
+        | Expr::TagTotal { .. }
+        | Expr::AccountTotal(..) => {}
+        Expr::Neg(x) | Expr::Not(x) | Expr::Per(x, _) | Expr::Period(x, _) => walk_expr(x, f),
         Expr::Bin(a, _, b) => {
             walk_expr(a, f);
             walk_expr(b, f);
@@ -828,14 +1287,21 @@ pub(crate) fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
                 walk_expr(a, f);
             }
         }
+        Expr::Range { from, to, .. } => {
+            walk_expr(from, f);
+            if let Some(to) = to {
+                walk_expr(to, f);
+            }
+        }
     }
 }
 
-fn collect_fn_call_deps(body: &[Stmt], known: &HashSet<String>) -> Vec<String> {
+fn fn_call_deps(body: &[Stmt], known: &HashSet<String>) -> Vec<String> {
     let mut deps: Vec<String> = Vec::new();
     let mut visitor = |e: &SpannedExpr| {
-        if let Expr::Call(name, _) = e.0.as_ref()
-            && known.contains(name.as_str())
+        if let Expr::Call(Path(name), _) = e.0.as_ref()
+            && let [name] = name.as_slice()
+            && known.contains(name)
         {
             deps.push(name.clone());
         }
@@ -851,257 +1317,219 @@ fn collect_fn_call_deps(body: &[Stmt], known: &HashSet<String>) -> Vec<String> {
     deps
 }
 
-fn validate_fn_bodies(fns: &HashMap<String, FnDef>, diags: &mut Vec<Diagnostic>) {
-    let fn_names: HashSet<String> = fns.keys().cloned().collect();
-
-    for (name, def) in fns {
+/// Reports functions that call themselves, directly or through others.
+fn validate_fn_calls(fns: &HashMap<String, FnDef>, diags: &mut Vec<Diagnostic>) {
+    let names: HashSet<String> = fns.keys().cloned().collect();
+    let mut sorted: Vec<&String> = fns.keys().collect();
+    sorted.sort();
+    for name in sorted {
+        let def = &fns[name];
         let mut visited: HashSet<String> = HashSet::new();
-        let mut stack: Vec<String> = collect_fn_call_deps(&def.body, &fn_names);
+        let mut stack: Vec<String> = fn_call_deps(&def.body, &names);
         while let Some(callee) = stack.pop() {
             if callee == *name {
                 diags.push(Diagnostic::new(
                     def.span,
-                    format!("function `{name}` contains a recursive call cycle"),
+                    format!("function `{name}` calls itself"),
                 ));
                 break;
             }
             if visited.insert(callee.clone())
                 && let Some(callee_def) = fns.get(&callee)
             {
-                stack.extend(collect_fn_call_deps(&callee_def.body, &fn_names));
+                stack.extend(fn_call_deps(&callee_def.body, &names));
             }
         }
     }
-
-    for (fn_name, def) in fns {
-        let mut scope: HashSet<String> = def.params.iter().cloned().collect();
-        for stmt in &def.body {
-            match stmt {
-                Stmt::Let {
-                    name: let_name,
-                    value,
-                } => {
-                    validate_fn_expr(value, &scope, fns, fn_name, diags);
-                    scope.insert(let_name.clone());
-                }
-                Stmt::Return(expr) => {
-                    validate_fn_expr(expr, &scope, fns, fn_name, diags);
-                }
-            }
-        }
-    }
-}
-
-/// Checks that `name` is a builtin or user function taking `arg_count` arguments.
-fn check_call(
-    name: &str,
-    arg_count: usize,
-    span: Span,
-    user_fns: &HashMap<String, FnDef>,
-) -> Option<Diagnostic> {
-    let arity = match BUILTINS.iter().find(|(n, _)| *n == name) {
-        Some((_, arity)) => *arity,
-        None => match user_fns.get(name) {
-            Some(def) => def.params.len(),
-            None => return Some(Diagnostic::new(span, format!("unknown function `{name}`"))),
-        },
-    };
-    if arg_count == arity {
-        return None;
-    }
-    let word = if arity == 1 { "argument" } else { "arguments" };
-    Some(Diagnostic::new(
-        span,
-        format!("`{name}` takes {arity} {word}, got {arg_count}"),
-    ))
-}
-
-fn validate_fn_expr(
-    expr: &SpannedExpr,
-    scope: &HashSet<String>,
-    user_fns: &HashMap<String, FnDef>,
-    fn_name: &str,
-    diags: &mut Vec<Diagnostic>,
-) {
-    walk_expr(expr, &mut |sub: &SpannedExpr| match sub.0.as_ref() {
-        Expr::Ref(path) => {
-            if !(path.0.len() == 1 && scope.contains(&path.0[0])) {
-                diags.push(Diagnostic::new(
-                        sub.1,
-                        format!(
-                            "unknown reference `{path}` in function `{fn_name}`; \
-                             function bodies can only reference their own parameters and local bindings"
-                        ),
-                    ));
-            }
-        }
-        Expr::Call(callee, args) => {
-            diags.extend(check_call(callee, args.len(), sub.1, user_fns));
-        }
-        Expr::ParamAgg(..) => {
-            diags.push(Diagnostic::new(
-                sub.1,
-                format!("function `{fn_name}` cannot use `.ytd`/`.qtd`/`.mtd` aggregations"),
-            ));
-        }
-        _ => {}
-    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn parse(src: &str) -> Program {
-        let tokens = crate::lexer::lex(src, 0).expect("lex failed");
-        crate::parser::parse(tokens).expect("parse failed")
-    }
 
     fn resolve_src(src: &str) -> Result<Model, Vec<Diagnostic>> {
-        resolve(&parse(src))
+        let tokens = crate::lexer::lex(src, 0).expect("lex failed");
+        resolve(&crate::parser::parse(tokens).expect("parse failed"))
     }
 
-    // --- collect_schedules ---
+    fn errors(src: &str) -> Vec<String> {
+        match resolve_src(src) {
+            Ok(_) => panic!("`{src}` resolved without errors"),
+            Err(diags) => diags.into_iter().map(|d| d.message).collect(),
+        }
+    }
+
+    fn has_error(src: &str, needle: &str) {
+        let errors = errors(src);
+        assert!(
+            errors.iter().any(|e| e.contains(needle)),
+            "expected an error containing {needle:?}, got {errors:?}"
+        );
+    }
 
     #[test]
-    fn collect_schedules_deduplicates() {
-        let prog = parse(
-            "schedule biweekly = every 2 weeks from 2024-01-01\nschedule biweekly = every week",
+    fn accounts_come_from_moves_and_balances() {
+        let model = resolve_src(
+            "balances @ 2026-01-01 { assets.cash = 5 }
+             entry pay @ last { income.salary -> assets.cash : 1 }",
+        )
+        .unwrap();
+        let accounts: Vec<String> = model.accounts.keys().map(Path::join).collect();
+        assert_eq!(accounts, ["assets.cash", "income.salary"]);
+        let cash = Path(vec!["assets".into(), "cash".into()]);
+        assert!(model.accounts[&cash].opening.is_some());
+    }
+
+    #[test]
+    fn reading_an_account_nothing_moves_is_an_error() {
+        has_error(
+            "entry pay { income.salary -> assets.cash : 1 }
+             check assets.csh >= 0",
+            "no entry or balance moves money into or out of `assets.csh`",
         );
-        let mut r = Resolver::new(&prog);
-        r.collect_schedules();
+        // Groups of accounts and whole kinds can be read.
         assert!(
-            r.diags
+            resolve_src(
+                "entry pay { income.salary -> assets.bank.cash : 1 }
+                 check assets.bank >= 0 and assets >= 0 and liabilities >= 0"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_account_cant_also_be_a_group() {
+        has_error(
+            "entry a { income.x -> assets.cash : 1 }
+             entry b { income.x -> assets.cash.checking : 1 }",
+            "`assets.cash` holds money, so it can't also be a group of accounts",
+        );
+    }
+
+    #[test]
+    fn moves_are_between_accounts() {
+        has_error(
+            "entry a { cash -> assets.cash : 1 }",
+            "`cash` isn't an account",
+        );
+        has_error(
+            "entry a { income -> assets.cash : 1 }",
+            "holds every account of its kind",
+        );
+    }
+
+    #[test]
+    fn names_resolve_in_their_module_then_at_the_top() {
+        let model = resolve_src(
+            "let rate = 1
+             mod loans {
+               let rate = 2
+               let doubled = rate * 2
+               let top = top_level
+             }
+             let top_level = 3
+             let from_outside = loans.rate",
+        )
+        .unwrap();
+        let ParamBody::Const(e) = &model.params["loans.doubled"] else {
+            panic!()
+        };
+        assert!(
+            matches!(&*e.0, Expr::Bin(a, ..) if matches!(&*a.0, Expr::Global(n) if n == "loans.rate"))
+        );
+        let ParamBody::Const(e) = &model.params["from_outside"] else {
+            panic!()
+        };
+        assert!(matches!(&*e.0, Expr::Global(n) if n == "loans.rate"));
+    }
+
+    #[test]
+    fn unknown_names_suggest_close_ones() {
+        let diags = resolve_src("let salary = 1\nlet x = salry").unwrap_err();
+        assert_eq!(diags[0].message, "unknown name `salry`");
+        assert!(
+            diags[0]
+                .extra
                 .iter()
-                .any(|d| d.message.contains("duplicate schedule"))
+                .any(|(_, note)| note == "did you mean `salary`?")
         );
     }
 
     #[test]
-    fn collect_schedules_returns_named_schedule() {
-        let prog = parse("schedule payday = every month");
-        let mut r = Resolver::new(&prog);
-        r.collect_schedules();
-        assert!(r.diags.is_empty());
-        assert!(r.schedules.contains_key("payday"));
-    }
-
-    // --- collect_declarations ---
-
-    #[test]
-    fn collect_declarations_rejects_unknown_named_schedule() {
-        let prog = parse(
-            "account Assets:Cash\naccount Liabilities:Loan\nentry payday \"Test\" {\n  Assets:Cash = 100\n  Liabilities:Loan\n}",
-        );
-        let mut r = Resolver::new(&prog);
-        r.collect_schedules();
-        r.collect_declarations();
-        assert!(r.diags.iter().any(|d| d.message.contains("not defined")));
+    fn reserved_names_and_duplicates() {
+        has_error("let may = 1", "`may` is a set of days");
+        has_error("let assets = 1", "`assets` starts the names of accounts");
+        has_error("let x = 1\nlet x = 2", "`x` is already declared");
+        has_error("fn min(a, b) { a }", "`min` is a built-in function");
     }
 
     #[test]
-    fn collect_declarations_aliased_entry_uses_alias_as_key() {
-        let prog = parse(
-            "account Assets:Cash\naccount Liabilities:Loan\nentry monthly \"Test\" {\n  Assets:Cash = 100\n  Liabilities:Loan\n} as myentry",
+    fn sets_of_days_and_values_dont_mix() {
+        has_error(
+            "let payday = 15th | last\nlet x = payday + 1",
+            "is a set of days",
         );
-        let mut r = Resolver::new(&prog);
-        r.collect_schedules();
-        r.collect_declarations();
-        assert!(r.diags.is_empty(), "{:?}", r.diags);
-        assert_eq!(r.entries[0].key, "myentry");
-    }
-
-    #[test]
-    fn collect_declarations_aliasless_entry_uses_synthetic_key() {
-        let prog = parse(
-            "account Assets:Cash\naccount Liabilities:Loan\nentry monthly \"Test\" {\n  Assets:Cash = 100\n  Liabilities:Loan\n}",
+        has_error(
+            "let n = 2\nentry e @ n { income.a -> assets.b : 1 }",
+            "is a number, not a set of days",
         );
-        let mut r = Resolver::new(&prog);
-        r.collect_schedules();
-        r.collect_declarations();
-        assert!(r.diags.is_empty(), "{:?}", r.diags);
-        assert_eq!(r.entries[0].key, "$0");
-    }
-
-    #[test]
-    fn collect_declarations_duplicate_alias_is_rejected() {
-        let prog = parse(
-            "account Assets:Cash\naccount Liabilities:Loan\n\
-             entry monthly \"A\" { Assets:Cash = 100\n  Liabilities:Loan } as foo\n\
-             entry monthly \"B\" { Assets:Cash = 200\n  Liabilities:Loan } as foo",
-        );
-        let mut r = Resolver::new(&prog);
-        r.collect_schedules();
-        r.collect_declarations();
         assert!(
-            r.diags
-                .iter()
-                .any(|d| d.message.contains("duplicate entry alias"))
+            resolve_src("let payday = 15th | last\nentry e @ payday { income.a -> assets.b : 1 }")
+                .is_ok()
         );
     }
 
-    // --- validate_references ---
+    #[test]
+    fn day_sets_can_be_named_but_not_circularly() {
+        has_error(
+            "let a = b | fri\nlet b = a & mon",
+            "defined in terms of itself",
+        );
+    }
 
     #[test]
-    fn validate_references_rejects_unknown_account_in_posting() {
-        let prog = parse(
-            "account Assets:Cash\nentry monthly \"Test\" {\n  Assets:Cash = 100\n  Liabilities:Unknown\n}",
-        );
-        let mut r = Resolver::new(&prog);
-        r.collect_schedules();
-        r.collect_declarations();
-        r.validate_references();
+    fn tags_are_read_through_totals() {
+        let model = resolve_src(
+            "entry pay {
+               income.salary -> assets.cash : 1
+               assets.cash -> assets.retirement : 1 - contribution[year] #contribution
+             }
+             check pay.contribution[year] <= 1",
+        )
+        .unwrap();
         assert!(
-            r.diags
-                .iter()
-                .any(|d| d.message.contains("unknown account"))
+            matches!(&*model.checks[0].1.0, Expr::Bin(a, ..) if matches!(&*a.0, Expr::TagTotal { tag, .. } if tag == "contribution"))
+        );
+        has_error(
+            "check pay.contribution >= 0\nentry pay { income.a -> assets.b : 1 #contribution }",
+            "is a tag",
+        );
+        has_error(
+            "entry pay { income.a -> assets.b : 1 }\ncheck pay.nothing[year] >= 0",
+            "has no tag `nothing`",
+        );
+        has_error("let x = 1\ncheck x[year] >= 0", "`x` has no total");
+        has_error(
+            "entry pay { income.a -> assets.b : 1 #t }\ncheck pay.t[week] >= 0",
+            "not a week",
         );
     }
 
     #[test]
-    fn validate_references_rejects_unknown_param_in_expr() {
-        let prog = parse(
-            "account Assets:Cash\naccount Liabilities:Loan\nentry monthly \"Test\" {\n  Assets:Cash = ghost_param\n  Liabilities:Loan\n}",
-        );
-        let mut r = Resolver::new(&prog);
-        r.collect_schedules();
-        r.collect_declarations();
-        r.validate_references();
-        assert!(
-            r.diags
-                .iter()
-                .any(|d| d.message.contains("unknown reference"))
-        );
-    }
-
-    // --- resolve (end-to-end, existing tests) ---
-
-    #[test]
-    fn rejects_nth_schedule_without_from() {
-        let src = r#"
-            account Assets:Cash
-            account Liabilities:Loan
-            entry every 2 months "Test" {
-                Assets:Cash = 100
-                Liabilities:Loan
-            }
-        "#;
-        let errs = resolve_src(src).unwrap_err();
-        assert!(
-            errs.iter().any(|d| d.message.contains("from")),
-            "expected a diagnostic about missing `from`, got: {errs:?}"
+    fn functions_cant_read_accounts() {
+        has_error(
+            "entry e { income.a -> assets.b : 1 }\nfn f(x) { x + assets.b }",
+            "can't read balances",
         );
     }
 
     #[test]
-    fn accepts_nth_schedule_with_from() {
-        let src = r#"
-            account Assets:Cash
-            account Liabilities:Loan
-            entry every 2 months from 2024-01-01 "Test" {
-                Assets:Cash = 100
-                Liabilities:Loan
-            }
-        "#;
-        assert!(resolve_src(src).is_ok());
+    fn arms_after_the_catch_all_never_apply() {
+        has_error("let x { _ => 1\n 2026 => 2 }", "comes after `_`");
+        has_error("let x { q2 => 1\n may => 2 }", "never applies");
+        has_error(
+            "let x { jul => 1 compounding 3% every year }",
+            "needs an arm with a start",
+        );
     }
 }

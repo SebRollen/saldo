@@ -1,6 +1,6 @@
-//! Reading a model's files: the one saldo runs and every file it imports.
+//! Reading a model's files: the one saldo runs and the files of its modules.
 
-use crate::ast::{Decl, Program, Span, Spanned};
+use crate::ast::{Decl, ModBody, Program, Span, Spanned};
 use crate::errors::{self, Diagnostic, Error, Severity};
 use std::collections::HashSet;
 use std::ops::Range;
@@ -16,8 +16,8 @@ pub struct Sources {
 
 #[derive(Debug)]
 pub(crate) struct SourceFile {
-    /// How diagnostics name the file: the path saldo was given, or an import's
-    /// path joined to the importing file's directory.
+    /// How diagnostics name the file: the path saldo was given, or a module's
+    /// file joined to the directory it's in.
     pub name: String,
     pub text: String,
     /// The span offset of the file's first byte.
@@ -88,8 +88,8 @@ impl Sources {
     }
 }
 
-/// Reads the model in the file at `path` and every file it imports into one
-/// program, adding their text to `sources`.
+/// Reads the model in the file at `path` and the files of its modules into
+/// one program, adding their text to `sources`.
 pub(crate) fn load_file(sources: &mut Sources, path: &Path) -> Result<Program, Vec<Error>> {
     let read_error = |error| {
         vec![Error::Read {
@@ -102,87 +102,118 @@ pub(crate) fn load_file(sources: &mut Sources, path: &Path) -> Result<Program, V
     let mut loader = Loader {
         sources,
         seen: HashSet::from([canonical]),
-        decls: Vec::new(),
         diags: Vec::new(),
     };
-    loader.add(path.display().to_string(), text, path.parent());
-    loader.finish()
+    let decls = loader.read(path.display().to_string(), text, path.parent());
+    loader.finish(decls)
 }
 
-/// Reads a model given as text, which can't import files because it isn't in a
-/// directory.
+/// Reads a model given as text, which can't have modules in other files
+/// because it isn't in a directory.
 pub(crate) fn load_text(sources: &mut Sources, text: &str) -> Result<Program, Vec<Error>> {
     let mut loader = Loader {
         sources,
         seen: HashSet::new(),
-        decls: Vec::new(),
         diags: Vec::new(),
     };
-    loader.add(String::new(), text.to_string(), None);
-    loader.finish()
+    let decls = loader.read(String::new(), text.to_string(), None);
+    loader.finish(decls)
 }
 
 struct Loader<'a> {
     sources: &'a mut Sources,
-    /// The canonical paths of the files read so far, so each is read once no
-    /// matter how many files import it.
+    /// The canonical paths of the files read so far, so a file isn't read as
+    /// two modules.
     seen: HashSet<PathBuf>,
-    decls: Vec<Spanned<Decl>>,
     diags: Vec<Diagnostic>,
 }
 
 impl Loader<'_> {
-    /// Adds the declarations in `text`, with each import replaced by the
-    /// imported file's declarations. Imports are relative to `dir`.
-    fn add(&mut self, name: String, text: String, dir: Option<&Path>) {
+    /// The declarations in `text`, with each `mod x` replaced by the
+    /// declarations in its file. `dir` is where the files of its modules are.
+    fn read(&mut self, name: String, text: String, dir: Option<&Path>) -> Vec<Spanned<Decl>> {
         let start = self.sources.add(name, text);
         let text = &self.sources.files.last().expect("just added").text;
-        let program = match crate::lexer::lex(text, start).and_then(crate::parser::parse) {
-            Ok(program) => program,
+        match crate::lexer::lex(text, start).and_then(crate::parser::parse) {
+            Ok(program) => self.load_modules(program.decls, dir),
             Err(diags) => {
                 self.diags.extend(diags);
-                return;
-            }
-        };
-        for (decl, span) in program.decls {
-            match decl {
-                Decl::Import { path } => self.import(dir, path),
-                decl => self.decls.push((decl, span)),
+                Vec::new()
             }
         }
     }
 
-    fn import(&mut self, dir: Option<&Path>, (path, span): Spanned<String>) {
+    /// Reads the files of the modules in `decls`, as Rust does: `mod x` in a
+    /// file reads `x.saldo` from `dir`, and the modules in `x`, written in it
+    /// or in their own files, are in `dir/x`.
+    fn load_modules(
+        &mut self,
+        decls: Vec<Spanned<Decl>>,
+        dir: Option<&Path>,
+    ) -> Vec<Spanned<Decl>> {
+        decls
+            .into_iter()
+            .map(|(decl, span)| {
+                let Decl::Mod { name, body } = decl else {
+                    return (decl, span);
+                };
+                let sub = dir.map(|dir| dir.join(&name.0));
+                let decls = match body {
+                    ModBody::Inline(decls) => self.load_modules(decls, sub.as_deref()),
+                    ModBody::File => self.load_file(dir, &name, sub.as_deref()),
+                };
+                let body = ModBody::Inline(decls);
+                (Decl::Mod { name, body }, span)
+            })
+            .collect()
+    }
+
+    fn load_file(
+        &mut self,
+        dir: Option<&Path>,
+        (name, span): &Spanned<String>,
+        sub: Option<&Path>,
+    ) -> Vec<Spanned<Decl>> {
         let Some(dir) = dir else {
             self.diags.push(Diagnostic::new(
-                span,
-                "`import` only works in a model read from a file",
+                *span,
+                format!("`mod {name}` reads `{name}.saldo`, which only works in a model read from a file"),
             ));
-            return;
+            return Vec::new();
         };
-        let path = dir.join(path);
+        let path = dir.join(format!("{name}.saldo"));
         let read_error = |error: std::io::Error| {
             Diagnostic::new(
-                span,
+                *span,
                 format!("could not read `{}`: {error}", path.display()),
             )
         };
         let canonical = match std::fs::canonicalize(&path) {
             Ok(canonical) => canonical,
-            Err(e) => return self.diags.push(read_error(e)),
+            Err(e) => {
+                self.diags.push(read_error(e));
+                return Vec::new();
+            }
         };
         if !self.seen.insert(canonical) {
-            return;
+            self.diags.push(Diagnostic::new(
+                *span,
+                format!("`{}` is already read as another module", path.display()),
+            ));
+            return Vec::new();
         }
         match std::fs::read_to_string(&path) {
-            Ok(text) => self.add(path.display().to_string(), text, path.parent()),
-            Err(e) => self.diags.push(read_error(e)),
+            Ok(text) => self.read(path.display().to_string(), text, sub),
+            Err(e) => {
+                self.diags.push(read_error(e));
+                Vec::new()
+            }
         }
     }
 
-    fn finish(self) -> Result<Program, Vec<Error>> {
+    fn finish(self, decls: Vec<Spanned<Decl>>) -> Result<Program, Vec<Error>> {
         if self.diags.is_empty() {
-            Ok(Program { decls: self.decls })
+            Ok(Program { decls })
         } else {
             Err(self.diags.into_iter().map(Error::Diagnostic).collect())
         }
