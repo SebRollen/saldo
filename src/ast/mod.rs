@@ -485,6 +485,31 @@ pub enum EntryStmt {
         value: SpannedExpr,
     },
     Move(Move),
+    /// `if c { … } else if d { … } else { … }`: the statements of the first
+    /// branch whose condition holds, or of `otherwise`.
+    If {
+        branches: Vec<(SpannedExpr, Vec<EntryStmt>)>,
+        otherwise: Vec<EntryStmt>,
+    },
+}
+
+impl EntryStmt {
+    /// Calls `f` on every statement in `stmts`, including those in branches.
+    pub fn visit<'a>(stmts: &'a [EntryStmt], f: &mut impl FnMut(&'a EntryStmt)) {
+        for stmt in stmts {
+            f(stmt);
+            if let EntryStmt::If {
+                branches,
+                otherwise,
+            } = stmt
+            {
+                for (_, body) in branches {
+                    EntryStmt::visit(body, f);
+                }
+                EntryStmt::visit(otherwise, f);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

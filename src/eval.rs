@@ -105,12 +105,15 @@ impl Model {
             }
         }
         for entry in &self.entries {
-            for stmt in &entry.body {
-                match stmt {
-                    EntryStmt::Let { value, .. } => collect(value),
-                    EntryStmt::Move(m) => collect(&m.amount),
+            EntryStmt::visit(&entry.body, &mut |stmt| match stmt {
+                EntryStmt::Let { value, .. } => collect(value),
+                EntryStmt::Move(m) => collect(&m.amount),
+                EntryStmt::If { branches, .. } => {
+                    for (cond, _) in branches {
+                        collect(cond);
+                    }
                 }
-            }
+            });
         }
         for (_, e) in &self.checks {
             collect(e);
@@ -125,10 +128,14 @@ impl Model {
             }
             let counted = self.entries.iter().filter(|e| match &agg.counts {
                 Counted::Tag(entry, _) => e.name == *entry,
-                Counted::Account(path) => e.body.iter().any(|stmt| {
-                    matches!(stmt, EntryStmt::Move(m)
-                        if m.from.0.starts_with(path) || m.to.0.starts_with(path))
-                }),
+                Counted::Account(path) => {
+                    let mut moves = false;
+                    EntryStmt::visit(&e.body, &mut |stmt| {
+                        moves |= matches!(stmt, EntryStmt::Move(m)
+                            if m.from.0.starts_with(path) || m.to.0.starts_with(path));
+                    });
+                    moves
+                }
             });
             let period_start = agg.kind.period_start(first_day);
             let missed = counted
@@ -523,43 +530,12 @@ impl State<'_> {
         let program = self.program;
         let entry = &program.entries[index];
         self.firing = Some(index);
-        let in_entry =
-            |d: Diagnostic| d.with_note(entry.span, format!("in entry `{}`", entry.label));
         let mut frame = vec![Decimal::ZERO; entry.slots];
         // What each account receives, in the order they're first named.
         let mut net: IndexMap<usize, Decimal> = IndexMap::new();
-
         // Every move sees the balances from before the entry fired.
-        for stmt in &entry.body {
-            let m = match stmt {
-                crate::compile::EntryStmt::Let { slot, value, .. } => {
-                    frame[*slot] = self.eval_num(value, &frame).map_err(in_entry)?;
-                    continue;
-                }
-                crate::compile::EntryStmt::Move(m) => m,
-            };
-            self.check_open(m.from, m.from_span)?;
-            self.check_open(m.to, m.to_span)?;
-            let amount = to_amount(self.eval_num(&m.amount, &frame).map_err(in_entry)?);
-            let overflow = || Diagnostic::new(m.span, "this move's amounts overflowed");
-            if let Some(tag) = m.tag {
-                self.tags_today[tag] = self.tags_today[tag]
-                    .checked_add(amount)
-                    .ok_or_else(overflow)?;
-            }
-            for &fill in &m.fills {
-                let start = program.fills[fill].unit.period_start(self.date);
-                let (period, moved) = &mut self.fills[fill];
-                if *period != start {
-                    (*period, *moved) = (start, Decimal::ZERO);
-                }
-                *moved = moved.checked_add(amount).ok_or_else(overflow)?;
-            }
-            let to = net.entry(m.to).or_default();
-            *to = to.checked_add(amount).ok_or_else(overflow)?;
-            let from = net.entry(m.from).or_default();
-            *from = from.checked_sub(amount).ok_or_else(overflow)?;
-        }
+        self.run(&entry.body, &mut frame, &mut net)
+            .map_err(|d| d.with_note(entry.span, format!("in entry `{}`", entry.label)))?;
         self.firing = None;
 
         let mut postings: Vec<(Arc<Path>, Decimal)> = Vec::with_capacity(net.len());
@@ -590,6 +566,71 @@ impl State<'_> {
             label: entry.label.clone(),
             postings,
         }))
+    }
+
+    /// Runs `stmts`, statements of the firing entry: works out its `let`s
+    /// into `frame`, and adds what its moves move to `net`.
+    fn run(
+        &mut self,
+        stmts: &[crate::compile::EntryStmt],
+        frame: &mut Vec<Decimal>,
+        net: &mut IndexMap<usize, Decimal>,
+    ) -> Result<(), Diagnostic> {
+        let program = self.program;
+        for stmt in stmts {
+            let m = match stmt {
+                crate::compile::EntryStmt::Let { slot, value } => {
+                    frame[*slot] = self.eval_num(value, frame)?;
+                    continue;
+                }
+                crate::compile::EntryStmt::If {
+                    branches,
+                    otherwise,
+                } => {
+                    let mut taken = otherwise;
+                    for (cond, body) in branches {
+                        match self.eval(cond, frame)? {
+                            Value::Bool(true) => {
+                                taken = body;
+                                break;
+                            }
+                            Value::Bool(false) => {}
+                            Value::Num(_) => {
+                                return Err(Diagnostic::new(
+                                    cond.span,
+                                    "a condition must be a bool",
+                                ));
+                            }
+                        }
+                    }
+                    self.run(taken, frame, net)?;
+                    continue;
+                }
+                crate::compile::EntryStmt::Move(m) => m,
+            };
+            self.check_open(m.from, m.from_span)?;
+            self.check_open(m.to, m.to_span)?;
+            let amount = to_amount(self.eval_num(&m.amount, frame)?);
+            let overflow = || Diagnostic::new(m.span, "this move's amounts overflowed");
+            if let Some(tag) = m.tag {
+                self.tags_today[tag] = self.tags_today[tag]
+                    .checked_add(amount)
+                    .ok_or_else(overflow)?;
+            }
+            for &fill in &m.fills {
+                let start = program.fills[fill].unit.period_start(self.date);
+                let (period, moved) = &mut self.fills[fill];
+                if *period != start {
+                    (*period, *moved) = (start, Decimal::ZERO);
+                }
+                *moved = moved.checked_add(amount).ok_or_else(overflow)?;
+            }
+            let to = net.entry(m.to).or_default();
+            *to = to.checked_add(amount).ok_or_else(overflow)?;
+            let from = net.entry(m.from).or_default();
+            *from = from.checked_sub(amount).ok_or_else(overflow)?;
+        }
+        Ok(())
     }
 
     fn run_checks(&self) -> Result<(), Diagnostic> {
@@ -923,12 +964,16 @@ impl State<'_> {
         date: NaiveDate,
     ) -> Result<Vec<Decimal>, Diagnostic> {
         let mut frame = locals.to_vec();
-        for stmt in &entry.body {
+        let mut lets = Vec::new();
+        crate::compile::EntryStmt::visit(&entry.body, &mut |stmt| {
             if let crate::compile::EntryStmt::Let { slot, value } = stmt
                 && slots.contains(slot)
             {
-                frame[*slot] = self.eval_num_at(value, &frame, date)?;
+                lets.push((*slot, value));
             }
+        });
+        for (slot, value) in lets {
+            frame[slot] = self.eval_num_at(value, &frame, date)?;
         }
         Ok(frame)
     }
@@ -1138,14 +1183,15 @@ fn apply_growth(growth: &Growth, base: Decimal, total: Decimal) -> Result<Decima
 
 /// The `let` of `entry` that fills `slot`.
 fn let_value(entry: &crate::compile::Entry, slot: usize) -> &crate::compile::Expr {
-    entry
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            crate::compile::EntryStmt::Let { slot: s, value } if *s == slot => Some(value),
-            _ => None,
-        })
-        .expect("every slot has a `let`")
+    let mut found = None;
+    crate::compile::EntryStmt::visit(&entry.body, &mut |stmt| {
+        if let crate::compile::EntryStmt::Let { slot: s, value } = stmt
+            && *s == slot
+        {
+            found = Some(value);
+        }
+    });
+    found.expect("every slot has a `let`")
 }
 
 /// Adds the values `e` reads directly, or through `entry`'s `let`s, to `out`.

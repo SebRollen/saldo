@@ -169,8 +169,9 @@ an amount from one account to another. Every move balances, so every
 transaction does, and the transaction shows what each account gets in the end.
 The label is optional; without one, the transaction is named after the entry.
 
-On a day several entries fire, an entry fires after the entries that move what
-it reads. When two entries each read what the other moves, like the interest
+`if cond { … } else { … }` picks which moves an entry makes each time it
+fires. On a day several entries fire, an entry fires after the entries that
+move what it reads. When two entries each read what the other moves, like the interest
 accrual and the loan payment above, `after` says which goes first.
 
 `#contribution` tags a move, and `contribution[year]` is what the tagged moves

@@ -88,8 +88,37 @@ pub struct Entry {
 }
 
 pub enum EntryStmt {
-    Let { slot: usize, value: Expr },
+    Let {
+        slot: usize,
+        value: Expr,
+    },
     Move(Move),
+    /// The statements of the first branch whose condition holds, or of
+    /// `otherwise`.
+    If {
+        branches: Vec<(Expr, Vec<EntryStmt>)>,
+        otherwise: Vec<EntryStmt>,
+    },
+}
+
+impl EntryStmt {
+    /// Calls `f` on every statement in `stmts`, including those in branches,
+    /// in the order they're written.
+    pub fn visit<'a>(stmts: &'a [EntryStmt], f: &mut impl FnMut(&'a EntryStmt)) {
+        for stmt in stmts {
+            f(stmt);
+            if let EntryStmt::If {
+                branches,
+                otherwise,
+            } = stmt
+            {
+                for (_, body) in branches {
+                    EntryStmt::visit(body, f);
+                }
+                EntryStmt::visit(otherwise, f);
+            }
+        }
+    }
 }
 
 pub struct Move {
@@ -234,12 +263,6 @@ pub fn compile(model: &Model) -> Program {
             .collect(),
         tags: tag_ids,
     };
-    let account = |path: &Path| {
-        names
-            .accounts
-            .binary_search(&path)
-            .expect("the resolver collects every account")
-    };
 
     Program {
         accounts: model.accounts.keys().cloned().map(Arc::new).collect(),
@@ -293,36 +316,13 @@ pub fn compile(model: &Model) -> Program {
             .entries
             .iter()
             .map(|entry| {
-                let mut locals: Vec<(String, usize)> = Vec::new();
-                let mut body = Vec::new();
-                for stmt in &entry.body {
-                    match stmt {
-                        ast::EntryStmt::Let { name, value } => {
-                            let value = names.lower(value, &locals);
-                            let slot = locals.len();
-                            locals.push((name.0.clone(), slot));
-                            body.push(EntryStmt::Let { slot, value });
-                        }
-                        ast::EntryStmt::Move(m) => body.push(EntryStmt::Move(Move {
-                            from: account(&m.from.0),
-                            to: account(&m.to.0),
-                            from_span: m.from.1,
-                            to_span: m.to.1,
-                            amount: names.lower(&m.amount, &locals),
-                            tag: m
-                                .tag
-                                .as_ref()
-                                .map(|(tag, _)| names.tags[&(entry.name.as_str(), tag.as_str())]),
-                            fills: Vec::new(),
-                            span: m.span,
-                        })),
-                    }
-                }
+                let mut slots = 0;
+                let body = names.lower_entry(entry, &entry.body, &mut Vec::new(), &mut slots);
                 Entry {
                     label: entry.label.as_str().into(),
                     schedule: entry.schedule.clone(),
                     body,
-                    slots: locals.len(),
+                    slots,
                     span: entry.span,
                 }
             })
@@ -338,6 +338,65 @@ pub fn compile(model: &Model) -> Program {
 }
 
 impl Names<'_> {
+    fn account(&self, path: &Path) -> usize {
+        self.accounts
+            .binary_search(&path)
+            .expect("the resolver collects every account")
+    }
+
+    /// Lowers `stmts`, statements of `entry`, in which `locals` are the
+    /// `let`s in scope. Each `let` gets the next of `slots`.
+    fn lower_entry(
+        &self,
+        entry: &crate::resolver::EntryDef,
+        stmts: &[ast::EntryStmt],
+        locals: &mut Vec<(String, usize)>,
+        slots: &mut usize,
+    ) -> Vec<EntryStmt> {
+        let mut body = Vec::new();
+        for stmt in stmts {
+            body.push(match stmt {
+                ast::EntryStmt::Let { name, value } => {
+                    let value = self.lower(value, locals);
+                    let slot = *slots;
+                    *slots += 1;
+                    locals.push((name.0.clone(), slot));
+                    EntryStmt::Let { slot, value }
+                }
+                ast::EntryStmt::Move(m) => EntryStmt::Move(Move {
+                    from: self.account(&m.from.0),
+                    to: self.account(&m.to.0),
+                    from_span: m.from.1,
+                    to_span: m.to.1,
+                    amount: self.lower(&m.amount, locals),
+                    tag: m
+                        .tag
+                        .as_ref()
+                        .map(|(tag, _)| self.tags[&(entry.name.as_str(), tag.as_str())]),
+                    fills: Vec::new(),
+                    span: m.span,
+                }),
+                ast::EntryStmt::If {
+                    branches,
+                    otherwise,
+                } => EntryStmt::If {
+                    branches: branches
+                        .iter()
+                        .map(|(cond, body)| {
+                            let cond = self.lower(cond, locals);
+                            (
+                                cond,
+                                self.lower_entry(entry, body, &mut locals.clone(), slots),
+                            )
+                        })
+                        .collect(),
+                    otherwise: self.lower_entry(entry, otherwise, &mut locals.clone(), slots),
+                },
+            });
+        }
+        body
+    }
+
     fn lower_fn(&self, name: &str, def: &crate::resolver::FnDef) -> Function {
         let mut locals: Vec<(String, usize)> = def
             .params

@@ -398,10 +398,7 @@ impl<'src> Parser<'src> {
             return None;
         }
         self.advance();
-        let mut body = Vec::new();
-        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-            body.push(self.parse_entry_stmt()?);
-        }
+        let body = self.parse_entry_block()?;
         self.expect(&Token::RBrace)?;
         Some(Decl::Entry {
             name,
@@ -412,7 +409,46 @@ impl<'src> Parser<'src> {
         })
     }
 
+    /// Statements up to the `}` that ends a block, which is left to eat.
+    fn parse_entry_block(&mut self) -> Option<Vec<EntryStmt>> {
+        let mut body = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            body.push(self.parse_entry_stmt()?);
+        }
+        Some(body)
+    }
+
+    /// `if c { … } else if d { … } else { … }`, after the `if`.
+    fn parse_if_stmt(&mut self) -> Option<EntryStmt> {
+        let mut branches = Vec::new();
+        let mut otherwise = Vec::new();
+        loop {
+            let cond = self.parse_expr()?;
+            self.expect(&Token::LBrace)?;
+            let body = self.parse_entry_block()?;
+            self.expect(&Token::RBrace)?;
+            branches.push((cond, body));
+            if self.eat_keyword("else").is_none() {
+                break;
+            }
+            if self.eat_keyword("if").is_some() {
+                continue;
+            }
+            self.expect(&Token::LBrace)?;
+            otherwise = self.parse_entry_block()?;
+            self.expect(&Token::RBrace)?;
+            break;
+        }
+        Some(EntryStmt::If {
+            branches,
+            otherwise,
+        })
+    }
+
     fn parse_entry_stmt(&mut self) -> Option<EntryStmt> {
+        if self.eat_keyword("if").is_some() {
+            return self.parse_if_stmt();
+        }
         if self.eat(&Token::Let).is_some() {
             let name = self.expect_ident("a name after `let`")?;
             self.expect(&Token::Eq)?;

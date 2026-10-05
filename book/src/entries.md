@@ -127,6 +127,27 @@ entry repay "Loan payment" @ last {
 }
 ```
 
+## Choosing moves with `if`
+
+`if` picks which moves an entry makes each time it fires, from the balances
+and values that day:
+
+```
+entry sweep "Savings sweep" @ last {
+  if assets.cash > 20_000 {
+    assets.cash -> assets.savings : assets.cash - 20_000
+  } else if assets.cash < 5_000 {
+    assets.savings -> assets.cash : 1_000
+  }
+}
+```
+
+The first branch whose condition holds runs, or the `else` branch, if there
+is one. A branch can hold any statements, including `let`s, which are only in
+scope in it. A rate moved in a branch that doesn't run moves nothing that day:
+its share isn't carried to the next firing. A limit catches up on later
+firings.
+
 ## Tags and totals
 
 `#name` after a move tags it. `[year]`, `[quarter]` or `[month]` after a tag

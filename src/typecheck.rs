@@ -55,15 +55,18 @@ pub fn check(model: &Model) -> Vec<Diagnostic> {
     }
     for entry in &model.entries {
         checker.locals.clear();
-        for stmt in &entry.body {
-            match stmt {
-                EntryStmt::Let { name, value } => {
-                    checker.expect(value, Ty::Num, "a `let`");
-                    checker.locals.insert(name.0.clone(), Ty::Num);
-                }
-                EntryStmt::Move(m) => checker.expect(&m.amount, Ty::Num, "an amount"),
+        EntryStmt::visit(&entry.body, &mut |stmt| match stmt {
+            EntryStmt::Let { name, value } => {
+                checker.expect(value, Ty::Num, "a `let`");
+                checker.locals.insert(name.0.clone(), Ty::Num);
             }
-        }
+            EntryStmt::Move(m) => checker.expect(&m.amount, Ty::Num, "an amount"),
+            EntryStmt::If { branches, .. } => {
+                for (cond, _) in branches {
+                    checker.expect(cond, Ty::Bool, "an `if` condition");
+                }
+            }
+        });
     }
     checker.locals.clear();
     for (_, e) in &model.checks {

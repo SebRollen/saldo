@@ -119,34 +119,7 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
     }
     for (index, entry) in program.entries.iter_mut().enumerate() {
         let mut locals: Vec<Option<Kind>> = vec![None; entry.slots];
-        for stmt in &mut entry.body {
-            match stmt {
-                // A `let` can mix rates with amounts, as a move can, but what
-                // it holds is only moved, and so spread, where a move uses it.
-                EntryStmt::Let { slot, value, .. } => {
-                    checker.posting = Some((index, None));
-                    let cx = Cx {
-                        posting: true,
-                        posted: false,
-                        locals: &locals,
-                    };
-                    let kind = checker.kind(value, cx);
-                    locals[*slot] = kind;
-                }
-                EntryStmt::Move(m) => {
-                    checker.posting = Some((index, m.tag));
-                    let cx = Cx {
-                        posting: true,
-                        posted: true,
-                        locals: &locals,
-                    };
-                    if let Some(kind) = checker.kind(&mut m.amount, cx) {
-                        checker.settle(&mut m.amount, kind);
-                    }
-                    m.fills = std::mem::take(&mut checker.posting_fills);
-                }
-            }
-        }
+        checker.entry(index, &mut entry.body, &mut locals);
     }
     checker.posting = None;
     for (_, e) in &mut program.checks {
@@ -178,6 +151,54 @@ struct Checker<'p> {
 }
 
 impl Checker<'_> {
+    /// Checks the statements of entry `index`, in which `locals` are the kinds
+    /// of its `let`s.
+    fn entry(&mut self, index: usize, stmts: &mut [EntryStmt], locals: &mut Vec<Option<Kind>>) {
+        for stmt in stmts {
+            match stmt {
+                // A `let` can mix rates with amounts, as a move can, but what
+                // it holds is only moved, and so spread, where a move uses it.
+                EntryStmt::Let { slot, value } => {
+                    self.posting = Some((index, None));
+                    let cx = Cx {
+                        posting: true,
+                        posted: false,
+                        locals,
+                    };
+                    locals[*slot] = self.kind(value, cx);
+                }
+                EntryStmt::Move(m) => {
+                    self.posting = Some((index, m.tag));
+                    let cx = Cx {
+                        posting: true,
+                        posted: true,
+                        locals,
+                    };
+                    if let Some(kind) = self.kind(&mut m.amount, cx) {
+                        self.settle(&mut m.amount, kind);
+                    }
+                    m.fills = std::mem::take(&mut self.posting_fills);
+                }
+                EntryStmt::If {
+                    branches,
+                    otherwise,
+                } => {
+                    for (cond, body) in branches {
+                        self.posting = Some((index, None));
+                        let cx = Cx {
+                            posting: true,
+                            posted: false,
+                            locals,
+                        };
+                        self.kind(cond, cx);
+                        self.entry(index, body, locals);
+                    }
+                    self.entry(index, otherwise, locals);
+                }
+            }
+        }
+    }
+
     /// Reports `diag`, pointing at the calls that led to it.
     fn error(&mut self, mut diag: Diagnostic) {
         for &(f, span) in self.calls.iter().rev() {

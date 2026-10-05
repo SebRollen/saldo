@@ -461,6 +461,54 @@ fn after_names_an_entry() {
     }
 }
 
+#[test]
+fn if_picks_which_moves_an_entry_makes() {
+    let src = "
+        balances @ 2026-01-01 { assets.cash = 15_000 }
+        entry paycheck @ 15th { income.salary -> assets.cash : 4_000 }
+        entry sweep @ last {
+          if assets.cash > 20_000 {
+            let extra = assets.cash - 20_000
+            assets.cash -> assets.savings : extra
+          } else if assets.cash < 5_000 {
+            assets.savings -> assets.cash : 1_000
+          } else {
+            income.interest -> assets.cash : 1
+          }
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-03-31")).unwrap();
+    let labels: Vec<&str> = output.log.transactions.iter().map(|t| &*t.label).collect();
+    assert_eq!(
+        labels,
+        [
+            "paycheck", "sweep", "paycheck", "sweep", "paycheck", "sweep"
+        ]
+    );
+    // 19,000 in January; 23,001 in February, of which 3,001 is swept.
+    assert_eq!(postings_to(&output, "income.interest"), [usd("-1")]);
+    assert_eq!(
+        postings_to(&output, "assets.savings"),
+        [usd("3001"), usd("4000")]
+    );
+}
+
+#[test]
+fn if_conditions_are_bools_and_lets_stay_in_their_branch() {
+    let errors = run(
+        "entry e { if 1 { income.a -> assets.b : 1 } }",
+        &opts("2026-01-01", "2026-01-01"),
+    )
+    .unwrap_err();
+    assert!(has_error(&errors, "an `if` condition must be a bool"));
+    let errors = run(
+        "entry e {\n if true { let x = 1 }\n income.a -> assets.b : x\n}",
+        &opts("2026-01-01", "2026-01-01"),
+    )
+    .unwrap_err();
+    assert!(has_error(&errors, "unknown name `x`"));
+}
+
 // --- functions ---
 
 #[test]

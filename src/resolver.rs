@@ -274,13 +274,12 @@ impl<'a> Resolver<'a> {
                     body,
                 } => {
                     let full = join(module, &name.0);
-                    let tags: HashSet<String> = body
-                        .iter()
-                        .filter_map(|stmt| match stmt {
-                            EntryStmt::Move(Move { tag: Some(tag), .. }) => Some(tag.0.clone()),
-                            _ => None,
-                        })
-                        .collect();
+                    let mut tags: HashSet<String> = HashSet::new();
+                    EntryStmt::visit(body, &mut |stmt| {
+                        if let EntryStmt::Move(Move { tag: Some(tag), .. }) = stmt {
+                            tags.insert(tag.0.clone());
+                        }
+                    });
                     if self.declare(module, name, Symbol::Entry(full.clone(), tags.clone())) {
                         self.entry_decls.push(EntryDecl {
                             module: module.to_vec(),
@@ -746,13 +745,39 @@ impl<'a> Resolver<'a> {
                 Err(diag) => self.diags.push(diag),
             }
         }
-        let mut locals: Vec<String> = Vec::new();
+        let resolved = self.resolve_entry_stmts(body, &module, &full, &tags, &mut Vec::new());
+        let Some(schedule) = self.schedule(when, &module) else {
+            return;
+        };
+        let mut tags: Vec<String> = tags.into_iter().collect();
+        tags.sort();
+        self.entries.push(EntryDef {
+            label: label.unwrap_or_else(|| full.clone()),
+            name: full,
+            schedule,
+            body: resolved,
+            tags,
+            after,
+            span,
+        });
+    }
+
+    /// Resolves the statements of entry `full`, in which `locals` are the
+    /// `let`s in scope; `let`s in a branch are only in scope in it.
+    fn resolve_entry_stmts(
+        &mut self,
+        stmts: &[EntryStmt],
+        module: &[String],
+        full: &str,
+        tags: &HashSet<String>,
+        locals: &mut Vec<String>,
+    ) -> Vec<EntryStmt> {
         let mut resolved = Vec::new();
-        for stmt in body {
+        for stmt in stmts {
             let scope = Scope {
-                module: &module,
-                locals: &locals,
-                entry: Some((full.as_str(), &tags)),
+                module,
+                locals,
+                entry: Some((full, tags)),
                 function: None,
             };
             match stmt {
@@ -782,22 +807,38 @@ impl<'a> Resolver<'a> {
                         ..m.clone()
                     }));
                 }
+                EntryStmt::If {
+                    branches,
+                    otherwise,
+                } => {
+                    let mut resolved_branches = Vec::new();
+                    for (cond, body) in branches {
+                        let scope = Scope {
+                            module,
+                            locals,
+                            entry: Some((full, tags)),
+                            function: None,
+                        };
+                        let cond = self.resolve_expr(cond, &scope);
+                        let body =
+                            self.resolve_entry_stmts(body, module, full, tags, &mut locals.clone());
+                        resolved_branches.push((cond, body));
+                    }
+                    let otherwise = self.resolve_entry_stmts(
+                        otherwise,
+                        module,
+                        full,
+                        tags,
+                        &mut locals.clone(),
+                    );
+                    resolved.push(EntryStmt::If {
+                        branches: resolved_branches,
+                        otherwise,
+                    });
+                }
             }
         }
-        let Some(schedule) = self.schedule(when, &module) else {
-            return;
-        };
-        let mut tags: Vec<String> = tags.into_iter().collect();
-        tags.sort();
-        self.entries.push(EntryDef {
-            label: label.unwrap_or_else(|| full.clone()),
-            name: full,
-            schedule,
-            body: resolved,
-            tags,
-            after,
-            span,
-        });
+        resolved
     }
 
     /// Checks that `path` can be an account that money moves into or out of,
@@ -1121,19 +1162,22 @@ impl<'a> Resolver<'a> {
                     _ => {}
                 });
             };
-            for stmt in &entry.body {
-                match stmt {
-                    EntryStmt::Let { value, .. } => read(value),
-                    EntryStmt::Move(m) => {
-                        read(&m.amount);
-                        w.push((&m.from.0, m.from.1));
-                        w.push((&m.to.0, m.to.1));
-                        if let Some((tag, tag_span)) = &m.tag {
-                            t.push((tag.as_str(), *tag_span));
-                        }
+            EntryStmt::visit(&entry.body, &mut |stmt| match stmt {
+                EntryStmt::Let { value, .. } => read(value),
+                EntryStmt::Move(m) => {
+                    read(&m.amount);
+                    w.push((&m.from.0, m.from.1));
+                    w.push((&m.to.0, m.to.1));
+                    if let Some((tag, tag_span)) = &m.tag {
+                        t.push((tag.as_str(), *tag_span));
                     }
                 }
-            }
+                EntryStmt::If { branches, .. } => {
+                    for (cond, _) in branches {
+                        read(cond);
+                    }
+                }
+            });
             writes.push(w);
             tags.push(t);
             reads.push(r);
