@@ -50,7 +50,7 @@ entry pay @ last {
 | `min(a, b)`, `max(a, b)` | the smaller or larger |
 | `abs(x)` | `x` without its sign |
 | `floor(x)`, `ceil(x)`, `round(x)` | `x` rounded down, up, or to the nearest whole number (half to even) |
-| `fill(x)` | what's left of a target (see [Entries](./entries.md#filling-a-target)) |
+| `fill(x)` | what's left of a limit or a total, over the firings left (see [Entries](./entries.md#filling-a-target)) |
 
 User-defined functions can call them:
 

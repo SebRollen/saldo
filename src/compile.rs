@@ -147,6 +147,9 @@ pub enum ExprKind {
     /// `x / year`. The units pass converts `x` if it's a rate per another
     /// unit, so the value passes through unchanged.
     Per(Box<Expr>, TimeUnit),
+    /// `x[year]`: an amount each period, like a yearly limit. The units pass
+    /// converts `x` if it's a rate, and fills it where a move moves it.
+    Limit(Box<Expr>, TimeUnit),
     /// The firing entry's share of an amount per period. The units pass adds
     /// these where moves use rates.
     Spread(Box<Expr>, TimeUnit),
@@ -417,6 +420,7 @@ impl Names<'_> {
             }
             ast::Expr::Neg(x) => ExprKind::Neg(lower(x)),
             ast::Expr::Per(x, unit) => ExprKind::Per(lower(x), *unit),
+            ast::Expr::Period(x, unit) => ExprKind::Limit(lower(x), *unit),
             ast::Expr::Not(x) => ExprKind::Not(lower(x)),
             ast::Expr::Bin(a, op, b) => ExprKind::Bin(lower(a), *op, lower(b)),
             ast::Expr::If { cond, then, else_ } => {
@@ -430,10 +434,9 @@ impl Names<'_> {
                     None => ExprKind::Call(self.fns[name.as_str()], args),
                 }
             }
-            ast::Expr::Ref(_)
-            | ast::Expr::Period(..)
-            | ast::Expr::Days(_)
-            | ast::Expr::Range { .. } => unreachable!("the resolver replaces these"),
+            ast::Expr::Ref(_) | ast::Expr::Days(_) | ast::Expr::Range { .. } => {
+                unreachable!("the resolver replaces these")
+            }
         };
         Expr { kind, span: *span }
     }

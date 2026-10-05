@@ -30,8 +30,11 @@ enum Kind {
     /// A `[year]`, `[quarter]` or `[month]` total: the amount so far this
     /// period.
     Total(TimeUnit),
-    /// An amount per period, like a salary `per year`.
+    /// An amount per period, like a salary `/year`, which is spread over the
+    /// period.
     Rate(TimeUnit),
+    /// An amount each period, like a yearly limit `[year]`, which isn't.
+    Limit(TimeUnit),
 }
 
 impl fmt::Display for Kind {
@@ -41,6 +44,7 @@ impl fmt::Display for Kind {
             Kind::Amount => f.write_str("an amount"),
             Kind::Total(unit) => write!(f, "a {unit}-to-date total"),
             Kind::Rate(unit) => write!(f, "an amount per {unit}"),
+            Kind::Limit(unit) => write!(f, "an amount each {unit}"),
         }
     }
 }
@@ -106,7 +110,7 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
         checker.params.push(kind);
     }
     for (expr, _) in program.openings.iter_mut().flatten() {
-        if let Some(kind @ Kind::Rate(_)) = checker.kind(expr, GLOBAL) {
+        if let Some(kind @ (Kind::Rate(_) | Kind::Limit(_))) = checker.kind(expr, GLOBAL) {
             checker.error(Diagnostic::new(
                 expr.span,
                 format!("an opening balance must be an amount, but this is {kind}"),
@@ -137,7 +141,7 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
                         locals: &locals,
                     };
                     if let Some(kind) = checker.kind(&mut m.amount, cx) {
-                        spread(&mut m.amount, kind);
+                        checker.settle(&mut m.amount, kind);
                     }
                     m.fills = std::mem::take(&mut checker.posting_fills);
                 }
@@ -277,6 +281,10 @@ impl Checker<'_> {
                 let found = self.kind(x, below)?;
                 self.per(x, found, *unit, span)
             }
+            ExprKind::Limit(x, unit) => {
+                let found = self.kind(x, below)?;
+                self.limit(x, found, *unit, span)
+            }
             ExprKind::Not(x) => {
                 self.kind(x, below);
                 Some(Kind::Number)
@@ -362,9 +370,62 @@ impl Checker<'_> {
                 "`/{unit}` can't apply to {found}, which is an amount so far, \
                  not per period"
             ),
+            Kind::Limit(_) => {
+                format!("`/{unit}` can't apply to {found}, which is an amount for each period")
+            }
         };
         self.error(Diagnostic::new(span, message));
         None
+    }
+
+    /// The kind of `x[unit]`, a limit, where `x` is of kind `found`,
+    /// converting `x` if it's a rate.
+    fn limit(&mut self, x: &mut Expr, found: Kind, unit: TimeUnit, span: Span) -> Option<Kind> {
+        let message = match found {
+            Kind::Number => return Some(Kind::Limit(unit)),
+            Kind::Rate(from) => match from.conversion_to(unit) {
+                Some((mul, div)) if self.calls.is_empty() => {
+                    scale(x, mul, div);
+                    return Some(Kind::Limit(unit));
+                }
+                Some(_) => format!(
+                    "can't convert {found} to each {unit} inside a function; \
+                     convert it before passing it in"
+                ),
+                None => {
+                    let (short, long) = (from.min(unit), from.max(unit));
+                    format!(
+                        "can't convert {found} to each {unit}: \
+                         a {long} isn't a fixed number of {short}s"
+                    )
+                }
+            },
+            Kind::Amount | Kind::Total(_) | Kind::Limit(_) => {
+                format!("`[{unit}]` makes a limit of a number or a rate, not {found}")
+            }
+        };
+        self.error(Diagnostic::new(span, message));
+        None
+    }
+
+    /// Turns what a move moves into an amount: the firing's share of a rate,
+    /// or what's left of a limit.
+    fn settle(&mut self, e: &mut Expr, kind: Kind) -> Kind {
+        match kind {
+            Kind::Limit(unit) => self.make_fill(e, unit, e.span),
+            kind => spread(e, kind),
+        }
+    }
+
+    /// Wraps `e`, an amount each `unit` that a move moves, in a
+    /// [`ExprKind::Fill`], which warnings about it point at `span`.
+    fn make_fill(&mut self, e: &mut Expr, unit: TimeUnit, span: Span) -> Kind {
+        let (entry, _) = self.posting.expect("only moves fill");
+        let slot = self.fills.len();
+        self.fills.push(Fill { entry, unit, span });
+        self.posting_fills.push(slot);
+        wrap(e, |inner| ExprKind::Fill(inner, unit, slot));
+        Kind::Amount
     }
 
     /// Checks `fill(target)` and turns it into an [`ExprKind::Fill`].
@@ -381,7 +442,7 @@ impl Checker<'_> {
             ..cx
         };
         let found = self.kind(&mut args[0], as_target)?;
-        let (true, Some((entry, leg))) = (cx.posted, self.posting) else {
+        let (true, Some((_, leg))) = (cx.posted, self.posting) else {
             self.error(Diagnostic::new(
                 span,
                 "`fill` can only be the amount a move moves, \
@@ -389,14 +450,21 @@ impl Checker<'_> {
             ));
             return None;
         };
-        let (Kind::Rate(unit) | Kind::Total(unit)) = found else {
-            self.error(Diagnostic::new(
+        let (Kind::Limit(unit) | Kind::Total(unit)) = found else {
+            let mut diag = Diagnostic::new(
                 args[0].span,
                 format!(
-                    "`fill` needs an amount per period, like `24_500/year`, \
+                    "`fill` needs an amount each period, like `24_500[year]`, \
                      or a total like `x[year]`, but this is {found}"
                 ),
-            ));
+            );
+            if let Kind::Rate(unit) = found {
+                diag = diag.with_note(
+                    args[0].span,
+                    format!("a rate is spread over its {unit}; for the whole {unit}'s amount, write `[{unit}]` after it"),
+                );
+            }
+            self.error(diag);
             return None;
         };
         if let Some(leg) = leg
@@ -409,12 +477,11 @@ impl Checker<'_> {
             ));
             return None;
         }
-        let target = args.pop().expect("the resolver checks arity");
-        let slot = self.fills.len();
-        self.fills.push(Fill { entry, unit, span });
-        self.posting_fills.push(slot);
-        e.kind = ExprKind::Fill(Box::new(target), unit, slot);
-        Some(Kind::Amount)
+        // `fill(x)` becomes `x`, filled.
+        *e = args.pop().expect("the resolver checks arity");
+        let kind = self.make_fill(e, unit, span);
+        e.span = span;
+        Some(kind)
     }
 
     /// The kind of combining `a` and `b` with `what`, where they must measure
@@ -433,18 +500,29 @@ impl Checker<'_> {
     ) -> Option<Kind> {
         use Kind::*;
         let spread_both = |a: &mut Expr, b: &mut Expr| (spread(a, ka), spread(b, kb));
+        let settle_limit = |checker: &mut Self, e: &mut Expr, k: Kind| match k {
+            Limit(unit) => checker.make_fill(e, unit, e.span),
+            k => k,
+        };
         match (ka, kb) {
             (Number, k) | (k, Number) => Some(k),
             _ if ka == kb => Some(ka),
+            // What `min`, `max` and `if` pick for a move to move is filled if
+            // it's a limit.
+            (Limit(_), _) | (_, Limit(_)) if cx.posted && what.picks() => {
+                let ka = settle_limit(self, a, ka);
+                let kb = settle_limit(self, b, kb);
+                self.combine(a, ka, b, kb, what, span, cx)
+            }
             // In an entry, `min`, `max` and `if` pick the amount to move, so
             // a rate among the choices is the firing's share of it.
             (Rate(_), _) | (_, Rate(_)) if cx.posting && what.picks() => {
                 let (ka, kb) = spread_both(a, b);
                 self.combine(a, ka, b, kb, what, span, cx)
             }
-            // Both measure the current period, so the rate counts in full: a
-            // per-year limit minus a `[year]` total is what's left of the limit.
-            (Rate(u), Total(v)) | (Total(v), Rate(u)) if u == v => Some(Total(u)),
+            // Both measure the current period: a yearly limit minus a `[year]`
+            // total is what's left of the limit.
+            (Limit(u), Total(v)) | (Total(v), Limit(u)) if u == v => Some(Total(u)),
             // In an entry, a rate is the firing's share of it.
             (Rate(_), _) | (_, Rate(_)) if cx.posting => {
                 let (ka, kb) = spread_both(a, b);
@@ -457,11 +535,31 @@ impl Checker<'_> {
                     Rate(_) if self.calls.is_empty() => {
                         format!("{kind}, which only an entry can turn into an amount")
                     }
+                    Limit(_) if cx.posting => format!(
+                        "{kind}, which a move only fills when it's all it moves, \
+                         or what `min`, `max` or `if` pick"
+                    ),
                     _ => kind.to_string(),
                 };
-                let diag = Diagnostic::new(span, format!("{what} mixes {ka} with {kb}"))
+                let mut diag = Diagnostic::new(span, format!("{what} mixes {ka} with {kb}"))
                     .with_note(a.span, describe(ka))
                     .with_note(b.span, describe(kb));
+                if let (Rate(u), Total(v)) | (Total(v), Rate(u)) = (ka, kb)
+                    && u == v
+                {
+                    let rate = if matches!(ka, Rate(_)) {
+                        a.span
+                    } else {
+                        b.span
+                    };
+                    diag = diag.with_note(
+                        rate,
+                        format!(
+                            "a rate is spread over its {u}; for the whole {u}'s amount, \
+                             like a limit, write `[{u}]` after it"
+                        ),
+                    );
+                }
                 self.error(diag);
                 None
             }
@@ -472,6 +570,13 @@ impl Checker<'_> {
         use Kind::*;
         match (ka, kb) {
             (Number, k) | (k, Number) => Some(k),
+            (Limit(_), _) | (_, Limit(_)) => {
+                self.error(Diagnostic::new(
+                    span,
+                    format!("can't multiply {ka} by {kb}"),
+                ));
+                None
+            }
             (Rate(_), Rate(_)) => {
                 self.error(Diagnostic::new(
                     span,
@@ -489,7 +594,7 @@ impl Checker<'_> {
         match (ka, kb) {
             (k, Number) => Some(k),
             // Ratios, like a balance over a balance.
-            (Rate(u), Rate(v)) if u == v => Some(Number),
+            (Rate(u), Rate(v)) | (Limit(u), Limit(v)) if u == v => Some(Number),
             (Amount | Total(_), Amount | Total(_)) => Some(Number),
             (Rate(u), Amount | Total(_)) => Some(Rate(u)),
             (Number, Amount | Total(_)) => Some(Amount),
@@ -505,6 +610,10 @@ impl Checker<'_> {
                     );
                 }
                 self.error(diag);
+                None
+            }
+            _ => {
+                self.error(Diagnostic::new(span, format!("can't divide {ka} by {kb}")));
                 None
             }
         }
@@ -560,6 +669,7 @@ fn reads_total(e: &Expr, tag: usize) -> bool {
         ExprKind::Neg(x)
         | ExprKind::Not(x)
         | ExprKind::Per(x, _)
+        | ExprKind::Limit(x, _)
         | ExprKind::Spread(x, _)
         | ExprKind::Fill(x, ..) => reads(x),
         ExprKind::Bin(a, _, b) => reads(a) || reads(b),

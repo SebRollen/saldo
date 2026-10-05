@@ -13,11 +13,13 @@ let <name> = <expression>
 ```
 let interest_rate = 5%
 let retirement_rate = 0.16
-let max_401k = 24_500/year
+let salary = 120_000/year
+let max_401k = 24_500[year]
 ```
 
 A `%` after a number divides it by 100, so `5%` is `0.05`. `/year` makes the
-value a rate (see [Rates](#rates)).
+value a rate (see [Rates](#rates)), and `[year]` a limit (see
+[Limits](#limits)).
 
 A value depends on nothing but the date: it can use numbers, other values and
 functions, but not account balances or totals, which change as entries fire.
@@ -132,7 +134,7 @@ amounts by it, like `80_000/year * prices`, to have them rise with it.
 ## Rates
 
 `/day`, `/week`, `/month`, `/quarter` or `/year` after a value makes it a
-*rate*: an amount per period, like a salary or a yearly contribution limit.
+*rate*: an amount per period, like a salary, which accrues over the period.
 Write a rate the way you'd say it, and let entries work out how much of it
 each firing moves (see [Entries](./entries.md#rates)):
 
@@ -155,19 +157,43 @@ saldo checks how rates combine before it simulates anything:
 | `salary + 5_000` | a rate per year: plain numbers take on the unit of what they're combined with |
 | `liabilities.loan * interest` | a rate per year |
 | `rent/year` | a rate per year: 36,000 |
-| `max_401k - contribution[year]` | an amount: what's left of this year's limit |
 | `salary - assets.cash` | an error, except in an entry |
 | `salary + rent` | an error, except in an entry |
+| `salary - income.salary[year]` | an error: a rate accrues, so it doesn't compare with what's moved so far |
 
-A rate and a total over the same period, like a yearly limit and a `[year]`
-total, can be added, subtracted and compared: the rate counts in full. Other
-amounts, like account balances, only mix with rates in entries, where a rate
+Amounts, like account balances, only mix with rates in entries, where a rate
 means the firing's share of it.
 
 A value takes on the kind of its expression, so `let gross = salary + bonus`
 is a rate too. A unit converts rates between months, quarters and years, or
 between days and weeks, but not from weeks or days to months or years, since
 those aren't a fixed number of weeks or days.
+
+## Limits
+
+`[day]`, `[week]`, `[month]`, `[quarter]` or `[year]` after a value makes it a
+*limit*: an amount each period, which doesn't accrue. A contribution limit is
+the same whenever in the year you start contributing:
+
+```
+let max_401k = 24_500[year]
+let max_hsa  = 4_300[year]
+```
+
+An entry that moves a limit moves what's left of it this period, divided by
+the firings left in the period (see [Entries](./entries.md#limits)). Where a
+rate pays half a year's salary to a job that starts in July, a limit
+contributes the whole year's 24,500 over its paydays.
+
+A limit and a total over the same period are both amounts in the current
+period, so they combine:
+
+| Expression | Is |
+|------------|----|
+| `max_401k - contribution[year]` | an amount: what's left of this year's limit |
+| `contribution[year] <= max_401k` | a check that the limit hasn't been passed |
+| `max_401k * prices`, `max_401k / 2` | a limit each year |
+| `salary[year]` | a limit each year: a rate's amount for the whole year |
 
 ## Using values
 
@@ -176,7 +202,7 @@ Use a value by its name in any expression:
 ```
 let jim_salary = 130_000/year
 let interest_rate = 6%/year
-let max_401k = 24_500/year
+let max_401k = 24_500[year]
 
 entry paycheck @ last {
   income.salary -> assets.cash : jim_salary - jim_salary * 0.16

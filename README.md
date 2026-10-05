@@ -131,8 +131,10 @@ let salary {
 }
 ```
 
-Values are named numbers. A value can be a constant, or take different values
-on different days, each arm covering a set of days and the first that covers a
+Values are named numbers. `24_500[year]` (or `[month]`, and so on) makes a
+limit: an amount each period, which entries fill over the firings left in it,
+so a job that starts in July still contributes the whole year's limit. A value
+can be a constant, or take different values on different days, each arm covering a set of days and the first that covers a
 day giving its value, like `jul | aug => 0` for a summer break, and grow, like
 `2026.. => 1 compounding 3% every year`. `/year` (or `/day`, `/week`, `/month`,
 `/quarter`) after a value makes it a rate: entries spread it over their
@@ -193,6 +195,7 @@ stops with an error if one fails.
 | `1_000`, `0.05` | Numeric literals (underscores ignored) |
 | `6.2%` | Percentage: divides by 100 |
 | `24_500/year` | Rate: an amount per `day`, `week`, `month`, `quarter` or `year` |
+| `24_500[year]` | Limit: an amount each period, filled over its firings |
 | `true`, `false` | Boolean literals |
 | `assets.cash`, `assets.retirement` | Account or group balance |
 | `salary`, `loans.rate` | Value |
@@ -203,7 +206,7 @@ stops with an error if one fails.
 | `a and b`, `a or b`, `not a` | Logical operators |
 | `if c then a else b` | Conditional |
 | `min(a, b)`, `max(a, b)` | Built-in functions |
-| `fill(24_500/year)` | What's left of a period's amount, split over the firings left in it |
+| `fill(max_401k - other[year])` | What's left of a limit or total, split over the firings left in the period |
 | `abs(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Built-in functions |
 | `net(gross, 0.3)` | User-defined function call |
 

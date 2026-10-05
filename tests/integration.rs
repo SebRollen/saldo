@@ -860,7 +860,11 @@ fn resolver_errors_point_at_the_offending_text() {
             "payday",
         ),
         ("fn f(x, y, x) { x }", "already a parameter", "x"),
-        ("fn f(x) { x[year] }", "can't read totals", "x[year]"),
+        (
+            "entry pay { income.a -> assets.b : 1 #t }\nfn f(x) { pay.t[year] }",
+            "can't read totals",
+            "pay.t[year]",
+        ),
         (
             "let payday = 15th | last\nlet x = payday * 2",
             "is a set of days",
@@ -1693,11 +1697,11 @@ fn a_raise_applies_from_the_next_paycheck() {
 }
 
 #[test]
-fn a_rate_minus_its_period_total_is_whats_left_of_it() {
+fn a_limit_minus_its_period_total_is_whats_left_of_it() {
     // Contribute 16% of each paycheck until the yearly limit is reached.
     let src = "
         let salary   = 300_000/year
-        let max_401k = 24_500/year
+        let max_401k = 24_500[year]
         entry pay @ 15th | last {
           income.salary -> assets.retirement : min(salary * 0.16, max_401k - contribution[year]) #contribution
         }
@@ -1892,13 +1896,59 @@ fn per_day_interest_matches_an_amortization_schedule() {
     assert_eq!(posted_in(&output, "liabilities.loan", 2029), usd("145.45"));
 }
 
+// --- limits and fill ---
+
+#[test]
+fn a_limit_is_filled_over_the_firings_left() {
+    // A rate is spread over the year, so a job that starts in July
+    // contributes half of it; a limit isn't, so it contributes all of it.
+    let src = "
+        entry rate @ 2026-07-01.. & last {
+          income.salary -> assets.rate : 12_000/year
+        }
+        entry limit @ 2026-07-01.. & last {
+          income.salary -> assets.limit : 12_000[year]
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2027-12-31")).unwrap();
+    assert_eq!(posted_in(&output, "assets.rate", 2026), usd("6000"));
+    assert_eq!(posted_in(&output, "assets.limit", 2026), usd("12000"));
+    assert_eq!(postings_to(&output, "assets.limit")[0], usd("2000"));
+    assert_eq!(posted_in(&output, "assets.limit", 2027), usd("12000"));
+    assert_eq!(postings_to(&output, "assets.limit")[6], usd("1000"));
+}
+
+#[test]
+fn a_rate_becomes_a_limit_with_a_period() {
+    let src = "
+        let salary = 10_000/month
+        entry pay @ last { income.salary -> assets.cash : salary }
+        check income.salary[year] <= salary[year]
+        check salary[year] == 120_000
+    ";
+    run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
+    // Without one, it's spread, and doesn't compare with a total.
+    let src = "
+        let salary = 120_000/year
+        entry pay @ last { income.salary -> assets.cash : salary }
+        check income.salary[year] <= salary
+    ";
+    let errors = run(src, &opts("2026-01-01", "2026-12-31")).unwrap_err();
+    assert!(has_error(
+        &errors,
+        "`<=` mixes a year-to-date total with an amount per year"
+    ));
+    let rendered = saldo::format_errors("test.saldo", src, &errors, false);
+    assert!(rendered.contains("write `[year]` after it"), "{rendered}");
+}
+
 // --- fill ---
 
 #[test]
 fn fill_reaches_a_yearly_target_after_a_midyear_start() {
     let src = r#"
         let salary   = 150_000/year
-        let max_401k = 24_500/year
+        let max_401k = 24_500[year]
         let old_contribution {
           2026-01-01..2026-07-01 => 1_000/month
           2026-07-01..           => 0
@@ -1943,7 +1993,7 @@ fn fill_makes_up_for_firings_held_back() {
           2026-07-01..           => 10_000
         }
         entry paycheck @ last {
-          income.salary -> assets.retirement : min(fill(24_000/year), cap)
+          income.salary -> assets.retirement : min(fill(24_000[year]), cap)
         }
     ";
     let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
@@ -1970,7 +2020,15 @@ fn fill_has_to_be_what_a_move_moves() {
         ),
         (
             "entry a @ last { income.salary -> assets.cash : fill(500) }",
-            "`fill` needs an amount per period",
+            "`fill` needs an amount each period",
+        ),
+        (
+            "entry a @ last { income.salary -> assets.cash : fill(24_500/year) }",
+            "but this is an amount per year",
+        ),
+        (
+            "entry a @ last { income.salary -> assets.cash : max_401k + assets.cash }",
+            "`+` mixes an amount each year with an amount",
         ),
         (
             "entry a @ last { income.salary -> assets.cash : fill(max_401k - paid[year]) #paid }",
@@ -1982,7 +2040,7 @@ fn fill_has_to_be_what_a_move_moves() {
         ),
     ];
     for (decl, message) in cases {
-        let src = format!("let max_401k = 24_500/year\n{decl}");
+        let src = format!("let max_401k = 24_500[year]\n{decl}");
         let errors = run(&src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
         assert!(has_error(&errors, message), "{decl}: {errors:?}");
     }
@@ -1992,15 +2050,17 @@ fn fill_has_to_be_what_a_move_moves() {
 fn fill_warns_when_the_simulation_starts_partway_through_its_period() {
     let src = "
         entry paycheck @ last {
-          income.salary -> assets.retirement : fill(24_000/year)
+          income.salary -> assets.retirement : 24_000[year]
         }
     ";
     let output = run(src, &opts("2026-03-15", "2026-12-31")).unwrap();
     assert_eq!(output.warnings.len(), 1);
     assert_eq!(
         output.warnings[0].message,
-        "`fill` is missing what was moved before 2026-03-15"
+        "what's left here doesn't count what was moved before 2026-03-15"
     );
+    let span = output.warnings[0].span;
+    assert_eq!(&src[span.start..span.end], "24_000[year]");
     let output = run(src, &opts("2026-01-01", "2026-12-31")).unwrap();
     assert!(output.warnings.is_empty());
 }

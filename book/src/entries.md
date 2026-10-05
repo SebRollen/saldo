@@ -32,7 +32,7 @@ gets in the end:
 
 ```
 let salary = 120_000/year
-let max_401k = 24_000/year
+let max_401k = 24_000[year]
 
 entry paycheck "Paycheck" @ last {
   income.salary -> assets.cash       : salary
@@ -134,7 +134,7 @@ gives what its moves moved so far this period:
 
 ```
 let salary = 300_000/year
-let max_401k = 24_500/year
+let max_401k = 24_500[year]
 
 entry paycheck "Paycheck" @ 15th | last {
   income.salary -> assets.cash       : salary
@@ -151,32 +151,30 @@ the start of each year, quarter or month.
 
 ## Rates
 
-A move whose amount is a rate, like `24_500/year` (see
+A move whose amount is a rate, like `120_000/year` (see
 [Values](./values.md#rates)), moves each firing's share of it:
 
 ```
-let salary   = 120_000/year
-let max_401k = 24_500/year
+let salary = 120_000/year
 
 entry paycheck "Paycheck" @ 15th | last {
-  income.salary -> assets.cash       : salary
-  assets.cash   -> assets.retirement : max_401k
+  income.salary -> assets.cash : salary
 }
 ```
 
 The days in each calendar year that fit the entry's days split the year's
 amount equally, rounded so that they add up to it exactly. Here that's 24
-contributions of 1020.83 or 1020.84, which come to 24,500.00. An entry on
-`2026-01-02.. & fri / 2` has 26 paydays in some years and 27 in others, and
-each year still comes to 24,500.00.
+paychecks of 5,000. An entry on `2026-01-02.. & fri / 2` has 26 paydays in
+some years and 27 in others, and each year still comes to 120,000.00.
 
 In an entry, a rate used with an amount, like `salary - assets.cash`, means
 the firing's share of it, and so do rates that `min`, `max` and `if` choose
-between. A rate added to, subtracted from or compared with a total over the
-same period counts in full, so this contributes 16% of each paycheck until
-the year's limit is reached:
+between. So this contributes 16% of each paycheck until what's left of the
+year's limit is less:
 
 ```
+let max_401k = 24_500[year]
+
 entry paycheck "Paycheck" @ 15th | last {
   income.salary -> assets.retirement : min(salary * 0.16, max_401k - contribution[year]) #contribution
 }
@@ -194,7 +192,7 @@ In detail:
   `2026-07-01.. & last` moves a twelfth of a yearly rate each month, so half of
   it in 2026. Firings before the simulation starts count too, so you see the
   same paychecks whatever `--from` you choose. To move the whole amount over
-  the firings that are left, use [`fill`](#filling-a-target).
+  the firings that are left, use a [limit](#limits).
 - **A period without a firing rolls into the next one,** back to when the
   entry starts. A quarterly entry moves three months of a rate per month, an
   entry on `2026-01-02.. & fri / 2` moves two weeks of a rate per week, and an
@@ -231,20 +229,21 @@ entry loan_payment "Loan payment" @ 2026-01-11.. & last {
 The first payment covers January 11 to 31, and `min` makes the last one
 smaller, paying off what's left.
 
-### Filling a target
+## Limits
 
-A rate spreads evenly, like a salary. Some amounts are targets instead: you
-want a year's 401(k) contributions to reach the limit, however many paychecks
-are left. `fill` moves what's left of the period's amount, divided by the
+A rate spreads evenly, like a salary. Some amounts are limits instead, like
+`24_500[year]` (see [Values](./values.md#limits)): you want a year's 401(k)
+contributions to reach the limit, however many paychecks are left. A move
+whose amount is a limit moves what's left of it this period, divided by the
 firings left in the period:
 
 ```
 let salary   = 150_000/year
-let max_401k = 24_500/year
+let max_401k = 24_500[year]
 
 entry new_job "New job" @ 2026-07-10.. & fri / 2 {
   income.salary -> assets.cash       : salary
-  assets.cash   -> assets.retirement : fill(max_401k) #contribution
+  assets.cash   -> assets.retirement : max_401k #contribution
 }
 ```
 
@@ -252,15 +251,25 @@ The job starts in July, so its 13 paydays in 2026 contribute 24,500 between
 them, while the salary, which is spread, pays half a year. From 2027 there are
 26 paydays, and each contributes a 26th.
 
-What's left is the amount minus what the move has already moved this period,
-so if an earlier firing moves less, later ones make up the difference.
-`min(fill(max_401k), cap)` contributes as much as `cap` allows and catches up
-when it can. To count contributions from elsewhere, subtract them from the
-target, for example `fill(max_401k - old_job.contribution[year])`. Don't
-subtract the move's own total: `fill` already does.
+What's left is the limit minus what the move has already moved this period,
+so if an earlier firing moves less, later ones make up the difference. A limit
+can be all of what a move moves, or what `min`, `max` or `if` pick for it,
+like `max(max_401k, 0)`. Like a `[year]` total, it only knows what was moved
+since the simulation started, so saldo warns if it starts partway through a
+period after the entry would have fired.
 
-The period comes from the target: a rate's unit, or a total's period, like the
-year of a `[year]`. `fill` can only be the amount a move moves, or what `min`,
-`max` or `if` choose for it. Like a `[year]` total, it only knows what was
-moved since the simulation started, so saldo warns if it starts partway through
-a period after the entry would have fired.
+### Filling a target
+
+`fill` moves what's left of any target, the same way: a limit, or a total like
+what's left of a limit after contributions elsewhere:
+
+```
+entry new_job "New job" @ 2026-07-10.. & fri / 2 {
+  assets.cash -> assets.retirement : fill(max_401k - old_job.contribution[year])
+}
+```
+
+Don't subtract the move's own total: `fill` already does. A plain number
+combined with a limit becomes a limit too, so `min(max_401k, 500)` is a limit
+of 500 a year; to cap each firing at 500 and catch up when it can, fill the
+limit first: `min(fill(max_401k), 500)`.

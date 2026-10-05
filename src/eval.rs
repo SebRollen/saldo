@@ -165,8 +165,8 @@ impl Model {
 }
 
 impl Program {
-    /// Warns about `fill`s that can't know what their move moved earlier in a
-    /// period, because the simulation starts partway through it.
+    /// Warns about limits and `fill`s that can't know what their move moved
+    /// earlier in a period, because the simulation starts partway through it.
     pub fn missed_fill_warnings(&self, first_day: NaiveDate) -> Vec<Diagnostic> {
         self.fills
             .iter()
@@ -180,7 +180,7 @@ impl Program {
                 Some(
                     Diagnostic::new(
                         fill.span,
-                        format!("`fill` is missing what was moved before {first_day}"),
+                        format!("what's left here doesn't count what was moved before {first_day}"),
                     )
                     .with_note(
                         fill.span,
@@ -751,7 +751,7 @@ impl State<'_> {
                 }
                 self.call(function, frame, span, date)
             }
-            ExprKind::Per(e, _) => eval(e),
+            ExprKind::Per(e, _) | ExprKind::Limit(e, _) => eval(e),
             ExprKind::Fill(e, unit, fill) => {
                 let target = self.eval_num(e, locals)?;
                 self.fill(target, *unit, *fill, span).map(Value::Num)
@@ -1162,6 +1162,7 @@ fn params_in(e: &crate::compile::Expr, entry: &crate::compile::Entry, out: &mut 
         ExprKind::Neg(x)
         | ExprKind::Not(x)
         | ExprKind::Per(x, _)
+        | ExprKind::Limit(x, _)
         | ExprKind::Spread(x, _)
         | ExprKind::Fill(x, ..) => visit(x),
         ExprKind::Bin(a, _, b) => {
@@ -1199,6 +1200,7 @@ fn locals_in(e: &crate::compile::Expr, entry: &crate::compile::Entry, out: &mut 
         ExprKind::Neg(x)
         | ExprKind::Not(x)
         | ExprKind::Per(x, _)
+        | ExprKind::Limit(x, _)
         | ExprKind::Spread(x, _)
         | ExprKind::Fill(x, ..) => visit(x),
         ExprKind::Bin(a, _, b) => {
@@ -1227,7 +1229,9 @@ fn dated(e: &crate::compile::Expr, entry: &crate::compile::Entry) -> bool {
         | ExprKind::Spread(..)
         | ExprKind::Fill(..)
         | ExprKind::Builtin(Builtin::Fill, _) => false,
-        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::Per(x, _) => dated(x),
+        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::Per(x, _) | ExprKind::Limit(x, _) => {
+            dated(x)
+        }
         ExprKind::Bin(a, _, b) => dated(a) && dated(b),
         ExprKind::If(c, t, f) => dated(c) && dated(t) && dated(f),
         // Functions only read their arguments and values.

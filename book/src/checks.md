@@ -57,6 +57,7 @@ needed.
 check assets.cash >= 0
 
 // The 401(k) limit isn't breached
+let max_401k = 24_500[year]
 check paycheck.contribution[year] <= max_401k
 
 // A retirement target is hit by a date

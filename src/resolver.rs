@@ -864,7 +864,7 @@ impl<'a> Resolver<'a> {
                 }
             }
             Expr::Per(x, unit) => Expr::Per(self.resolve_expr(x, scope), *unit),
-            Expr::Period(x, unit) => match self.resolve_total(x, *unit, span, scope) {
+            Expr::Period(x, unit) => match self.resolve_period(x, *unit, span, scope) {
                 Some(resolved) => resolved,
                 None => return e.clone(),
             },
@@ -969,14 +969,35 @@ impl<'a> Resolver<'a> {
         Some(Path(vec![name]))
     }
 
-    /// `x[unit]`: what a tag or an account has moved so far this period.
-    fn resolve_total(
+    /// `x[unit]`: what a tag or an account has moved so far this period, or,
+    /// for anything else, a limit: an amount each period.
+    fn resolve_period(
         &mut self,
         x: &SpannedExpr,
         unit: TimeUnit,
         span: Span,
         scope: &Scope,
     ) -> Option<Expr> {
+        let total = match x.0.as_ref() {
+            Expr::Ref(path) => match (path.0.as_slice(), scope.entry) {
+                ([tag], Some((entry, tags))) if tags.contains(tag) => {
+                    Some(Target::Tag(entry.to_string(), tag.clone()))
+                }
+                ([local], _) if scope.locals.contains(local) => None,
+                _ => match self.lookup(scope.module, path, x.1) {
+                    Ok(target @ (Target::Tag(..) | Target::Account(_))) => Some(target),
+                    Ok(_) => None,
+                    Err(diag) => {
+                        self.diags.push(diag);
+                        return None;
+                    }
+                },
+            },
+            _ => None,
+        };
+        let Some(total) = total else {
+            return Some(Expr::Period(self.resolve_expr(x, scope), unit));
+        };
         let Some(agg) = AggKind::from_unit(unit) else {
             self.diags.push(Diagnostic::new(
                 span,
@@ -991,44 +1012,14 @@ impl<'a> Resolver<'a> {
             ));
             return None;
         }
-        let Expr::Ref(path) = x.0.as_ref() else {
-            self.diags.push(Diagnostic::new(
-                span,
-                "only tags and accounts have totals, like `paycheck.contribution[year]` or \
-                 `income.salary[year]`",
-            ));
-            return None;
-        };
-        if let ([tag], Some((entry, tags))) = (path.0.as_slice(), scope.entry)
-            && tags.contains(tag)
-        {
-            return Some(Expr::TagTotal {
-                entry: entry.to_string(),
-                tag: tag.clone(),
-                agg,
-            });
-        }
-        match self.lookup(scope.module, path, x.1) {
-            Ok(Target::Tag(entry, tag)) => Some(Expr::TagTotal { entry, tag, agg }),
-            Ok(Target::Account(path)) => {
+        Some(match total {
+            Target::Tag(entry, tag) => Expr::TagTotal { entry, tag, agg },
+            Target::Account(path) => {
                 self.reads.push((path.clone(), x.1));
-                Some(Expr::AccountTotal(path, agg))
+                Expr::AccountTotal(path, agg)
             }
-            Ok(_) => {
-                self.diags.push(Diagnostic::new(
-                    x.1,
-                    format!(
-                        "`{path}` has no total; only tags and accounts do, like \
-                         `paycheck.contribution[year]` or `income.salary[year]`"
-                    ),
-                ));
-                None
-            }
-            Err(diag) => {
-                self.diags.push(diag);
-                None
-            }
-        }
+            _ => unreachable!("only tags and accounts have totals"),
+        })
     }
 
     // ---- checks across the model ----
@@ -1699,7 +1690,11 @@ mod tests {
             "entry pay { income.a -> assets.b : 1 }\ncheck pay.nothing[year] >= 0",
             "has no tag `nothing`",
         );
-        has_error("let x = 1\ncheck x[year] >= 0", "`x` has no total");
+        // Anything else is a limit.
+        let model = resolve_src("let x = 1\ncheck x[year] >= 0").unwrap();
+        assert!(
+            matches!(&*model.checks[0].1.0, Expr::Bin(a, ..) if matches!(&*a.0, Expr::Period(..)))
+        );
         has_error(
             "entry pay { income.a -> assets.b : 1 #t }\ncheck pay.t[week] >= 0",
             "not a week",

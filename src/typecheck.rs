@@ -140,6 +140,10 @@ impl<'a> Checker<'a> {
                 self.expect(x, Ty::Num, &format!("the operand of `/{unit}`"));
                 Some(Ty::Num)
             }
+            Expr::Period(x, unit) => {
+                self.expect(x, Ty::Num, &format!("the operand of `[{unit}]`"));
+                Some(Ty::Num)
+            }
             Expr::Not(x) => {
                 self.expect(x, Ty::Bool, "the operand of `not`");
                 Some(Ty::Bool)
@@ -192,7 +196,7 @@ impl<'a> Checker<'a> {
                     Some(Ty::Num) // builtins all return numbers
                 }
             }
-            Expr::Ref(_) | Expr::Period(..) | Expr::Days(_) | Expr::Range { .. } => {
+            Expr::Ref(_) | Expr::Days(_) | Expr::Range { .. } => {
                 unreachable!("the resolver replaces these")
             }
         }
