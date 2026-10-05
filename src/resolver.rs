@@ -172,6 +172,8 @@ struct Scope<'s> {
     entry: Option<(&'s str, &'s HashSet<String>)>,
     /// The function being resolved, which can't read accounts or totals.
     function: Option<&'s str>,
+    /// The variables of the `for` loops in scope, which stand for accounts.
+    loops: &'s [String],
 }
 
 #[derive(Default)]
@@ -219,6 +221,81 @@ fn reserved(name: &str) -> Option<&'static str> {
         return Some("is a keyword");
     }
     None
+}
+
+/// The first part of the path a `for` loop's variable stands for until the
+/// loop is expanded, which no name can start with.
+const LOOP: &str = "$";
+
+/// The path that `for` loop variable `var` stands for until the loop is
+/// expanded.
+fn loop_account(var: &str) -> Path {
+    Path(vec![LOOP.to_string(), var.to_string()])
+}
+
+/// Replaces `placeholder`, a loop's variable, with `account` in `stmts`.
+fn substitute_stmts(stmts: &mut [EntryStmt], placeholder: &Path, account: &Path) {
+    let fill = |path: &mut Path| {
+        if path == placeholder {
+            *path = account.clone();
+        }
+    };
+    for stmt in stmts {
+        match stmt {
+            EntryStmt::Let { value, .. } => substitute_expr(value, placeholder, account),
+            EntryStmt::Move(m) => {
+                fill(&mut m.from.0);
+                fill(&mut m.to.0);
+                substitute_expr(&mut m.amount, placeholder, account);
+            }
+            EntryStmt::If {
+                branches,
+                otherwise,
+            } => {
+                for (cond, body) in branches {
+                    substitute_expr(cond, placeholder, account);
+                    substitute_stmts(body, placeholder, account);
+                }
+                substitute_stmts(otherwise, placeholder, account);
+            }
+            EntryStmt::For { body, .. } => substitute_stmts(body, placeholder, account),
+        }
+    }
+}
+
+fn substitute_expr((expr, _): &mut SpannedExpr, placeholder: &Path, account: &Path) {
+    let sub = |e: &mut SpannedExpr| substitute_expr(e, placeholder, account);
+    match expr.as_mut() {
+        Expr::Balance(path) | Expr::AccountTotal(path, _) => {
+            if path == placeholder {
+                *path = account.clone();
+            }
+        }
+        Expr::Neg(x) | Expr::Not(x) | Expr::Per(x, _) | Expr::Period(x, _) => sub(x),
+        Expr::Bin(a, _, b) => {
+            sub(a);
+            sub(b);
+        }
+        Expr::If { cond, then, else_ } => {
+            sub(cond);
+            sub(then);
+            sub(else_);
+        }
+        Expr::Call(_, args) => args.iter_mut().for_each(sub),
+        Expr::Range { from, to, .. } => {
+            sub(from);
+            if let Some(to) = to {
+                sub(to);
+            }
+        }
+        Expr::Num(_)
+        | Expr::Bool(_)
+        | Expr::Ref(_)
+        | Expr::Days(_)
+        | Expr::Global(_)
+        | Expr::Local(_)
+        | Expr::TagTotal { .. } => {}
+    }
 }
 
 fn join(module: &[String], name: &str) -> String {
@@ -538,6 +615,7 @@ impl<'a> Resolver<'a> {
                 locals: &[],
                 entry: None,
                 function: None,
+                loops: &[],
             };
             let expr = self.resolve_expr(expr, &scope);
             if let Some(schedule) = self.schedule(when, &module) {
@@ -555,6 +633,7 @@ impl<'a> Resolver<'a> {
                     locals: &[],
                     entry: None,
                     function: None,
+                    loops: &[],
                 };
                 let value = self.resolve_expr(value, &scope);
                 self.leaves.entry(path.clone()).or_insert(*span);
@@ -576,6 +655,7 @@ impl<'a> Resolver<'a> {
         self.check_values_read_no_state();
         validate_fn_calls(&self.fns, &mut self.diags);
         self.check_accounts();
+        self.expand_loops();
         if self.diags.is_empty() {
             self.order_entries();
         }
@@ -605,6 +685,7 @@ impl<'a> Resolver<'a> {
             locals: &[],
             entry: None,
             function: None,
+            loops: &[],
         };
         let body = match self.lets[i].body {
             LetBody::Expr(e) => ParamBody::Const(self.resolve_expr(e, &scope)),
@@ -700,6 +781,7 @@ impl<'a> Resolver<'a> {
                 locals: &locals,
                 entry: None,
                 function: Some(full.as_str()),
+                loops: &[],
             };
             match stmt {
                 Stmt::Let { name, value } => {
@@ -745,7 +827,7 @@ impl<'a> Resolver<'a> {
                 Err(diag) => self.diags.push(diag),
             }
         }
-        let resolved = self.resolve_entry_stmts(body, &module, &full, &tags, &mut Vec::new());
+        let resolved = self.resolve_entry_stmts(body, &module, &full, &tags, &mut Vec::new(), &[]);
         let Some(schedule) = self.schedule(when, &module) else {
             return;
         };
@@ -763,7 +845,8 @@ impl<'a> Resolver<'a> {
     }
 
     /// Resolves the statements of entry `full`, in which `locals` are the
-    /// `let`s in scope; `let`s in a branch are only in scope in it.
+    /// `let`s in scope and `loops` the variables of the `for` loops around
+    /// them; `let`s in a branch or a loop are only in scope in it.
     fn resolve_entry_stmts(
         &mut self,
         stmts: &[EntryStmt],
@@ -771,6 +854,7 @@ impl<'a> Resolver<'a> {
         full: &str,
         tags: &HashSet<String>,
         locals: &mut Vec<String>,
+        loops: &[String],
     ) -> Vec<EntryStmt> {
         let mut resolved = Vec::new();
         for stmt in stmts {
@@ -779,6 +863,7 @@ impl<'a> Resolver<'a> {
                 locals,
                 entry: Some((full, tags)),
                 function: None,
+                loops,
             };
             match stmt {
                 EntryStmt::Let { name, value } => {
@@ -797,12 +882,21 @@ impl<'a> Resolver<'a> {
                 }
                 EntryStmt::Move(m) => {
                     let amount = self.resolve_expr(&m.amount, &scope);
-                    for (path, path_span) in [&m.from, &m.to] {
+                    let mut endpoint = |(path, path_span): &Spanned<Path>| {
+                        if let [var] = path.0.as_slice()
+                            && loops.contains(var)
+                        {
+                            return (loop_account(var), *path_span);
+                        }
                         if self.account_path(path, *path_span) {
                             self.leaves.entry(path.clone()).or_insert(*path_span);
                         }
-                    }
+                        (path.clone(), *path_span)
+                    };
+                    let (from, to) = (endpoint(&m.from), endpoint(&m.to));
                     resolved.push(EntryStmt::Move(Move {
+                        from,
+                        to,
                         amount,
                         ..m.clone()
                     }));
@@ -813,15 +907,15 @@ impl<'a> Resolver<'a> {
                 } => {
                     let mut resolved_branches = Vec::new();
                     for (cond, body) in branches {
-                        let scope = Scope {
-                            module,
-                            locals,
-                            entry: Some((full, tags)),
-                            function: None,
-                        };
                         let cond = self.resolve_expr(cond, &scope);
-                        let body =
-                            self.resolve_entry_stmts(body, module, full, tags, &mut locals.clone());
+                        let body = self.resolve_entry_stmts(
+                            body,
+                            module,
+                            full,
+                            tags,
+                            &mut locals.clone(),
+                            loops,
+                        );
                         resolved_branches.push((cond, body));
                     }
                     let otherwise = self.resolve_entry_stmts(
@@ -830,15 +924,94 @@ impl<'a> Resolver<'a> {
                         full,
                         tags,
                         &mut locals.clone(),
+                        loops,
                     );
                     resolved.push(EntryStmt::If {
                         branches: resolved_branches,
                         otherwise,
                     });
                 }
+                EntryStmt::For { var, over, body } => {
+                    for (path, path_span) in over {
+                        self.account_path(path, *path_span);
+                    }
+                    let mut loops = loops.to_vec();
+                    loops.push(var.0.clone());
+                    let body = self.resolve_entry_stmts(
+                        body,
+                        module,
+                        full,
+                        tags,
+                        &mut locals.clone(),
+                        &loops,
+                    );
+                    resolved.push(EntryStmt::For {
+                        var: var.clone(),
+                        over: over.clone(),
+                        body,
+                    });
+                }
             }
         }
         resolved
+    }
+
+    /// Replaces every `for` loop with its statements once for each account it
+    /// goes through, now that every account is known.
+    fn expand_loops(&mut self) {
+        let mut entries = std::mem::take(&mut self.entries);
+        for entry in &mut entries {
+            let body = std::mem::take(&mut entry.body);
+            entry.body = self.expand_stmts(body);
+        }
+        self.entries = entries;
+    }
+
+    fn expand_stmts(&mut self, stmts: Vec<EntryStmt>) -> Vec<EntryStmt> {
+        let mut out = Vec::new();
+        for stmt in stmts {
+            match stmt {
+                EntryStmt::For { var, over, body } => {
+                    let mut accounts: Vec<Path> = Vec::new();
+                    for (path, path_span) in &over {
+                        let under: Vec<&Path> =
+                            self.leaves.keys().filter(|l| l.starts_with(path)).collect();
+                        if under.is_empty() {
+                            self.diags.push(Diagnostic::new(
+                                *path_span,
+                                format!("no entry or balance moves money into or out of `{path}`"),
+                            ));
+                        }
+                        for leaf in under {
+                            if !accounts.contains(leaf) {
+                                accounts.push(leaf.clone());
+                            }
+                        }
+                    }
+                    // Inner loops first, so the accounts they go through are
+                    // then filled in for this loop's variable too.
+                    let body = self.expand_stmts(body);
+                    let placeholder = loop_account(&var.0);
+                    for account in accounts {
+                        let mut body = body.clone();
+                        substitute_stmts(&mut body, &placeholder, &account);
+                        out.extend(body);
+                    }
+                }
+                EntryStmt::If {
+                    branches,
+                    otherwise,
+                } => out.push(EntryStmt::If {
+                    branches: branches
+                        .into_iter()
+                        .map(|(cond, body)| (cond, self.expand_stmts(body)))
+                        .collect(),
+                    otherwise: self.expand_stmts(otherwise),
+                }),
+                stmt => out.push(stmt),
+            }
+        }
+        out
     }
 
     /// Checks that `path` can be an account that money moves into or out of,
@@ -926,6 +1099,12 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve_ref(&mut self, path: &Path, span: Span, scope: &Scope) -> Option<Expr> {
+        if let [var] = path.0.as_slice()
+            && scope.loops.contains(var)
+            && !scope.locals.contains(var)
+        {
+            return Some(Expr::Balance(loop_account(var)));
+        }
         if path.0.len() == 1 && scope.locals.contains(&path.0[0]) {
             return Some(Expr::Local(path.0[0].clone()));
         }
@@ -1021,6 +1200,9 @@ impl<'a> Resolver<'a> {
     ) -> Option<Expr> {
         let total = match x.0.as_ref() {
             Expr::Ref(path) => match (path.0.as_slice(), scope.entry) {
+                ([var], _) if scope.loops.contains(var) && !scope.locals.contains(var) => {
+                    Some(Target::Account(loop_account(var)))
+                }
                 ([tag], Some((entry, tags))) if tags.contains(tag) => {
                     Some(Target::Tag(entry.to_string(), tag.clone()))
                 }
@@ -1056,7 +1238,9 @@ impl<'a> Resolver<'a> {
         Some(match total {
             Target::Tag(entry, tag) => Expr::TagTotal { entry, tag, agg },
             Target::Account(path) => {
-                self.reads.push((path.clone(), x.1));
+                if path.0[0] != LOOP {
+                    self.reads.push((path.clone(), x.1));
+                }
                 Expr::AccountTotal(path, agg)
             }
             _ => unreachable!("only tags and accounts have totals"),
@@ -1081,7 +1265,14 @@ impl<'a> Resolver<'a> {
                             "`{leaf}` holds money, so it can't also be a group of accounts like `{child}`"
                         ),
                     )
-                    .with_note(**child_span, format!("`{child}` is here")),
+                    .with_note(**child_span, format!("`{child}` is here"))
+                    .with_note(
+                        **span,
+                        format!(
+                            "to move money into each account under `{leaf}`, \
+                             use `for a in {leaf} {{ … }}`"
+                        ),
+                    ),
                 );
             }
         }
@@ -1177,6 +1368,7 @@ impl<'a> Resolver<'a> {
                         read(cond);
                     }
                 }
+                EntryStmt::For { .. } => unreachable!("loops are expanded first"),
             });
             writes.push(w);
             tags.push(t);

@@ -113,6 +113,7 @@ impl Model {
                         collect(cond);
                     }
                 }
+                EntryStmt::For { .. } => unreachable!("the resolver expands loops"),
             });
         }
         for (_, e) in &self.checks {

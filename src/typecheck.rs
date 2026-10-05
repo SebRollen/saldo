@@ -66,6 +66,7 @@ pub fn check(model: &Model) -> Vec<Diagnostic> {
                     checker.expect(cond, Ty::Bool, "an `if` condition");
                 }
             }
+            EntryStmt::For { .. } => unreachable!("the resolver expands loops"),
         });
     }
     checker.locals.clear();

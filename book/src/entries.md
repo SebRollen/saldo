@@ -148,6 +148,26 @@ scope in it. A rate moved in a branch that doesn't run moves nothing that day:
 its share isn't carried to the next firing. A limit catches up on later
 firings.
 
+## Going through accounts with `for`
+
+`for` makes the same moves for each account under a group, with a name
+standing for the account:
+
+```
+let monthly_return = 0.5%
+
+entry returns "Investment returns" @ last {
+  for a in assets.retirement, assets.hsa {
+    income.investments -> a : a * monthly_return
+  }
+}
+```
+
+Each account under `assets.retirement`, and `assets.hsa`, gets its own return,
+all in one transaction. The name reads the account's balance, can be moved
+into or out of, and has totals, like `a[year]`. A new account under
+`assets.retirement` is included without changing the entry.
+
 ## Tags and totals
 
 `#name` after a move tags it. `[year]`, `[quarter]` or `[month]` after a tag

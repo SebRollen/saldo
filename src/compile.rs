@@ -392,6 +392,7 @@ impl Names<'_> {
                         .collect(),
                     otherwise: self.lower_entry(entry, otherwise, &mut locals.clone(), slots),
                 },
+                ast::EntryStmt::For { .. } => unreachable!("the resolver expands loops"),
             });
         }
         body

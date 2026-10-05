@@ -41,11 +41,9 @@ A path with accounts under it is a group. Reading a group gives the sum of
 the accounts in it:
 
 ```
-let monthly_return = 0.5%
-
-entry returns @ last {
-  income.investments -> assets.retirement.alex : assets.retirement.alex * monthly_return
-  income.investments -> assets.retirement.sam  : assets.retirement.sam * monthly_return
+entry contributions @ 15th {
+  assets.cash -> assets.retirement.alex : 1_000
+  assets.cash -> assets.retirement.sam  : 1_000
 }
 
 check assets.retirement >= 0
@@ -54,7 +52,9 @@ check assets.retirement >= 0
 `assets.retirement` is the sum of `assets.retirement.alex` and
 `assets.retirement.sam`, and `assets` is every asset. An account either holds
 money or is a group: moving money into `assets.cash` and into
-`assets.cash.checking` is an error.
+`assets.cash.checking` is an error. To move money into each account under a
+group, go through them with `for` (see
+[Entries](./entries.md#going-through-accounts-with-for)).
 
 ## Kinds
 

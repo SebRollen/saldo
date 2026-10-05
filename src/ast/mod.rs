@@ -491,6 +491,14 @@ pub enum EntryStmt {
         branches: Vec<(SpannedExpr, Vec<EntryStmt>)>,
         otherwise: Vec<EntryStmt>,
     },
+    /// `for a in assets.retirement, assets.hsa { … }`: the statements once
+    /// for each account under the paths, with `a` standing for it. The
+    /// resolver replaces these with the statements they stand for.
+    For {
+        var: Spanned<String>,
+        over: Vec<Spanned<Path>>,
+        body: Vec<EntryStmt>,
+    },
 }
 
 impl EntryStmt {
@@ -498,15 +506,18 @@ impl EntryStmt {
     pub fn visit<'a>(stmts: &'a [EntryStmt], f: &mut impl FnMut(&'a EntryStmt)) {
         for stmt in stmts {
             f(stmt);
-            if let EntryStmt::If {
-                branches,
-                otherwise,
-            } = stmt
-            {
-                for (_, body) in branches {
-                    EntryStmt::visit(body, f);
+            match stmt {
+                EntryStmt::If {
+                    branches,
+                    otherwise,
+                } => {
+                    for (_, body) in branches {
+                        EntryStmt::visit(body, f);
+                    }
+                    EntryStmt::visit(otherwise, f);
                 }
-                EntryStmt::visit(otherwise, f);
+                EntryStmt::For { body, .. } => EntryStmt::visit(body, f),
+                EntryStmt::Let { .. } | EntryStmt::Move(_) => {}
             }
         }
     }

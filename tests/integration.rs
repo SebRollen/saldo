@@ -509,6 +509,81 @@ fn if_conditions_are_bools_and_lets_stay_in_their_branch() {
     assert!(has_error(&errors, "unknown name `x`"));
 }
 
+#[test]
+fn for_moves_money_for_each_account_under_a_group() {
+    let src = "
+        balances @ 2026-01-01 {
+          assets.retirement.alex = 10_000
+          assets.retirement.sam  = 20_000
+          assets.hsa             = 4_000
+        }
+        entry returns @ last {
+          for a in assets.retirement, assets.hsa {
+            let gain = a * 1%
+            income.investments -> a : gain #returns
+          }
+        }
+        check returns.returns[year] == 340 @ 2026-01-31
+        check assets.retirement == 30_300 @ 2026-01-31
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "assets.retirement.alex"), usd("100"));
+    assert_eq!(posting(&output, 0, "assets.retirement.sam"), usd("200"));
+    assert_eq!(posting(&output, 0, "assets.hsa"), usd("40"));
+    assert_eq!(posting(&output, 0, "income.investments"), usd("-340"));
+}
+
+#[test]
+fn for_loops_nest_and_read_totals() {
+    let src = "
+        entry pay @ last {
+          for who in income.salary {
+            for to in assets.cash {
+              who -> to : 100
+            }
+          }
+        }
+        entry b @ last {
+          income.salary.bonus -> assets.cash.savings  : 1
+          income.salary.base  -> assets.cash.checking : 1
+        }
+        entry report @ last after pay {
+          for a in assets.cash {
+            if a[year] > 150 { a -> expenses.fees : 1 }
+          }
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    // Two incomes into two accounts: four moves of 100.
+    assert_eq!(posting(&output, 0, "income.salary.bonus"), usd("-200"));
+    assert_eq!(posting(&output, 0, "assets.cash.savings"), usd("200"));
+    // Each account got more than 150 this year, so each pays a fee.
+    assert_eq!(postings_to(&output, "expenses.fees"), [usd("2")]);
+}
+
+#[test]
+fn for_needs_accounts_to_go_through() {
+    let cases = [
+        (
+            "entry e { for a in assets.none { income.x -> a : 1 } }",
+            "no entry or balance moves money into or out of `assets.none`",
+        ),
+        (
+            "entry e { for a in salary { income.x -> a : 1 } }",
+            "`salary` isn't an account",
+        ),
+        (
+            "entry e { income.x -> assets.retirement : 1 }\nentry f { income.x -> assets.retirement.alex : 1 }",
+            "use `for a in assets.retirement",
+        ),
+    ];
+    for (src, message) in cases {
+        let errors = run(src, &opts("2026-01-01", "2026-01-01")).unwrap_err();
+        let rendered = saldo::format_errors("test.saldo", src, &errors, false);
+        assert!(rendered.contains(message), "{src}: {rendered}");
+    }
+}
+
 // --- functions ---
 
 #[test]

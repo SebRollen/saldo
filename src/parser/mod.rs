@@ -449,6 +449,28 @@ impl<'src> Parser<'src> {
         if self.eat_keyword("if").is_some() {
             return self.parse_if_stmt();
         }
+        if self.eat_keyword("for").is_some() {
+            let var = self.expect_ident("a name after `for`")?;
+            if self.eat_keyword("in").is_none() {
+                self.error_here("expected `in` and the accounts to go through");
+                return None;
+            }
+            let mut over = Vec::new();
+            loop {
+                let Some(path) = self.try_parse_path() else {
+                    self.error_here("expected an account or a group of accounts");
+                    return None;
+                };
+                over.push(path);
+                if self.eat(&Token::Comma).is_none() {
+                    break;
+                }
+            }
+            self.expect(&Token::LBrace)?;
+            let body = self.parse_entry_block()?;
+            self.expect(&Token::RBrace)?;
+            return Some(EntryStmt::For { var, over, body });
+        }
         if self.eat(&Token::Let).is_some() {
             let name = self.expect_ident("a name after `let`")?;
             self.expect(&Token::Eq)?;
