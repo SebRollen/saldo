@@ -1,6 +1,24 @@
 /// <reference types="tree-sitter-cli/dsl" />
 // @ts-check
 
+// How tightly operators bind, loosest first, as in saldo's own parser.
+const PREC = {
+  or: 1,
+  and: 2,
+  not: 3,
+  compare: 4,
+  union: 5,
+  inter: 6,
+  range: 7,
+  sum: 8,
+  product: 9,
+  unary: 10,
+  postfix: 11,
+  call: 12,
+};
+
+const commaSep1 = (rule) => seq(rule, repeat(seq(",", rule)), optional(","));
+
 module.exports = grammar({
   name: "saldo",
 
@@ -13,70 +31,50 @@ module.exports = grammar({
     // Top level
     // -----------------------------------------------------------------------
 
-    source_file: ($) => repeat($.declaration),
+    source_file: ($) => repeat($._declaration),
 
-    declaration: ($) =>
+    _declaration: ($) =>
       choice(
-        $.account_decl,
-        $.param_decl,
-        $.schedule_decl,
-        $.entry_decl,
-        $.assert_decl,
+        $.let_decl,
         $.fn_decl,
-        $.import_decl,
+        $.entry_decl,
+        $.check_decl,
+        $.balances_decl,
+        $.mod_decl,
       ),
 
     // -----------------------------------------------------------------------
-    // Account declaration
-    //   account Assets:Cash = 5_000 @ 2026-01-01
-    //   account Assets:Retirement:Jim
-    // -----------------------------------------------------------------------
-
-    account_decl: ($) =>
-      seq(
-        "account",
-        field("name", $.colon_path),
-        optional(
-          seq("=", field("init", $._expr), "@", field("date", $.date)),
-        ),
-      ),
-
-    // -----------------------------------------------------------------------
-    // Param declaration
-    //   param interest_rate = 5%
-    //   param daycare {
-    //     in jan 2027     = 0
-    //     in jul, aug     = 0
-    //     from 2027-09-01 = 2_100 compounding 3% every year
-    //     else            = 1_950
+    // Values and sets of days
+    //   let interest_rate = 5%/year
+    //   let payday = 15th | last
+    //   let daycare {
+    //     jan 2027     => 0
+    //     jul | aug    => 0
+    //     2027-09-01.. => 2_100 compounding 3% every year
+    //     _            => 1_950
     //   }
     // -----------------------------------------------------------------------
 
-    param_decl: ($) =>
+    let_decl: ($) =>
       seq(
-        "param",
+        "let",
         field("name", $.identifier),
-        choice($.const_body, $.arms_body),
+        choice(seq("=", field("value", $._expr)), field("arms", $.arms)),
       ),
 
-    const_body: ($) => seq("=", $._expr),
-
-    arms_body: ($) =>
-      seq(
-        "{",
-        repeat($.arm),
-        "}",
-      ),
+    arms: ($) => seq("{", repeat($.arm), "}"),
 
     arm: ($) =>
       seq(
-        field("when", choice($.from_condition, $.in_condition, "else")),
-        "=",
+        field("days", choice($.wildcard, $._expr)),
+        "=>",
         field("value", $._expr),
         optional(field("growth", $.growth)),
       ),
 
-    // compounding 4% every year / adding 100 per month every year
+    wildcard: (_) => "_",
+
+    // compounding 4% every year / adding 100/month every year
     growth: ($) =>
       seq(
         field("kind", choice("compounding", "adding")),
@@ -85,96 +83,13 @@ module.exports = grammar({
         field("every", $.time_unit),
       ),
 
-    from_condition: ($) =>
-      seq(
-        "from",
-        field("from", choice($.date, $._dated_period)),
-        optional(seq("to", field("to", $.date))),
-      ),
-
-    // in jul, aug / in jul through apr / in q2 2028 / in 2026 through 2028
-    in_condition: ($) =>
-      seq(
-        "in",
-        $.calendar_range,
-        repeat(seq($._list_separator, $.calendar_range)),
-      ),
-
-    calendar_range: ($) =>
-      seq(
-        $._calendar_period,
-        optional(seq("through", $._calendar_period)),
-      ),
-
-    // A month or quarter, every year, or with a year, once; or a year.
-    _calendar_period: ($) =>
-      choice(
-        seq(choice($.month_name, $.quarter), optional($.integer)),
-        $.integer,
-      ),
-
-    _dated_period: ($) =>
-      choice(
-        seq(choice($.month_name, $.quarter), $.integer),
-        $.integer,
-      ),
-
-    quarter: (_) => choice("q1", "q2", "q3", "q4"),
-
     // -----------------------------------------------------------------------
-    // Schedule declaration
-    //   schedule semi_monthly = every month on the 15th, last day
-    //   schedule every_two = every second friday from 2026-01-02
-    // -----------------------------------------------------------------------
-
-    schedule_decl: ($) =>
-      seq(
-        "schedule",
-        field("name", $.identifier),
-        "=",
-        field("schedule", $.schedule_literal),
-      ),
-
-    // -----------------------------------------------------------------------
-    // Entry declaration
-    //   entry monthly "Jim's paycheck" { ... }
-    //   entry semi_monthly "Seb's paycheck" { ... } as seb_paycheck
-    //   entry yearly on dec 11 "Annual bonus" { ... } as bonus
-    // -----------------------------------------------------------------------
-
-    entry_decl: ($) =>
-      seq(
-        "entry",
-        field("schedule", $.schedule_ref),
-        field("label", $.string),
-        "{",
-        repeat($.posting),
-        "}",
-        optional(seq("as", field("alias", $.identifier))),
-      ),
-
-    // -----------------------------------------------------------------------
-    // Assert declaration
-    //   assert that Assets:Cash >= 0
-    //   assert 2026-12-31 that Assets:Retirement:Seb == 24_500
-    //   assert yearly that Assets:Cash >= 0
-    //   assert payday that Assets:Cash >= 0
-    // -----------------------------------------------------------------------
-
-    assert_decl: ($) =>
-      seq(
-        "assert",
-        optional(field("schedule", $.schedule_ref)),
-        "that",
-        field("condition", $._expr),
-      ),
-
-    // -----------------------------------------------------------------------
-    // Function declaration
+    // Functions
     //   fn net(gross, rate) {
-    //     let tax = gross * rate;
+    //     let tax = gross * rate
     //     gross - tax
     //   }
+    //   fn loan(debt, rate) { mod { … } }
     // -----------------------------------------------------------------------
 
     fn_decl: ($) =>
@@ -182,184 +97,122 @@ module.exports = grammar({
         "fn",
         field("name", $.identifier),
         "(",
-        optional(
-          seq(
-            field("parameter", $.identifier),
-            repeat(seq(",", field("parameter", $.identifier))),
-            optional(","),
-          ),
-        ),
+        optional(commaSep1(field("parameter", $.identifier))),
         ")",
         "{",
         repeat($.let_stmt),
-        choice($.return_stmt, field("value", $._expr)),
+        choice(field("value", $._expr), field("module", $.module_body)),
         "}",
       ),
 
     let_stmt: ($) =>
-      seq("let", field("name", $.identifier), "=", field("value", $._expr), ";"),
+      seq("let", field("name", $.identifier), "=", field("value", $._expr)),
 
-    return_stmt: ($) => seq("return", field("value", $._expr), ";"),
-
-    // -----------------------------------------------------------------------
-    // Import declaration
-    //   import "loans/car.saldo"
-    // -----------------------------------------------------------------------
-
-    import_decl: ($) => seq("import", field("path", $.string)),
+    module_body: ($) => seq("mod", "{", repeat($._declaration), "}"),
 
     // -----------------------------------------------------------------------
-    // Schedule reference — literal schedule or a named schedule identifier
+    // Entries
+    //   entry paycheck "Paycheck" @ 15th | last {
+    //     income.salary -> assets.cash : salary
+    //     assets.cash -> assets.retirement : max_401k #contribution
+    //   }
     // -----------------------------------------------------------------------
 
-    schedule_ref: ($) =>
-      choice(
-        prec(1, $.schedule_literal),
-        $.identifier,
-      ),
-
-    // -----------------------------------------------------------------------
-    // Schedule literal
-    //   daily / weekly / monthly / quarterly / yearly / annually [on ...]
-    //   every [nth] period [on ...] [from date]
-    //   2026-01-01 [, 2026-02-01 ...]
-    // -----------------------------------------------------------------------
-
-    schedule_literal: ($) =>
-      choice(
-        $.adverbial_schedule,
-        $.every_schedule,
-        $.date_schedule,
-      ),
-
-    adverbial_schedule: ($) =>
+    entry_decl: ($) =>
       seq(
-        choice(
-          field("kind", choice("daily", "quarterly")),
-          seq(field("kind", "weekly"), optional($.weekday_on_clause)),
-          seq(
-            field("kind", choice("monthly", "yearly", "annually")),
-            optional($.on_clause),
-          ),
-        ),
-        optional(field("within", $.in_condition)),
+        "entry",
+        field("name", $.identifier),
+        optional(field("label", $.string)),
+        optional(seq("@", field("days", $._expr))),
+        optional(seq("after", commaSep1(field("after", $.path)))),
+        field("body", $.block),
       ),
 
-    every_schedule: ($) =>
-      seq(
-        "every",
-        optional(field("nth", $._ordinal)),
-        field("period", $._period_spec),
-        optional(field("within", $.in_condition)),
-        optional(seq("from", field("start", $.date))),
-      ),
+    block: ($) => seq("{", repeat($._entry_stmt), "}"),
 
-    _period_spec: ($) =>
-      choice(
-        choice("day", "days"),
-        seq(choice("week", "weeks"), optional($.weekday_on_clause)),
-        seq(choice("month", "months"), optional($.on_clause)),
-        choice("quarter", "quarters"),
-        seq(choice("year", "years"), optional($.on_clause)),
-        $.day_of_week,
-        // month_name uses _period_ordinal (no bare integer) to avoid ambiguity with
-        // the expression that follows the schedule in assert_decl.
-        seq($.month_name, optional($._period_ordinal)),
-      ),
+    _entry_stmt: ($) => choice($.let_stmt, $.move, $.if_stmt, $.for_stmt),
 
-    // Ordinals in period specs: suffix (15th) or word (first/last/second/…) only.
-    // Plain integers are excluded here to prevent ambiguity with following expressions.
-    _period_ordinal: ($) =>
-      choice(
-        $.ordinal_suffix,
-        $.ordinal_word,
-      ),
-
-    on_clause: ($) =>
-      seq(
-        "on",
-        optional("the"),
-        $._occurrence_list,
-      ),
-
-    _occurrence_list: ($) =>
-      seq(
-        $._occurrence_item,
-        repeat(seq($._list_separator, optional("the"), $._occurrence_item)),
-      ),
-
-    // on monday, wednesday and friday
-    weekday_on_clause: ($) =>
-      seq(
-        "on",
-        $.day_of_week,
-        repeat(seq($._list_separator, $.day_of_week)),
-      ),
-
-    _list_separator: (_) => choice(",", "and", seq(",", "and")),
-
-    // An item in an on-clause can be:
-    //   15th day / last monday / first  (ordinal with optional day/dow)
-    //   dec 31 / jan first              (month name + ordinal)
-    //   2026-01-15                      (explicit date)
-    _occurrence_item: ($) =>
-      choice(
-        seq($._ordinal, optional(choice($.day_of_week, "day", "days"))),
-        seq($.month_name, $._ordinal),
-        $.date,
-      ),
-
-    // Ordinals may be: 1st/2nd/15th (suffix form), a plain integer (11, 31),
-    // or a word-form (first, last, second, third, ...).
-    _ordinal: ($) =>
-      choice(
-        $.ordinal_suffix,
-        $.integer,
-        $.ordinal_word,
-      ),
-
-    ordinal_word: (_) =>
-      choice(
-        "first", "last",
-        "second", "third", "fourth", "fifth",
-        "sixth", "seventh", "eighth", "ninth", "tenth",
-      ),
-
-    // 1st, 2nd, 3rd, 15th …
-    ordinal_suffix: (_) => token(/[0-9]+(st|nd|rd|th)/),
-
-    date_schedule: ($) =>
-      seq(
-        $.date,
-        repeat(seq($._list_separator, $.date)),
-      ),
-
-    // -----------------------------------------------------------------------
-    // Posting  (inside entry body)
-    //   Assets:Retirement:Seb = expr [as leg_name]
-    //   Income:Gross:Salary:Jim        [as leg_name]
-    // -----------------------------------------------------------------------
-
-    posting: ($) =>
+    move: ($) =>
       prec.right(
         seq(
-          field("account", $.colon_path),
-          optional(seq("=", field("amount", $.posting_amount))),
-          optional(seq("as", field("leg_name", $.identifier))),
+          field("from", $.path),
+          "->",
+          field("to", $.path),
+          ":",
+          field("amount", $._expr),
+          optional(seq("#", field("tag", $.identifier))),
         ),
       ),
 
-    posting_amount: ($) => choice("all", $._expr),
-
-    // -----------------------------------------------------------------------
-    // Colon-separated path  e.g. `Assets:Cash`, `Income:Gross:Salary:Jim`
-    // -----------------------------------------------------------------------
-
-    colon_path: ($) =>
-      seq(
-        $.identifier,
-        repeat(seq(":", $.identifier)),
+    if_stmt: ($) =>
+      prec.right(
+        seq(
+          "if",
+          field("condition", $._expr),
+          field("consequence", $.block),
+          optional(
+            seq("else", field("alternative", choice($.if_stmt, $.block))),
+          ),
+        ),
       ),
+
+    for_stmt: ($) =>
+      seq(
+        "for",
+        field("variable", $.identifier),
+        "in",
+        commaSep1(field("accounts", $.path)),
+        field("body", $.block),
+      ),
+
+    // -----------------------------------------------------------------------
+    // Checks and balances
+    //   check assets.cash >= 0
+    //   check assets.retirement == 24_500 @ 2026-12-31
+    //   balances @ 2026-01-01 { assets.cash = 5_000 }
+    // -----------------------------------------------------------------------
+
+    check_decl: ($) =>
+      prec.right(
+        seq(
+          "check",
+          field("condition", $._expr),
+          optional(seq("@", field("days", $._expr))),
+        ),
+      ),
+
+    balances_decl: ($) =>
+      seq("balances", "@", field("date", $.date), "{", repeat($.balance), "}"),
+
+    balance: ($) =>
+      seq(field("account", $.path), "=", field("value", $._expr)),
+
+    // -----------------------------------------------------------------------
+    // Modules
+    //   mod loans
+    //   mod pay { … }
+    //   mod car = loan(debt: liabilities.loans.car, rate: 6%/year)
+    // -----------------------------------------------------------------------
+
+    mod_decl: ($) =>
+      prec.right(
+        seq(
+          "mod",
+          field("name", $.identifier),
+          optional(
+            choice(
+              seq("{", repeat($._declaration), "}"),
+              seq("=", field("call", $.call_expr)),
+            ),
+          ),
+        ),
+      ),
+
+    // -----------------------------------------------------------------------
+    // Names: `assets.cash`, `loans.rate`, `paycheck.contribution`
+    // -----------------------------------------------------------------------
+
+    path: ($) => prec.right(seq($.identifier, repeat(seq(".", $.identifier)))),
 
     // -----------------------------------------------------------------------
     // Expressions
@@ -372,13 +225,16 @@ module.exports = grammar({
         $.not_expr,
         $.unary_minus,
         $.percent_expr,
-        $.per_expr,
+        $.rate_expr,
+        $.period_expr,
+        $.range_expr,
         $.call_expr,
-        $.agg_expr,
-        $.colon_path,
+        $.path,
         $.integer,
         $.float,
         $.boolean,
+        $.date,
+        $._days,
         $.parenthesized_expr,
       ),
 
@@ -395,8 +251,6 @@ module.exports = grammar({
         ),
       ),
 
-    // Precedence, loosest first: or, and, not, comparisons, + -, * /, unary -,
-    // then the postfix `%` and `per <unit>`.
     binary_expr: ($) => {
       const level = (precedence, operator) =>
         prec.left(
@@ -408,95 +262,125 @@ module.exports = grammar({
           ),
         );
       return choice(
-        level(1, $.or_operator),
-        level(2, $.and_operator),
-        level(4, $.comparison_operator),
-        level(5, $.additive_operator),
-        level(6, $.multiplicative_operator),
+        level(PREC.or, $.or_operator),
+        level(PREC.and, $.and_operator),
+        level(PREC.compare, $.comparison_operator),
+        level(PREC.union, $.union_operator),
+        level(PREC.inter, $.inter_operator),
+        level(PREC.sum, $.additive_operator),
+        level(PREC.product, $.multiplicative_operator),
       );
     },
 
     or_operator: (_) => "or",
     and_operator: (_) => "and",
     comparison_operator: (_) => choice("==", "!=", "<", ">", "<=", ">="),
+    union_operator: (_) => "|",
+    inter_operator: (_) => "&",
     additive_operator: (_) => choice("+", "-"),
     multiplicative_operator: (_) => choice("*", "/"),
 
-    not_expr: ($) => prec(3, seq("not", field("operand", $._expr))),
+    not_expr: ($) => prec(PREC.not, seq("not", field("operand", $._expr))),
 
-    unary_minus: ($) => prec(7, seq("-", field("operand", $._expr))),
+    unary_minus: ($) => prec(PREC.unary, seq("-", field("operand", $._expr))),
 
     // `6.2%` is 0.062.
-    percent_expr: ($) => prec.left(8, seq(field("operand", $._expr), "%")),
+    percent_expr: ($) =>
+      prec.left(PREC.postfix, seq(field("operand", $._expr), "%")),
 
-    // `24_500 per year` is an amount per period.
-    per_expr: ($) =>
+    // `95_000/year`: an amount per period.
+    rate_expr: ($) =>
       prec.left(
-        8,
-        seq(field("value", $._expr), "per", field("unit", $.time_unit)),
+        PREC.product,
+        seq(field("value", $._expr), "/", field("unit", $.time_unit)),
+      ),
+
+    // `24_500[year]` or `paycheck.contribution[year]`: a limit, or a total.
+    period_expr: ($) =>
+      prec.left(
+        PREC.postfix,
+        seq(field("value", $._expr), "[", field("unit", $.time_unit), "]"),
+      ),
+
+    // `2026-01-01..2027-01-01`, `sep..=jun`, `2026..`
+    range_expr: ($) =>
+      prec.left(
+        PREC.range,
+        seq(
+          field("from", $._expr),
+          choice("..", "..="),
+          optional(field("to", $._expr)),
+        ),
       ),
 
     time_unit: (_) => choice("day", "week", "month", "quarter", "year"),
 
+    // A call's `(` comes right after the function's name.
     call_expr: ($) =>
       prec(
-        8,
+        PREC.call,
         seq(
-          field("function", $.identifier),
-          "(",
-          field(
-            "arguments",
-            optional(
-              seq($._expr, repeat(seq(",", $._expr)), optional(",")),
-            ),
-          ),
+          field("function", $.path),
+          token.immediate("("),
+          optional(commaSep1(field("argument", choice($.named_argument, $._expr)))),
           ")",
         ),
       ),
 
-    agg_expr: ($) =>
-      prec(
-        9,
-        choice(
-          seq(
-            field("flow", $.identifier),
-            ".",
-            field("leg", $.identifier),
-            ".",
-            field("kind", $.agg_kind),
-          ),
-          seq(
-            field("leg", $.identifier),
-            ".",
-            field("kind", $.agg_kind),
-          ),
-        ),
-      ),
-
-    agg_kind: (_) => choice("ytd", "qtd", "mtd"),
+    named_argument: ($) =>
+      seq(field("name", $.identifier), ":", field("value", $._expr)),
 
     parenthesized_expr: ($) => seq("(", $._expr, ")"),
 
     // -----------------------------------------------------------------------
-    // Day-of-week names
+    // Sets of days
+    //   *  fri  weekday  15th  last  2nd mon  last fri
+    //   jan  jan 1  feb last  jul 2026  q2  q3 2027  2026-04-15
     // -----------------------------------------------------------------------
+
+    _days: ($) =>
+      choice($.every_day, $.weekday_days, $.month_day, $.month_days, $.quarter_days),
+
+    every_day: (_) => "*",
+
+    weekday_days: ($) => $.day_of_week,
+
+    month_day: ($) =>
+      prec.right(
+        seq(
+          field("day", choice($.ordinal, "last")),
+          optional(field("weekday", $.day_of_week)),
+        ),
+      ),
+
+    month_days: ($) =>
+      prec.right(
+        seq(
+          field("month", $.month_name),
+          optional(field("day", choice($.integer, $.ordinal, "last"))),
+        ),
+      ),
+
+    quarter_days: ($) =>
+      prec.right(seq(field("quarter", $.quarter), optional(field("year", $.integer)))),
+
+    quarter: (_) => choice("q1", "q2", "q3", "q4"),
+
+    // 1st, 2nd, 3rd, 15th …
+    ordinal: (_) => token(/[0-9]+(st|nd|rd|th)/),
 
     day_of_week: (_) =>
       choice(
-        "monday", "mondays", "mon",
-        "tuesday", "tuesdays", "tue",
-        "wednesday", "wednesdays", "wed",
-        "thursday", "thursdays", "thu",
-        "friday", "fridays", "fri",
-        "saturday", "saturdays", "sat",
-        "sunday", "sundays", "sun",
-        "weekday", "weekdays",
+        "monday", "mon",
+        "tuesday", "tue",
+        "wednesday", "wed",
+        "thursday", "thu",
+        "friday", "fri",
+        "saturday", "sat",
+        "sunday", "sun",
+        "weekday",
         "weekend",
       ),
-
-    // -----------------------------------------------------------------------
-    // Month names
-    // -----------------------------------------------------------------------
 
     month_name: (_) =>
       choice(

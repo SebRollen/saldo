@@ -1,129 +1,93 @@
 ; Declaration keywords
 [
-  "account"
-  "param"
-  "schedule"
-  "entry"
-  "assert"
-  "that"
-  "fn"
   "let"
+  "fn"
+  "entry"
+  "check"
+  "balances"
+  "mod"
 ] @keyword
 
-"import" @keyword.import
-
-"return" @keyword.return
-
-; Temporal keywords
+; Entry statements and modifiers
 [
-  "from"
-  "to"
-  "in"
-  "through"
+  "after"
   "compounding"
   "adding"
-] @keyword
-
-; Schedule period keywords
-[
   "every"
-  "daily"
-  "weekly"
-  "monthly"
-  "quarterly"
-  "yearly"
-  "annually"
-  "on"
-  "the"
 ] @keyword
 
-; Day-of-week names
-(day_of_week) @keyword
-
-; Month names and quarters
-(month_name) @keyword
-(quarter) @keyword
-
-; Ordinal words (first, last, second, …)
-(ordinal_word) @keyword
-
-; Posting / binding keyword
-"as" @keyword
-
-; Posting wildcard
-"all" @keyword.builtin
-
-; Aggregation kinds
-(agg_kind) @keyword.builtin
-
-; Boolean literals
-(boolean) @boolean
-
-; Control flow
 [
   "if"
   "then"
   "else"
-] @keyword.control
+] @keyword.control.conditional
 
-; Logical operators. "and" also matches the one in schedule lists like
-; `on the 15th and last`, so `and_operator` keeps it as a child; `or` appears
-; nowhere else, so it's only the named node.
 [
-  "and"
+  "for"
+  "in"
+] @keyword.control.repeat
+
+; Logical operators
+[
+  (and_operator)
   (or_operator)
   "not"
-  "per"
 ] @keyword.operator
 
-; Operators
-[
-  "="
-  "==" "!="
-  "<" ">" "<=" ">="
-  "@"
-  "+" "-" "*" "/" "%"
-] @operator
+; Sets of days
+(day_of_week) @constant
+(month_name) @constant
+(quarter) @constant
+(every_day) @constant
+(month_day "last" @constant)
+(month_days "last" @constant)
+(ordinal) @number
+(wildcard) @constant.builtin
+
+; Units of time
+(time_unit) @type
 
 ; Literals
-(integer)       @number
-(float)         @number.float
-(ordinal_suffix) @number
-(date)          @string.special
-(string)        @string
+(boolean) @boolean
+(integer) @number
+(float) @number.float
+(date) @string.special
+(string) @string
 
 ; Comments
 (comment) @comment
 
+; Accounts start with their kind
+((path . (identifier) @type.builtin)
+  (#any-of? @type.builtin "assets" "liabilities" "income" "expenses" "equity"))
+
 ; Declaration names
-(account_decl  name: (colon_path)  @variable)
-(param_decl    name: (identifier)  @variable)
-(schedule_decl name: (identifier)  @function)
-(entry_decl    alias: (identifier) @function)
-(fn_decl       name: (identifier)  @function)
-(fn_decl       parameter: (identifier) @variable.parameter)
-(let_stmt      name: (identifier)  @variable)
+(let_decl name: (identifier) @variable)
+(let_stmt name: (identifier) @variable)
+(fn_decl name: (identifier) @function)
+(fn_decl parameter: (identifier) @variable.parameter)
+(entry_decl name: (identifier) @function)
+(entry_decl label: (string) @string.special.symbol)
+(mod_decl name: (identifier) @module)
+(for_stmt variable: (identifier) @variable)
+(named_argument name: (identifier) @variable.parameter)
 
-; Entry label string highlighted as a function name (it names the entry)
-(entry_decl label: (string) @function)
+; Tags
+(move "#" @punctuation.special tag: (identifier) @label)
 
-; Posting account path and optional leg label
-(posting account:  (colon_path)  @variable)
-(posting leg_name: (identifier)  @label)
+; Calls
+(call_expr function: (path (identifier) @function.call .))
 
-; Aggregation expressions — flow/leg qualifiers
-(agg_expr flow: (identifier) @variable)
-(agg_expr leg:  (identifier) @variable)
-
-; Named schedule reference in entry/assert
-(schedule_ref (identifier) @function)
-
-; Builtin function calls
-(call_expr function: (identifier) @function.builtin)
-
-; Rate units
-(per_expr unit: (time_unit) @type)
+; Operators
+[
+  "=" "=>" "->"
+  "==" "!=" "<" ">" "<=" ">="
+  "+" "-" "*" "/" "%"
+  (union_operator) (inter_operator)
+  ".." "..="
+  "@"
+] @operator
 
 ; Brackets and delimiters
-[ "{" "}" "(" ")" ] @punctuation.bracket
-[ ":" "," "." ";" ] @punctuation.delimiter
+[ "{" "}" "(" ")" "[" "]" ] @punctuation.bracket
+[ ":" "," "." ] @punctuation.delimiter
