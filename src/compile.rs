@@ -419,6 +419,7 @@ impl Names<'_> {
                     });
                 }
                 ast::Stmt::Return(e) => body.push(Stmt::Return(self.lower(e, &locals))),
+                ast::Stmt::Mod(_) => unreachable!("functions that make modules aren't compiled"),
             }
         }
         Function {
@@ -494,9 +495,10 @@ impl Names<'_> {
                     None => ExprKind::Call(self.fns[name.as_str()], args),
                 }
             }
-            ast::Expr::Ref(_) | ast::Expr::Days(_) | ast::Expr::Range { .. } => {
-                unreachable!("the resolver replaces these")
-            }
+            ast::Expr::Ref(_)
+            | ast::Expr::Days(_)
+            | ast::Expr::Range { .. }
+            | ast::Expr::Named(..) => unreachable!("the resolver replaces these"),
         };
         Expr { kind, span: *span }
     }

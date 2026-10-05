@@ -84,6 +84,39 @@ Names that start accounts (`assets`, `liabilities`, `income`, `expenses`,
 `equity`) or sets of days (like `may`, `fri` or `last`) can't name modules or
 anything else.
 
+## Functions that make modules
+
+A function can make a module, to use the same entries more than once. It ends
+with `mod { … }` instead of a value:
+
+```
+fn loan(debt, interest, rate, payment) {
+  mod {
+    entry repay @ last {
+      let accrued = debt * rate
+      debt        -> interest : accrued
+      assets.cash -> debt     : min(payment, debt + accrued)
+    }
+  }
+}
+
+mod car = loan(
+  debt:     liabilities.loans.car,
+  interest: expenses.interest.car,
+  rate:     6%/year,
+  payment:  600,
+)
+mod furniture = loan(liabilities.loans.furniture, expenses.interest.furniture, 8.5%/year, 640)
+```
+
+`mod car = loan(…)` makes the module `car`, with the function's parameters
+standing for the arguments: `car.repay` moves money out of
+`liabilities.loans.car`, and `furniture.repay` out of
+`liabilities.loans.furniture`. An argument can be an account, a value, a
+number or a set of days, and means what it means where the call is. Inside
+the module, names are looked up in the module and then at the top of the
+model, as in any module; it can't declare a name that's also a parameter.
+
 ## Files
 
 Modules in files follow the same layout as Rust's: `mod pay` in the file you

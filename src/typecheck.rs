@@ -119,6 +119,7 @@ impl<'a> Checker<'a> {
                     self.locals.insert(name.clone(), Ty::Num);
                 }
                 Stmt::Return(e) => ty = self.type_of(e),
+                Stmt::Mod(_) => unreachable!("functions that make modules aren't checked"),
             }
         }
         self.locals = outer;
@@ -200,7 +201,7 @@ impl<'a> Checker<'a> {
                     Some(Ty::Num) // builtins all return numbers
                 }
             }
-            Expr::Ref(_) | Expr::Days(_) | Expr::Range { .. } => {
+            Expr::Ref(_) | Expr::Days(_) | Expr::Range { .. } | Expr::Named(..) => {
                 unreachable!("the resolver replaces these")
             }
         }

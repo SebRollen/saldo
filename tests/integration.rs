@@ -700,6 +700,163 @@ fn fn_arity_mismatch_is_rejected() {
     assert!(has_error(&errors, "`double` takes 1 argument, got 2"));
 }
 
+#[test]
+fn functions_take_arguments_by_name() {
+    let src = "
+        fn net(gross, rate) { gross - gross * rate }
+        entry pay @ last { income.salary -> assets.cash : net(rate: 0.25, gross: 1_000) }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "assets.cash"), usd("750"));
+    let cases = [
+        ("net(1, gross: 2)", "`gross` is given twice"),
+        (
+            "net(gross: 1, 2)",
+            "arguments given by position go before those given by name",
+        ),
+        ("net(gross: 1, tax: 2)", "`net` has no parameter `tax`"),
+        ("net(gross: 1)", "`net` needs `rate`"),
+        ("min(a: 1, b: 2)", "`min` takes its arguments by position"),
+    ];
+    for (call, message) in cases {
+        let src = format!("fn net(gross, rate) {{ gross - gross * rate }}\nlet x = {call}");
+        let errors = run(&src, &opts("2026-01-01", "2026-01-01")).unwrap_err();
+        assert!(has_error(&errors, message), "{call}: {errors:?}");
+    }
+}
+
+const LOAN: &str = "
+    fn loan(debt, interest, rate, payment) {
+      mod {
+        entry repay @ last {
+          let accrued = debt * rate
+          debt        -> interest : accrued
+          assets.cash -> debt     : min(payment, debt + accrued) #paid
+        }
+      }
+    }
+";
+
+#[test]
+fn a_function_can_make_a_module() {
+    let src = format!(
+        "{LOAN}
+        balances @ 2026-01-01 {{
+          liabilities.loans.car       = 1_000
+          liabilities.loans.furniture = 2_000
+        }}
+        mod car = loan(liabilities.loans.car, expenses.interest.car, 12%/year, 300)
+        mod furniture = loan(
+          debt:     liabilities.loans.furniture,
+          interest: expenses.interest.furniture,
+          rate:     6%/year,
+          payment:  500,
+        )
+        check car.repay.paid[year] <= 1_100
+    "
+    );
+    let output = run(&src, &opts("2026-01-01", "2026-12-31")).unwrap();
+    let labels: Vec<&str> = output.log.transactions[..2]
+        .iter()
+        .map(|t| &*t.label)
+        .collect();
+    assert_eq!(labels, ["car.repay", "furniture.repay"]);
+    assert_eq!(postings_to(&output, "expenses.interest.car")[0], usd("10"));
+    assert_eq!(
+        postings_to(&output, "expenses.interest.furniture")[0],
+        usd("10")
+    );
+    // The car loan is paid down by 300 a month, less interest, and paid off
+    // in April.
+    let car: Vec<Decimal> = postings_to(&output, "liabilities.loans.car");
+    assert_eq!(
+        car[..4],
+        [usd("290"), usd("292.90"), usd("295.83"), usd("121.27")]
+    );
+    assert_eq!(car[..4].iter().sum::<Decimal>(), usd("1000"));
+}
+
+#[test]
+fn arguments_mean_what_they_mean_where_the_call_is() {
+    let src = format!(
+        "{LOAN}
+        let rate = 100%/year
+        mod loans {{
+          let rate = 12%/year
+          mod car = loan(liabilities.car, expenses.interest, rate, 0)
+        }}
+        balances @ 2026-01-01 {{ liabilities.car = 1_000 }}
+    "
+    );
+    let output = run(&src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "expenses.interest"), usd("10"));
+    assert_eq!(&*output.log.transactions[0].label, "loans.car.repay");
+}
+
+#[test]
+fn a_function_can_take_a_set_of_days() {
+    let src = "
+        fn bill(account, amount, days) {
+          mod {
+            entry pay @ days { assets.cash -> account : amount }
+          }
+        }
+        mod rent = bill(expenses.rent, 2_000, 1st)
+        mod gym = bill(expenses.gym, 50, 15th | last)
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    let paid: Vec<(NaiveDate, &str)> = output
+        .log
+        .transactions
+        .iter()
+        .map(|t| (t.date, &*t.label))
+        .collect();
+    assert_eq!(
+        paid,
+        [
+            (d("2026-01-01"), "rent.pay"),
+            (d("2026-01-15"), "gym.pay"),
+            (d("2026-01-31"), "gym.pay")
+        ]
+    );
+}
+
+#[test]
+fn module_function_errors() {
+    let cases = [
+        (
+            "mod car = loan(liabilities.car, expenses.x, 1%)",
+            "`loan` needs `payment`",
+        ),
+        (
+            "let x = loan(liabilities.car, expenses.x, 1%, 1)",
+            "`loan` makes a module",
+        ),
+        (
+            "fn f(x) { x }\nmod m = f(1)",
+            "`f` returns a value, not a module",
+        ),
+        ("mod m = nope(1)", "unknown function `nope`"),
+        (
+            "mod car = loan(5, expenses.x, 1%, 1)",
+            "`debt` is used as an account, so it needs one",
+        ),
+        (
+            "fn g(x) { mod { mod again = g(x) } }\nmod m = g(1)",
+            "`g` makes a module that uses `g` itself",
+        ),
+        (
+            "fn h(rate) { mod { let rate = 1 } }\nmod m = h(1)",
+            "`rate` is a parameter or `let` of `h`, so its module can't declare `rate` too",
+        ),
+    ];
+    for (decl, message) in cases {
+        let src = format!("{LOAN}\n{decl}");
+        let errors = run(&src, &opts("2026-01-01", "2026-01-01")).unwrap_err();
+        assert!(has_error(&errors, message), "{decl}: {errors:?}");
+    }
+}
+
 // --- values & opening balances ---
 
 #[test]

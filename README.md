@@ -246,6 +246,23 @@ is written in place. A module's declarations are named by their path, like
 `pay.salary`; inside a module, names are looked up in the module and then at
 the top of the model.
 
+```
+fn loan(debt, rate, payment) {
+  mod {
+    entry repay @ last {
+      debt        -> expenses.interest : debt * rate
+      assets.cash -> debt              : min(payment, debt + debt * rate)
+    }
+  }
+}
+
+mod car = loan(debt: liabilities.loans.car, rate: 6%/year, payment: 600)
+```
+
+A function that ends with `mod { … }` makes a module, so `mod car = loan(…)`
+gives `car.repay`, moving money out of `liabilities.loans.car`. Any call can
+give its arguments by name.
+
 ## Building
 
 ```

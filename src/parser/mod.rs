@@ -81,6 +81,13 @@ impl<'src> Parser<'src> {
             .unwrap_or(&Token::Eof)
     }
 
+    fn peek_next(&self) -> &Token<'src> {
+        self.tokens
+            .get(self.current + 1)
+            .map(|(t, _)| t)
+            .unwrap_or(&Token::Eof)
+    }
+
     fn peek_span(&self) -> Span {
         self.tokens
             .get(self.current)
@@ -357,7 +364,15 @@ impl<'src> Parser<'src> {
             ));
             return None;
         }
-        body.push(Stmt::Return(self.parse_expr()?));
+        if *self.peek() == Token::Mod && *self.peek_next() == Token::LBrace {
+            self.advance();
+            self.advance();
+            let decls = self.parse_decls(true);
+            self.expect(&Token::RBrace)?;
+            body.push(Stmt::Mod(decls));
+        } else {
+            body.push(Stmt::Return(self.parse_expr()?));
+        }
         if *self.peek() != Token::RBrace {
             self.error_here("expected `}` after the function's value");
             return None;
@@ -547,6 +562,16 @@ impl<'src> Parser<'src> {
             let decls = self.parse_decls(true);
             self.expect(&Token::RBrace)?;
             ModBody::Inline(decls)
+        } else if self.eat(&Token::Eq).is_some() {
+            let call = self.parse_expr()?;
+            if !matches!(call.0.as_ref(), Expr::Call(..)) {
+                self.errors.push(Diagnostic::new(
+                    call.1,
+                    "expected a call to a function that makes a module, like `loan(…)`",
+                ));
+                return None;
+            }
+            ModBody::Call(call)
         } else {
             ModBody::File
         };
@@ -824,7 +849,18 @@ impl<'src> Parser<'src> {
         self.expect(&Token::LParen);
         let mut args = Vec::new();
         while !matches!(self.peek(), Token::RParen | Token::Eof) {
-            args.push(self.parse_expr()?);
+            if let Token::Ident(name) = self.peek()
+                && *self.peek_next() == Token::Colon
+            {
+                let name = (name.to_string(), self.peek_span());
+                self.advance();
+                self.advance();
+                let value = self.parse_expr()?;
+                let span = Span::new(name.1.start, value.1.end);
+                args.push((Box::new(Expr::Named(name, value)), span));
+            } else {
+                args.push(self.parse_expr()?);
+            }
             if self.eat(&Token::Comma).is_none() {
                 break;
             }
@@ -994,6 +1030,34 @@ mod tests {
         assert!(
             matches!(&prog.decls[4].0, Decl::Mod { body: ModBody::Inline(decls), .. } if decls.len() == 1)
         );
+    }
+
+    #[test]
+    fn parses_functions_that_make_modules() {
+        let prog = parse_prog(
+            "fn loan(debt, rate) {
+               let monthly = rate / 12
+               mod { entry repay @ last { assets.cash -> debt : 1 } }
+             }
+             mod car = loan(debt: liabilities.car, rate: 5%)",
+        );
+        let Decl::Fn { body, .. } = &prog.decls[0].0 else {
+            panic!("not a function")
+        };
+        assert!(matches!(&body[..], [Stmt::Let { .. }, Stmt::Mod(decls)] if decls.len() == 1));
+        let Decl::Mod {
+            body: ModBody::Call(call),
+            ..
+        } = &prog.decls[1].0
+        else {
+            panic!("not a module made by a call")
+        };
+        let Expr::Call(_, args) = call.0.as_ref() else {
+            panic!("not a call")
+        };
+        assert!(matches!(args[0].0.as_ref(), Expr::Named((name, _), _) if name == "debt"));
+        let errs = parse_errs("mod car = 5");
+        assert!(errs[0].message.contains("expected a call"), "{errs:?}");
     }
 
     #[test]

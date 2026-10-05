@@ -50,8 +50,17 @@ pub type SpannedExpr = Spanned<Box<Expr>>;
 pub struct Path(pub Vec<String>);
 
 impl Path {
+    /// The first part of a path that names something from the top of the
+    /// model, whatever module it's in.
+    pub const ROOT: &'static str = "";
+
     pub fn join(&self) -> String {
-        self.0.join(".")
+        self.0
+            .iter()
+            .skip_while(|part| *part == Self::ROOT)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     /// The account's name in ledger output: each part capitalized, with `_`
@@ -360,6 +369,9 @@ pub enum Expr {
     },
     /// A call. The resolver replaces a user function's path with its full name.
     Call(Path, Vec<SpannedExpr>),
+    /// `name: value`, an argument given by name. The resolver puts arguments
+    /// in order.
+    Named(Spanned<String>, SpannedExpr),
     /// `x / year`: an amount per period.
     Per(SpannedExpr, TimeUnit),
     /// `x[year]`: a total so far this period.
@@ -466,6 +478,8 @@ pub enum Stmt {
     },
     /// The final expression, which the function returns.
     Return(SpannedExpr),
+    /// `mod { … }`, a module the function returns, for `mod x = f(…)`.
+    Mod(Vec<Spanned<Decl>>),
 }
 
 /// `from -> to : amount #tag`.
@@ -528,6 +542,8 @@ pub enum ModBody {
     /// `mod x`: the declarations in another file, until loading reads them.
     File,
     Inline(Vec<Spanned<Decl>>),
+    /// `mod x = f(…)`: the module a function returns, until it's expanded.
+    Call(SpannedExpr),
 }
 
 #[derive(Clone, Debug)]

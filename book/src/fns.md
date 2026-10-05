@@ -43,6 +43,16 @@ entry pay @ last {
 }
 ```
 
+## Arguments by name
+
+Arguments can be given by name, in any order, after any given by position:
+
+```
+fn net(gross, rate) { gross - gross * rate }
+
+let take_home = net(rate: 28%, gross: 120_000)
+```
+
 ## Built-in functions
 
 | Function | Returns |
@@ -75,6 +85,11 @@ fn bonus(salary, target) {
   if target > 0 then salary * 0.1 else 0
 }
 ```
+
+## Functions that make modules
+
+A function that ends with `mod { … }` instead of a value makes a module, for
+`mod x = f(…)`. See [Modules](./modules.md#functions-that-make-modules).
 
 ## Values and balances
 

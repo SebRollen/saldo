@@ -2,6 +2,7 @@ mod ast;
 mod compile;
 mod errors;
 mod eval;
+mod expand;
 mod lexer;
 mod parser;
 mod resolver;

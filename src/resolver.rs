@@ -70,6 +70,7 @@ pub struct Model {
 }
 
 pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
+    let program = crate::expand::expand(program)?;
     let mut resolver = Resolver::default();
     resolver.collect(&[], &program.decls);
     resolver.classify_lets();
@@ -179,6 +180,8 @@ struct Scope<'s> {
 #[derive(Default)]
 struct Resolver<'a> {
     diags: Vec<Diagnostic>,
+    /// The functions that return modules, by full name.
+    module_fns: HashSet<String>,
     /// The names declared in each module, by module path.
     namespaces: HashMap<Vec<String>, HashMap<String, (Symbol, Span)>>,
     lets: Vec<LetDecl<'a>>,
@@ -271,7 +274,9 @@ fn substitute_expr((expr, _): &mut SpannedExpr, placeholder: &Path, account: &Pa
                 *path = account.clone();
             }
         }
-        Expr::Neg(x) | Expr::Not(x) | Expr::Per(x, _) | Expr::Period(x, _) => sub(x),
+        Expr::Neg(x) | Expr::Not(x) | Expr::Per(x, _) | Expr::Period(x, _) | Expr::Named(_, x) => {
+            sub(x)
+        }
         Expr::Bin(a, _, b) => {
             sub(a);
             sub(b);
@@ -328,6 +333,13 @@ impl<'a> Resolver<'a> {
                 }
                 Decl::Fn { name, params, body } => {
                     let full = join(module, &name.0);
+                    if let Some(Stmt::Mod(_)) = body.last() {
+                        // Expanded where it's used; it can't be called for a value.
+                        if self.declare(module, name, Symbol::Fn(full.clone())) {
+                            self.module_fns.insert(full);
+                        }
+                        continue;
+                    }
                     if BUILTINS.iter().any(|(builtin, _)| *builtin == name.0) {
                         self.diags.push(Diagnostic::new(
                             name.1,
@@ -422,6 +434,12 @@ impl<'a> Resolver<'a> {
     /// What `path` names in `module`: a name in the module, or else at the
     /// top of the model, and then names inside that.
     fn lookup(&self, module: &[String], path: &Path, span: Span) -> Result<Target, Diagnostic> {
+        // A path that starts at the top of the model, which only functions'
+        // arguments do, looks up nothing in `module`.
+        let (module, path) = match path.0.split_first() {
+            Some((root, rest)) if root == Path::ROOT => (&[][..], &Path(rest.to_vec())),
+            _ => (module, path),
+        };
         let first = &path.0[0];
         if AccountKind::from_root(first).is_some() {
             return Ok(Target::Account(path.clone()));
@@ -795,6 +813,7 @@ impl<'a> Resolver<'a> {
                 Stmt::Return(value) => {
                     resolved.push(Stmt::Return(self.resolve_expr(value, &scope)))
                 }
+                Stmt::Mod(_) => unreachable!("functions that make modules aren't resolved"),
             }
         }
         self.fns.insert(
@@ -1069,13 +1088,16 @@ impl<'a> Resolver<'a> {
                 then: self.resolve_expr(then, scope),
                 else_: self.resolve_expr(else_, scope),
             },
-            Expr::Call(callee, args) => {
-                let args: Vec<SpannedExpr> =
-                    args.iter().map(|a| self.resolve_expr(a, scope)).collect();
-                match self.resolve_callee(callee, args.len(), span, scope) {
-                    Some(callee) => Expr::Call(callee, args),
-                    None => return e.clone(),
-                }
+            Expr::Call(callee, args) => match self.resolve_call(callee, args, span, scope) {
+                Some(call) => call,
+                None => return e.clone(),
+            },
+            Expr::Named((name, _), _) => {
+                self.diags.push(Diagnostic::new(
+                    span,
+                    format!("only a call's arguments are given by name, like `f({name}: …)`"),
+                ));
+                return e.clone();
             }
             Expr::Per(x, unit) => Expr::Per(self.resolve_expr(x, scope), *unit),
             Expr::Period(x, unit) => match self.resolve_period(x, *unit, span, scope) {
@@ -1143,26 +1165,57 @@ impl<'a> Resolver<'a> {
         None
     }
 
-    fn resolve_callee(
+    /// A call to `callee`, with its arguments in order.
+    fn resolve_call(
         &mut self,
         callee: &Path,
-        args: usize,
+        args: &[SpannedExpr],
         span: Span,
         scope: &Scope,
-    ) -> Option<Path> {
-        let (name, arity) = if let [name] = callee.0.as_slice()
+    ) -> Option<Expr> {
+        let named = args.iter().any(|a| matches!(a.0.as_ref(), Expr::Named(..)));
+        let (name, args) = if let [name] = callee.0.as_slice()
             && let Some((_, arity)) = BUILTINS.iter().find(|(builtin, _)| builtin == name)
         {
-            (name.clone(), *arity)
+            if named {
+                self.diags.push(Diagnostic::new(
+                    span,
+                    format!("`{name}` takes its arguments by position"),
+                ));
+                return None;
+            }
+            if args.len() != *arity {
+                let word = if *arity == 1 { "argument" } else { "arguments" };
+                self.diags.push(Diagnostic::new(
+                    span,
+                    format!("`{callee}` takes {arity} {word}, got {}", args.len()),
+                ));
+                return None;
+            }
+            (name.clone(), args.to_vec())
         } else {
             match self.lookup(scope.module, callee, span) {
+                Ok(Target::Fn(full)) if self.module_fns.contains(&full) => {
+                    self.diags.push(Diagnostic::new(
+                        span,
+                        format!("`{callee}` makes a module; use it like `mod x = {callee}(…)`"),
+                    ));
+                    return None;
+                }
                 Ok(Target::Fn(full)) => {
                     let decl = self
                         .fn_decls
                         .iter()
                         .find(|d| d.full == full)
                         .expect("declared functions are collected");
-                    (full, decl.params.len())
+                    let args = crate::expand::order_args(
+                        &callee.join(),
+                        decl.params,
+                        args,
+                        span,
+                        &mut self.diags,
+                    )?;
+                    (full, args)
                 }
                 Ok(_) => {
                     self.diags.push(Diagnostic::new(
@@ -1178,15 +1231,8 @@ impl<'a> Resolver<'a> {
                 }
             }
         };
-        if args != arity {
-            let word = if arity == 1 { "argument" } else { "arguments" };
-            self.diags.push(Diagnostic::new(
-                span,
-                format!("`{callee}` takes {arity} {word}, got {args}"),
-            ));
-            return None;
-        }
-        Some(Path(vec![name]))
+        let args = args.iter().map(|a| self.resolve_expr(a, scope)).collect();
+        Some(Expr::Call(Path(vec![name]), args))
     }
 
     /// `x[unit]`: what a tag or an account has moved so far this period, or,
@@ -1690,7 +1736,9 @@ pub(crate) fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
         | Expr::Balance(_)
         | Expr::TagTotal { .. }
         | Expr::AccountTotal(..) => {}
-        Expr::Neg(x) | Expr::Not(x) | Expr::Per(x, _) | Expr::Period(x, _) => walk_expr(x, f),
+        Expr::Neg(x) | Expr::Not(x) | Expr::Per(x, _) | Expr::Period(x, _) | Expr::Named(_, x) => {
+            walk_expr(x, f)
+        }
         Expr::Bin(a, _, b) => {
             walk_expr(a, f);
             walk_expr(b, f);
@@ -1728,6 +1776,7 @@ fn fn_call_deps(body: &[Stmt], known: &HashSet<String>) -> Vec<String> {
         match stmt {
             Stmt::Let { value, .. } => walk_expr(value, &mut visitor),
             Stmt::Return(expr) => walk_expr(expr, &mut visitor),
+            Stmt::Mod(_) => {}
         }
     }
     deps.sort();

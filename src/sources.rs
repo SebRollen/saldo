@@ -161,6 +161,8 @@ impl Loader<'_> {
                 let decls = match body {
                     ModBody::Inline(decls) => self.load_modules(decls, sub.as_deref()),
                     ModBody::File => self.load_file(dir, &name, sub.as_deref()),
+                    // Made by a function, which the resolver expands.
+                    call @ ModBody::Call(_) => return (Decl::Mod { name, body: call }, span),
                 };
                 let body = ModBody::Inline(decls);
                 (Decl::Mod { name, body }, span)
