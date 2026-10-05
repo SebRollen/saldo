@@ -4,8 +4,8 @@
 
 use crate::ast::schedule::{self, DaySet, Dow, Month, quarter_from_name};
 use crate::ast::{
-    AccountKind, AggKind, BinOp, Decl, EntryStmt, Expr, Growth, LetBody, ModBody, Move, Path,
-    Program, Schedule, Span, Spanned, SpannedExpr, Stmt, TimeUnit,
+    AccountKind, AggKind, BinOp, Decl, EntryStmt, Expr, Growth, LetBody, ModBody, Move, Opening,
+    Path, Program, Schedule, Span, Spanned, SpannedExpr, Stmt, TimeUnit,
 };
 use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
@@ -31,6 +31,24 @@ pub struct EntryDef {
     /// The entries it fires after, by full name, and where they're named.
     pub after: Vec<(String, Span)>,
     pub span: Span,
+}
+
+/// What a total that a `balances` block sets counts.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Counted {
+    /// A tag, by its entry's full name and its own.
+    Tag(String, String),
+    Account(Path),
+}
+
+/// A total that a `balances` block sets: what `counted` has moved so far in
+/// the `agg` period that contains `date`, as of that day.
+#[derive(Debug, Clone)]
+pub struct Seed {
+    pub counted: Counted,
+    pub agg: AggKind,
+    pub date: NaiveDate,
+    pub value: SpannedExpr,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +83,8 @@ pub struct Model {
     pub fns: IndexMap<String, FnDef>,
     pub entries: Vec<EntryDef>,
     pub checks: Vec<(Schedule, SpannedExpr)>,
+    /// The totals `balances` blocks set.
+    pub seeds: Vec<Seed>,
     /// Problems that don't stop the model from running.
     pub warnings: Vec<Diagnostic>,
 }
@@ -161,9 +181,6 @@ struct EntryDecl<'a> {
     span: Span,
 }
 
-/// An account and its opening balance, in a `balances` block.
-type OpeningBalance = (Spanned<Path>, SpannedExpr);
-
 /// Where the names in an expression resolve.
 struct Scope<'s> {
     module: &'s [String],
@@ -189,7 +206,7 @@ struct Resolver<'a> {
     fn_decls: Vec<FnDecl<'a>>,
     entry_decls: Vec<EntryDecl<'a>>,
     check_decls: Vec<(Vec<String>, &'a SpannedExpr, Option<&'a SpannedExpr>)>,
-    balance_decls: Vec<(Vec<String>, NaiveDate, &'a [OpeningBalance])>,
+    balance_decls: Vec<(Vec<String>, NaiveDate, &'a [Opening])>,
 
     /// Accounts money moves into or out of, and where each is first named.
     leaves: BTreeMap<Path, Span>,
@@ -202,6 +219,7 @@ struct Resolver<'a> {
     fns: HashMap<String, FnDef>,
     entries: Vec<EntryDef>,
     checks: Vec<(Schedule, SpannedExpr)>,
+    seeds: Vec<Seed>,
     warnings: Vec<Diagnostic>,
 }
 
@@ -642,7 +660,12 @@ impl<'a> Resolver<'a> {
         }
         for i in 0..self.balance_decls.len() {
             let (module, date, balances) = self.balance_decls[i].clone();
-            for ((path, span), value) in balances {
+            for opening in balances {
+                let (path, span) = &opening.target;
+                if let Some(unit) = opening.period {
+                    self.resolve_seed(&module, date, opening, unit);
+                    continue;
+                }
                 if !self.account_path(path, *span) {
                     continue;
                 }
@@ -653,7 +676,7 @@ impl<'a> Resolver<'a> {
                     function: None,
                     loops: &[],
                 };
-                let value = self.resolve_expr(value, &scope);
+                let value = self.resolve_expr(&opening.value, &scope);
                 self.leaves.entry(path.clone()).or_insert(*span);
                 let account = self
                     .accounts
@@ -677,6 +700,74 @@ impl<'a> Resolver<'a> {
         if self.diags.is_empty() {
             self.order_entries();
         }
+    }
+
+    /// `x[unit] = value` in a `balances` block in `module` on `date`: what a
+    /// tag or an account has moved so far that period.
+    fn resolve_seed(
+        &mut self,
+        module: &[String],
+        date: NaiveDate,
+        opening: &Opening,
+        unit: TimeUnit,
+    ) {
+        let (path, span) = &opening.target;
+        let Some(agg) = AggKind::from_unit(unit) else {
+            self.diags.push(Diagnostic::new(
+                *span,
+                format!("totals are kept for a year, quarter or month, not a {unit}"),
+            ));
+            return;
+        };
+        let counted = match self.lookup(module, path, *span) {
+            Ok(Target::Tag(entry, tag)) => Counted::Tag(entry, tag),
+            Ok(Target::Account(path)) => {
+                if !self.account_path(&path, *span) {
+                    return;
+                }
+                self.leaves.entry(path.clone()).or_insert(*span);
+                Counted::Account(path)
+            }
+            Ok(_) => {
+                self.diags.push(Diagnostic::new(
+                    *span,
+                    format!(
+                        "`{path}` has no total; only tags and accounts do, like \
+                         `paycheck.contribution[year]`"
+                    ),
+                ));
+                return;
+            }
+            Err(diag) => {
+                self.diags.push(diag);
+                return;
+            }
+        };
+        if self
+            .seeds
+            .iter()
+            .any(|s| s.counted == counted && s.agg == agg && s.date == date)
+        {
+            self.diags.push(Diagnostic::new(
+                *span,
+                format!("`{path}[{unit}]` is already set on {date}"),
+            ));
+            return;
+        }
+        let scope = Scope {
+            module,
+            locals: &[],
+            entry: None,
+            function: None,
+            loops: &[],
+        };
+        let value = self.resolve_expr(&opening.value, &scope);
+        self.seeds.push(Seed {
+            counted,
+            agg,
+            date,
+            value,
+        });
     }
 
     fn resolve_let(&mut self, i: usize) {
@@ -1624,6 +1715,7 @@ impl<'a> Resolver<'a> {
             fns: topo_sort_by_deps(self.fns, |def, known| fn_call_deps(&def.body, known)),
             entries: self.entries,
             checks: self.checks,
+            seeds: self.seeds,
             warnings: self.warnings,
         }
     }

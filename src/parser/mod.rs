@@ -2,8 +2,8 @@ mod days;
 
 use crate::Span;
 use crate::ast::{
-    Arm, BinOp, Decl, EntryStmt, Expr, Growth, GrowthKind, LetBody, ModBody, Move, Path, Program,
-    Spanned, SpannedExpr, Stmt, TimeUnit,
+    Arm, BinOp, Decl, EntryStmt, Expr, Growth, GrowthKind, LetBody, ModBody, Move, Opening, Path,
+    Program, Spanned, SpannedExpr, Stmt, TimeUnit,
 };
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
@@ -545,12 +545,27 @@ impl<'src> Parser<'src> {
         self.expect(&Token::LBrace)?;
         let mut balances = Vec::new();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-            let Some(path) = self.try_parse_path() else {
-                self.error_here("expected an account, like `assets.cash = 1_000`");
+            let Some(target) = self.try_parse_path() else {
+                self.error_here(
+                    "expected an account, like `assets.cash = 1_000`, or a total, like \
+                     `paycheck.contribution[year] = 1_000`",
+                );
                 return None;
             };
+            let period = if self.eat(&Token::LBracket).is_some() {
+                let unit = self.parse_unit("`[`")?;
+                self.expect(&Token::RBracket)?;
+                Some(unit)
+            } else {
+                None
+            };
             self.expect(&Token::Eq)?;
-            balances.push((path, self.parse_expr()?));
+            let value = self.parse_expr()?;
+            balances.push(Opening {
+                target,
+                period,
+                value,
+            });
         }
         self.expect(&Token::RBrace)?;
         Some(Decl::Balances { date, balances })
@@ -1007,6 +1022,7 @@ mod tests {
              balances @ 2026-01-01 {
                assets.cash = 5_000
                liabilities.loan = 30_000
+               pay.contribution[year] = 1_000
              }
              mod loans
              mod home { let rent = 3_000/month }",
@@ -1019,7 +1035,8 @@ mod tests {
         let Decl::Balances { balances, .. } = &prog.decls[2].0 else {
             panic!("not balances")
         };
-        assert_eq!(balances.len(), 2);
+        assert_eq!(balances.len(), 3);
+        assert_eq!(balances[2].period, Some(TimeUnit::Year));
         assert!(matches!(
             &prog.decls[3].0,
             Decl::Mod {

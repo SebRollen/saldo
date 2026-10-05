@@ -186,7 +186,8 @@ rate pays half a year's salary to a job that starts in July, a limit
 contributes the whole year's 24,500 over its paydays.
 
 A limit and a total over the same period are both amounts in the current
-period, so they combine:
+period, so they combine. A limit and a rate don't, but each turns into the
+other:
 
 | Expression | Is |
 |------------|----|
@@ -194,6 +195,7 @@ period, so they combine:
 | `contribution[year] <= max_401k` | a check that the limit hasn't been passed |
 | `max_401k * prices`, `max_401k / 2` | a limit each year |
 | `salary[year]` | a limit each year: a rate's amount for the whole year |
+| `max_401k/year` | a rate per year: a limit's amount, spread over the year |
 
 ## Using values
 

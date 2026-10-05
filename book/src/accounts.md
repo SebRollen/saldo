@@ -97,6 +97,24 @@ Each can be an expression, evaluated on its date: it can use values, and
 accounts that are already open, but not accounts that open later.
 An account opens once, so it can only be in one `balances` block.
 
+### Totals so far
+
+A `balances` block can also say what an account, or a tag (see
+[Entries](./entries.md#tags-and-totals)), has moved so far in the year,
+quarter or month that contains its date:
+
+```
+balances @ 2026-10-02 {
+  income.salary[year] = 165_000
+  pay.paycheck.contribution[year] = 18_375
+}
+```
+
+Totals otherwise start at zero when the simulation does, so this is how a
+model that starts in October knows what was earned, or contributed toward a
+[limit](./values.md#limits), earlier in the year. Each total counts on from
+there, and resets at the start of the next period as usual.
+
 ### Referencing accounts before they open
 
 Reading or moving money into an account before its opening date is an error:

@@ -573,12 +573,21 @@ pub enum Decl {
     },
     Balances {
         date: NaiveDate,
-        balances: Vec<(Spanned<Path>, SpannedExpr)>,
+        balances: Vec<Opening>,
     },
     Mod {
         name: Spanned<String>,
         body: ModBody,
     },
+}
+
+/// A line of a `balances` block: an account's balance, or, with a period,
+/// what an account or a tag has moved so far that period.
+#[derive(Clone, Debug)]
+pub struct Opening {
+    pub target: Spanned<Path>,
+    pub period: Option<TimeUnit>,
+    pub value: SpannedExpr,
 }
 
 #[derive(Clone, Debug)]

@@ -2,7 +2,7 @@ use crate::ast::schedule::Share;
 use crate::ast::{AggKind, BinOp, EntryStmt, Expr, GrowthKind, Path, Span, SpannedExpr, TimeUnit};
 use crate::compile::{Builtin, ExprKind, Function, Growth, Program, Stmt};
 use crate::errors::Diagnostic;
-use crate::resolver::{Model, ParamBody, walk_expr};
+use crate::resolver::{Counted, Model, ParamBody, walk_expr};
 use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
@@ -71,11 +71,6 @@ impl Model {
             display: String,
             span: Span,
         }
-        #[derive(PartialEq, Eq, Hash, Clone)]
-        enum Counted {
-            Tag(String, String),
-            Account(Path),
-        }
         let mut aggregates: Vec<Aggregate> = Vec::new();
         let mut collect = |e: &SpannedExpr| {
             walk_expr(e, &mut |sub| match sub.0.as_ref() {
@@ -127,6 +122,15 @@ impl Model {
             if !warned.insert((agg.counts.clone(), agg.kind)) {
                 continue;
             }
+            // A `balances` block may say what it was then.
+            let period = agg.kind.period_start(first_day);
+            if self.seeds.iter().any(|s| {
+                s.counted == agg.counts
+                    && s.agg == agg.kind
+                    && agg.kind.period_start(s.date) == period
+            }) {
+                continue;
+            }
             let counted = self.entries.iter().filter(|e| match &agg.counts {
                 Counted::Tag(entry, _) => e.name == *entry,
                 Counted::Account(path) => {
@@ -160,8 +164,8 @@ impl Model {
                     .with_note(
                         agg.span,
                         format!(
-                            "`{}` would have fired on {missed}; simulate from {period_start} \
-                             (or open an account by then) to include it",
+                            "`{}` would have fired on {missed}; simulate from {period_start}, \
+                             or say what was moved by then with a total in a `balances` block",
                             entry.label
                         ),
                     ),
@@ -181,6 +185,15 @@ impl Program {
             .filter_map(|fill| {
                 let entry = &self.entries[fill.entry];
                 let period_start = fill.unit.period_start(first_day);
+                // A `balances` block may say what its tag had moved then.
+                let seeded = |seed: &crate::compile::Seed| {
+                    matches!(seed.counted, crate::compile::Counted::Tag(tag) if Some(tag) == fill.tag)
+                        && seed.agg.unit() == fill.unit
+                        && fill.unit.period_start(seed.date) == period_start
+                };
+                if self.seeds.iter().any(seeded) {
+                    return None;
+                }
                 let missed = period_start
                     .iter_days()
                     .take_while(|d| *d < first_day)
@@ -193,8 +206,8 @@ impl Program {
                     .with_note(
                         fill.span,
                         format!(
-                            "`{}` would have fired on {missed}; simulate from {period_start} \
-                             (or open an account by then) to include it",
+                            "`{}` would have fired on {missed}; simulate from {period_start}, \
+                             or say what was moved by then with a total in a `balances` block",
                             entry.label
                         ),
                     ),
@@ -292,8 +305,10 @@ impl Program {
             state.reset_periods(t);
             state.evaluate_params();
 
-            // Initialize accounts whose opening date is today.
+            // Initialize accounts whose opening date is today, and the
+            // totals that start then.
             let opened = state.open_accounts()?;
+            state.set_totals()?;
 
             // Capture opening balances at the start of the user's simulation range,
             // after any accounts that open today are initialized but before entries fire.
@@ -524,6 +539,24 @@ impl State<'_> {
             }
         }
         Ok(opened)
+    }
+
+    /// Sets the totals that `balances` blocks give for today.
+    fn set_totals(&mut self) -> Result<(), Diagnostic> {
+        for seed in &self.program.seeds {
+            if seed.date != self.date {
+                continue;
+            }
+            let value = to_amount(self.eval_num(&seed.value, &[])?);
+            let period = period_index(seed.agg);
+            match seed.counted {
+                crate::compile::Counted::Tag(tag) => self.totals[tag][period] = value,
+                crate::compile::Counted::Account(account, sign) => {
+                    self.account_totals[account][period] = value * sign;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Fires entry `index`, returning its transaction unless it moved no money.
@@ -1069,9 +1102,14 @@ impl State<'_> {
     ) -> Result<Decimal, Diagnostic> {
         let entry = self.firing.expect("only entries fill");
         let start = unit.period_start(self.date);
-        let posted = match self.fills[fill] {
-            (period, posted) if period == start => posted,
-            _ => Decimal::ZERO,
+        // What's been moved this period: the total of the move's tag, which a
+        // `balances` block can set, or else what the move has moved.
+        let posted = match (self.program.fills[fill].tag, AggKind::from_unit(unit)) {
+            (Some(tag), Some(agg)) => self.total(tag, agg, span)?,
+            _ => match self.fills[fill] {
+                (period, posted) if period == start => posted,
+                _ => Decimal::ZERO,
+            },
         };
         // The schedule fires today, so this is at least 1.
         let left = self.program.entries[entry]

@@ -225,6 +225,16 @@
           }
         ]
       },
+      "unit": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "time_unit",
+            "named": true
+          }
+        ]
+      },
       "value": {
         "multiple": false,
         "required": true,

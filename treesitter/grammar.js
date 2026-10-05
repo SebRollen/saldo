@@ -169,7 +169,7 @@ module.exports = grammar({
     // Checks and balances
     //   check assets.cash >= 0
     //   check assets.retirement == 24_500 @ 2026-12-31
-    //   balances @ 2026-01-01 { assets.cash = 5_000 }
+    //   balances @ 2026-01-01 { assets.cash = 5_000  pay.k401[year] = 1_000 }
     // -----------------------------------------------------------------------
 
     check_decl: ($) =>
@@ -184,8 +184,14 @@ module.exports = grammar({
     balances_decl: ($) =>
       seq("balances", "@", field("date", $.date), "{", repeat($.balance), "}"),
 
+    // `assets.cash = 5_000`, or a total so far: `pay.contribution[year] = 1_000`
     balance: ($) =>
-      seq(field("account", $.path), "=", field("value", $._expr)),
+      seq(
+        field("account", $.path),
+        optional(seq("[", field("unit", $.time_unit), "]")),
+        "=",
+        field("value", $._expr),
+      ),
 
     // -----------------------------------------------------------------------
     // Modules

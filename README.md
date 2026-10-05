@@ -116,6 +116,10 @@ moves money into or out of it, or because `balances` gives it an opening
 balance. A path with accounts under it, like `assets.retirement`, is a group,
 and reading it gives their sum.
 
+A `balances` block can also say what an account or a tag has moved so far this
+year, quarter or month, like `pay.paycheck.contribution[year] = 18_375`, for a
+model that starts partway through a year.
+
 Every account reads positive the way you'd say it: what you own, what you owe,
 what you've earned or spent. Ledger output keeps ledger's signs, and each part
 of a name is capitalized: `liabilities.accrued_interest` is

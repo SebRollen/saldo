@@ -18,8 +18,9 @@ Accounts without an opening balance start at zero on the first simulated day.
 Totals like `pay.contribution[year]` also start at zero on the first simulated
 day. If that day falls partway through a period and an entry the total counts
 would already have fired earlier in it, saldo warns that the total is missing
-amounts. To fix it, simulate from the start of the period, or open an account
-by then so the warm-up covers it.
+amounts. To fix it, simulate from the start of the period, open an account by
+then so the warm-up covers it, or say what the total was in a `balances` block
+(see [Accounts](./accounts.md#totals-so-far)).
 
 ## Each day
 

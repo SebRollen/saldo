@@ -122,6 +122,15 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
         checker.entry(index, &mut entry.body, &mut locals);
     }
     checker.posting = None;
+    for seed in &mut program.seeds {
+        if let Some(kind @ (Kind::Rate(_) | Kind::Limit(_))) = checker.kind(&mut seed.value, GLOBAL)
+        {
+            checker.error(Diagnostic::new(
+                seed.value.span,
+                format!("a total must be an amount, but this is {kind}"),
+            ));
+        }
+    }
     for (_, e) in &mut program.checks {
         checker.kind(e, GLOBAL);
     }
@@ -368,7 +377,8 @@ impl Checker<'_> {
     fn per(&mut self, x: &mut Expr, found: Kind, unit: TimeUnit, span: Span) -> Option<Kind> {
         let message = match found {
             Kind::Number | Kind::Amount => return Some(Kind::Rate(unit)),
-            Kind::Rate(from) => match from.conversion_to(unit) {
+            // A limit becomes a rate of its amount each period.
+            Kind::Rate(from) | Kind::Limit(from) => match from.conversion_to(unit) {
                 // Function bodies are shared by every call, so they can't
                 // convert a rate that's only per month in some.
                 Some((mul, div)) if self.calls.is_empty() => {
@@ -391,9 +401,6 @@ impl Checker<'_> {
                 "`/{unit}` can't apply to {found}, which is an amount so far, \
                  not per period"
             ),
-            Kind::Limit(_) => {
-                format!("`/{unit}` can't apply to {found}, which is an amount for each period")
-            }
         };
         self.error(Diagnostic::new(span, message));
         None
@@ -441,9 +448,14 @@ impl Checker<'_> {
     /// Wraps `e`, an amount each `unit` that a move moves, in a
     /// [`ExprKind::Fill`], which warnings about it point at `span`.
     fn make_fill(&mut self, e: &mut Expr, unit: TimeUnit, span: Span) -> Kind {
-        let (entry, _) = self.posting.expect("only moves fill");
+        let (entry, tag) = self.posting.expect("only moves fill");
         let slot = self.fills.len();
-        self.fills.push(Fill { entry, unit, span });
+        self.fills.push(Fill {
+            entry,
+            tag,
+            unit,
+            span,
+        });
         self.posting_fills.push(slot);
         wrap(e, |inner| ExprKind::Fill(inner, unit, slot));
         Kind::Amount

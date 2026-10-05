@@ -292,8 +292,12 @@ The job starts in July, so its 13 paydays in 2026 contribute 24,500 between
 them, while the salary, which is spread, pays half a year. From 2027 there are
 26 paydays, and each contributes a 26th.
 
-What's left is the limit minus what the move has already moved this period,
-so if an earlier firing moves less, later ones make up the difference. A limit
+What's left is the limit minus what's been moved toward it this period: the
+total of the move's tag, if it has one, or else what the move has moved. So if
+an earlier firing moves less, later ones make up the difference, and a model
+that starts partway through a year can say what was contributed before it in a
+`balances` block, like `new_job.contribution[year] = 6_000` (see
+[Accounts](./accounts.md#totals-so-far)). A limit
 can be all of what a move moves, or what `min`, `max` or `if` pick for it,
 like `max(max_401k, 0)`. Like a `[year]` total, it only knows what was moved
 since the simulation started, so saldo warns if it starts partway through a

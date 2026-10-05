@@ -25,14 +25,32 @@ pub struct Program {
     pub tags: Vec<Tag>,
     /// Each `fill` in a move. The units pass adds these.
     pub fills: Vec<Fill>,
+    pub seeds: Vec<Seed>,
 }
 
 /// A `fill` in one of `entry`'s moves, which tracks what the move has moved
 /// in the current `unit`.
 pub struct Fill {
     pub entry: usize,
+    /// The tag of the move, whose total is what's been moved so far.
+    pub tag: Option<usize>,
     pub unit: TimeUnit,
     pub span: Span,
+}
+
+/// A total that a `balances` block sets: what a tag or an account has moved
+/// so far in the `agg` period containing `date`, as of that day.
+pub struct Seed {
+    pub counted: Counted,
+    pub agg: AggKind,
+    pub date: NaiveDate,
+    pub value: Expr,
+}
+
+pub enum Counted {
+    Tag(usize),
+    /// An account, and what its ledger balance is multiplied by to read it.
+    Account(usize, Decimal),
 }
 
 pub struct Param {
@@ -331,6 +349,24 @@ pub fn compile(model: &Model) -> Program {
             .checks
             .iter()
             .map(|(schedule, e)| (schedule.clone(), names.lower(e, &[])))
+            .collect(),
+        seeds: model
+            .seeds
+            .iter()
+            .map(|seed| Seed {
+                counted: match &seed.counted {
+                    crate::resolver::Counted::Tag(entry, tag) => {
+                        Counted::Tag(names.tags[&(entry.as_str(), tag.as_str())])
+                    }
+                    crate::resolver::Counted::Account(path) => Counted::Account(
+                        names.account(path),
+                        path.account_kind().expect("accounts have kinds").sign(),
+                    ),
+                },
+                agg: seed.agg,
+                date: seed.date,
+                value: names.lower(&seed.value, &[]),
+            })
             .collect(),
         tags,
         fills: Vec::new(),

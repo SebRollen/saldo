@@ -2223,6 +2223,97 @@ fn a_limit_is_filled_over_the_firings_left() {
 }
 
 #[test]
+fn balances_can_say_what_a_tag_has_moved_so_far() {
+    // Starting in October, with 18,000 of the year's 24,000 already in.
+    let src = "
+        let max_401k = 24_000[year]
+        entry paycheck @ 15th | last {
+          income.salary -> assets.cash       : 5_000
+          assets.cash   -> assets.retirement : max_401k #contribution
+        }
+        balances @ 2026-10-01 {
+          assets.cash = 0
+          paycheck.contribution[year] = 18_000
+        }
+        check paycheck.contribution[year] == 24_000 @ 2026-12-31
+    ";
+    let output = run(src, &opts("2026-10-01", "2027-01-31")).unwrap();
+    assert!(output.warnings.is_empty(), "{:?}", output.warnings);
+    let contributions = postings_to(&output, "assets.retirement");
+    // The 6,000 left over the year's last six paychecks, then a 24th of 2027's.
+    assert_eq!(contributions[..6], [usd("1000"); 6]);
+    assert_eq!(contributions[6], usd("1000"));
+    // Without the total, the whole year's limit goes into the last three
+    // months, and saldo warns that it doesn't know what came before.
+    let unset = src.replace("paycheck.contribution[year] = 18_000", "");
+    let output = run(&unset, &opts("2026-10-01", "2026-10-31")).unwrap();
+    assert_eq!(postings_to(&output, "assets.retirement"), [usd("4000"); 2]);
+    assert_eq!(
+        output.warnings[0].message,
+        "what's left here doesn't count what was moved before 2026-10-01"
+    );
+}
+
+#[test]
+fn balances_can_say_what_an_account_has_moved_so_far() {
+    let src = "
+        entry paycheck @ last { income.salary -> assets.cash : 10_000 }
+        balances @ 2026-10-02 {
+          income.salary[year] = 90_000
+          income.salary[quarter] = 0
+        }
+        check income.salary[year] == 120_000 and income.salary[quarter] == 30_000 @ 2026-12-31
+    ";
+    let output = run(src, &opts("2026-10-02", "2026-12-31")).unwrap();
+    assert!(output.warnings.is_empty(), "{:?}", output.warnings);
+}
+
+#[test]
+fn totals_in_balances_must_be_totals() {
+    let cases = [
+        ("balances @ 2026-01-01 { pay.t[week] = 1 }", "not a week"),
+        (
+            "balances @ 2026-01-01 { salary[year] = 1 }",
+            "`salary` has no total",
+        ),
+        (
+            "balances @ 2026-01-01 { pay.t[year] = 1\n pay.t[year] = 2 }",
+            "`pay.t[year]` is already set on 2026-01-01",
+        ),
+        (
+            "balances @ 2026-01-01 { pay.t[year] = salary }",
+            "a total must be an amount",
+        ),
+    ];
+    for (decl, message) in cases {
+        let src = format!(
+            "let salary = 1/year\nentry pay @ last {{ income.a -> assets.b : 1 #t }}\n{decl}"
+        );
+        let errors = run(&src, &opts("2026-01-01", "2026-01-01")).unwrap_err();
+        assert!(has_error(&errors, message), "{decl}: {errors:?}");
+    }
+}
+
+#[test]
+fn a_limit_becomes_a_rate_with_a_unit() {
+    let src = "
+        let salary   = 120_000/year
+        let max_401k = 24_000[year]
+        let taxable  = salary - max_401k/year
+        entry pay @ last { income.salary -> assets.cash : taxable }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
+    assert_eq!(posting(&output, 0, "assets.cash"), usd("8000"));
+    // A limit and a rate don't mix without it.
+    let src = src.replace("max_401k/year", "max_401k");
+    let errors = run(&src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
+    assert!(has_error(
+        &errors,
+        "`-` mixes an amount per year with an amount each year"
+    ));
+}
+
+#[test]
 fn a_rate_becomes_a_limit_with_a_period() {
     let src = "
         let salary = 10_000/month

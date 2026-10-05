@@ -478,9 +478,9 @@ fn substitute_decls(decls: &mut [Spanned<Decl>], bindings: &Bindings, diags: &mu
                 }
             }
             Decl::Balances { balances, .. } => {
-                for (account, value) in balances {
-                    substitute_path(account, bindings, diags);
-                    substitute(value, bindings, diags);
+                for opening in balances {
+                    substitute_path(&mut opening.target, bindings, diags);
+                    substitute(&mut opening.value, bindings, diags);
                 }
             }
             Decl::Mod { body, .. } => match body {
