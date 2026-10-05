@@ -77,7 +77,8 @@ earlier ones moved.
 
 ## `let`
 
-`let` names a value for the rest of the entry, worked out each time it fires:
+`let` names a value for the rest of the entry, worked out each time it fires.
+Unlike a [value](./values.md), it can read balances and totals:
 
 ```
 let rate = 6%/year
@@ -162,10 +163,12 @@ In detail:
   entry on `2026-01-02.. & fri / 2` moves two weeks of a rate per week, and an
   entry on `2026-03-17.. & last` first moves March 17 to 31 of a rate per day.
   Months the entry's days leave out don't roll in (see
-  [Sets of days](./schedules.md#keeping-some-months)). Those that do get the
-  rate's value on the day the entry fires, so if a value it reads changes
-  during them, that's an error (see
-  [Values](./values.md#values-that-change-over-time)).
+  [Sets of days](./schedules.md#keeping-some-months)). Each period that rolls
+  in gets its own amount, from its last day, so a raise in February is in a
+  quarterly entry's February. A rate that reads a balance, like
+  `liabilities.loan * interest`, only has today's value, though, so if a
+  value it reads changes during those periods, that's an error: fire the entry
+  at least once a period.
 
 The last rule gives you the other common way of paying a yearly salary
 biweekly: the same amount every payday, so that a year with 27 paydays pays

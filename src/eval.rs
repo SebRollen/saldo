@@ -284,12 +284,8 @@ impl Program {
             state.reset_periods(t);
             state.evaluate_params();
 
-            // Initialize accounts whose opening date is today. Params may read the
-            // new balances, so re-evaluate them if anything opened.
+            // Initialize accounts whose opening date is today.
             let opened = state.open_accounts()?;
-            if !opened.is_empty() {
-                state.evaluate_params();
-            }
 
             // Capture opening balances at the start of the user's simulation range,
             // after any accounts that open today are initialized but before entries fire.
@@ -322,9 +318,8 @@ impl Program {
                 if !entry.schedule.matches(t) {
                     continue;
                 }
-                let tx = state.fire(i)?;
                 // Later entries and today's checks see what this one moved.
-                state.evaluate_params();
+                let tx = state.fire(i)?;
                 if let Some(tx) = tx
                     && report
                 {
@@ -407,8 +402,9 @@ impl State<'_> {
         Ok(())
     }
 
-    /// Evaluates every param for today. Failures are recorded rather than
-    /// returned, so they only abort the simulation if the param is actually read.
+    /// Evaluates every value for today. Values depend only on the date, so
+    /// this happens once a day. Failures are recorded rather than returned,
+    /// so they only abort the simulation if the value is actually read.
     fn evaluate_params(&mut self) {
         self.params.clear();
         let program = self.program;
@@ -466,7 +462,7 @@ impl State<'_> {
                 .every
                 .after(growth.anchor, n)
                 .expect("a step that's been taken has a date");
-            let by = self.value_on(&growth.by, on)?;
+            let by = self.eval_num_at(&growth.by, &[], on)?;
             total = match growth.kind {
                 GrowthKind::Compounding => Decimal::ONE
                     .checked_add(by)
@@ -480,44 +476,29 @@ impl State<'_> {
         Ok(total)
     }
 
-    /// The value on `date` of `e`, which the resolver checks only uses
-    /// numbers and params made of numbers.
-    fn value_on(&self, e: &crate::compile::Expr, date: NaiveDate) -> Result<Decimal, Diagnostic> {
-        match &e.kind {
-            ExprKind::Num(n) => Ok(*n),
-            ExprKind::Neg(x) => Ok(-self.value_on(x, date)?),
-            ExprKind::Per(x, _) => self.value_on(x, date),
-            ExprKind::Bin(a, op, b) => {
-                let (a, b) = (self.value_on(a, date)?, self.value_on(b, date)?);
-                match apply_binop(*op, Value::Num(a), Value::Num(b), e.span)? {
-                    Value::Num(n) => Ok(n),
-                    Value::Bool(_) => unreachable!("the typechecker makes growth rates numbers"),
-                }
+    /// The value of `param` on `date`, which values can be evaluated on
+    /// because they depend on nothing but the date.
+    fn param_on(&self, param: usize, date: NaiveDate, span: Span) -> Result<Decimal, Diagnostic> {
+        let name = &self.program.params[param].name;
+        match &self.program.params[param].body {
+            crate::compile::ParamBody::Const(e) => self.eval_num_at(e, &[], date),
+            crate::compile::ParamBody::Arms(arms) => {
+                let Some(arm) = arms.iter().find(|arm| arm.when.contains(date)) else {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "`{name}` has no value on {date}: none of its arms cover this date"
+                        ),
+                    ));
+                };
+                let base = self.eval_num_at(&arm.value, &[], date)?;
+                let Some(growth) = &arm.growth else {
+                    return Ok(base);
+                };
+                let steps = growth.every.steps(growth.anchor, date);
+                let total = self.take_steps(growth, 0, steps, no_growth(growth))?;
+                apply_growth(growth, base, total)
             }
-            ExprKind::Param(param) => {
-                let name = &self.program.params[*param].name;
-                match &self.program.params[*param].body {
-                    crate::compile::ParamBody::Const(e) => self.value_on(e, date),
-                    crate::compile::ParamBody::Arms(arms) => {
-                        let Some(arm) = arms.iter().find(|arm| arm.when.contains(date)) else {
-                            return Err(Diagnostic::new(
-                                e.span,
-                                format!(
-                                    "`{name}` has no value on {date}: none of its arms cover this date"
-                                ),
-                            ));
-                        };
-                        let base = self.value_on(&arm.value, date)?;
-                        let Some(growth) = &arm.growth else {
-                            return Ok(base);
-                        };
-                        let steps = growth.every.steps(growth.anchor, date);
-                        let total = self.take_steps(growth, 0, steps, no_growth(growth))?;
-                        apply_growth(growth, base, total)
-                    }
-                }
-            }
-            _ => unreachable!("the resolver checks growth rates only use numbers and params"),
         }
     }
 
@@ -667,7 +648,16 @@ impl State<'_> {
         expr: &crate::compile::Expr,
         locals: &[Decimal],
     ) -> Result<Decimal, Diagnostic> {
-        match self.eval(expr, locals)? {
+        self.eval_num_at(expr, locals, self.date)
+    }
+
+    fn eval_num_at(
+        &self,
+        expr: &crate::compile::Expr,
+        locals: &[Decimal],
+        date: NaiveDate,
+    ) -> Result<Decimal, Diagnostic> {
+        match self.eval_at(expr, locals, date)? {
             Value::Num(n) => Ok(n),
             Value::Bool(_) => Err(Diagnostic::new(
                 expr.span,
@@ -676,10 +666,22 @@ impl State<'_> {
         }
     }
 
-    /// Evaluates `expr`; `locals` holds the current function's parameters and
-    /// `let` bindings (empty outside functions).
+    /// Evaluates `expr` today; `locals` holds the current function's or
+    /// entry's parameters and `let`s.
     fn eval(&self, expr: &crate::compile::Expr, locals: &[Decimal]) -> Result<Value, Diagnostic> {
+        self.eval_at(expr, locals, self.date)
+    }
+
+    /// Evaluates `expr` on `date`. Only what depends on nothing but the date,
+    /// like values, can be evaluated on a day other than today.
+    fn eval_at(
+        &self,
+        expr: &crate::compile::Expr,
+        locals: &[Decimal],
+        date: NaiveDate,
+    ) -> Result<Value, Diagnostic> {
         let span = expr.span;
+        let eval = |e| self.eval_at(e, locals, date);
         match &expr.kind {
             ExprKind::Num(n) => Ok(Value::Num(*n)),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
@@ -690,7 +692,8 @@ impl State<'_> {
             } => self
                 .balance_of(accounts, *sign, *group, span)
                 .map(Value::Num),
-            ExprKind::Param(param) => self.param(*param, span),
+            ExprKind::Param(param) if date == self.date => self.param(*param, span),
+            ExprKind::Param(param) => self.param_on(*param, date, span).map(Value::Num),
             ExprKind::Local(slot) => Ok(Value::Num(locals[*slot])),
             ExprKind::Total(tag, kind) => self.total(*tag, *kind, span).map(Value::Num),
             ExprKind::AccountTotal {
@@ -700,14 +703,14 @@ impl State<'_> {
             } => self
                 .account_total(accounts, *sign, *agg, span)
                 .map(Value::Num),
-            ExprKind::Neg(x) => match self.eval(x, locals)? {
+            ExprKind::Neg(x) => match eval(x)? {
                 Value::Num(n) => Ok(Value::Num(-n)),
                 _ => Err(Diagnostic::new(
                     span,
                     "unary minus requires a numeric operand",
                 )),
             },
-            ExprKind::Not(x) => match self.eval(x, locals)? {
+            ExprKind::Not(x) => match eval(x)? {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
                 _ => Err(Diagnostic::new(span, "`not` requires a bool operand")),
             },
@@ -719,44 +722,41 @@ impl State<'_> {
                         format!("operands of `{op}` must be bools"),
                     )),
                 };
-                let x = as_bool(a, self.eval(a, locals)?)?;
+                let x = as_bool(a, eval(a)?)?;
                 // Short-circuit: the right side is only evaluated when needed.
                 if (*op == BinOp::And && !x) || (*op == BinOp::Or && x) {
                     return Ok(Value::Bool(x));
                 }
-                Ok(Value::Bool(as_bool(b, self.eval(b, locals)?)?))
+                Ok(Value::Bool(as_bool(b, eval(b)?)?))
             }
             ExprKind::Bin(a, op, b) => {
-                let x = self.eval(a, locals)?;
-                let y = self.eval(b, locals)?;
+                let x = eval(a)?;
+                let y = eval(b)?;
                 apply_binop(*op, x, y, span)
             }
-            ExprKind::If(cond, then, else_) => match self.eval(cond, locals)? {
-                Value::Bool(true) => self.eval(then, locals),
-                Value::Bool(false) => self.eval(else_, locals),
+            ExprKind::If(cond, then, else_) => match eval(cond)? {
+                Value::Bool(true) => eval(then),
+                Value::Bool(false) => eval(else_),
                 _ => Err(Diagnostic::new(
                     span,
                     "condition in `if` expression must be a bool",
                 )),
             },
-            ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, locals, span),
+            ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, locals, span, date),
             ExprKind::Call(index, args) => {
                 let function = &self.program.fns[*index];
                 let mut frame = vec![Decimal::ZERO; function.slots];
                 for (slot, arg) in args.iter().enumerate() {
-                    frame[slot] = self.numeric_arg(arg, &function.name, locals)?;
+                    frame[slot] = self.numeric_arg(arg, &function.name, locals, date)?;
                 }
-                self.call(function, frame, span)
+                self.call(function, frame, span, date)
             }
-            ExprKind::Per(e, _) => self.eval(e, locals),
+            ExprKind::Per(e, _) => eval(e),
             ExprKind::Fill(e, unit, fill) => {
                 let target = self.eval_num(e, locals)?;
                 self.fill(target, *unit, *fill, span).map(Value::Num)
             }
-            ExprKind::Spread(e, unit) => {
-                let amount = self.eval_num(e, locals)?;
-                self.spread(amount, e, *unit, span).map(Value::Num)
-            }
+            ExprKind::Spread(e, unit) => self.spread(e, *unit, locals, span).map(Value::Num),
         }
     }
 
@@ -848,8 +848,9 @@ impl State<'_> {
         args: &[crate::compile::Expr],
         locals: &[Decimal],
         span: Span,
+        date: NaiveDate,
     ) -> Result<Value, Diagnostic> {
-        let arg = |i: usize| self.numeric_arg(&args[i], builtin.name(), locals);
+        let arg = |i: usize| self.numeric_arg(&args[i], builtin.name(), locals, date);
         let n = match builtin {
             Builtin::Min => arg(0)?.min(arg(1)?),
             Builtin::Max => arg(0)?.max(arg(1)?),
@@ -867,39 +868,83 @@ impl State<'_> {
         Ok(Value::Num(n))
     }
 
-    /// The firing entry's share of `amount`, the value of `expr`, per `unit`.
+    /// The firing entry's share of `expr`, an amount per `unit`. `locals`
+    /// are the entry's `let`s.
+    ///
+    /// The periods that roll into the firing each add their own amount, the
+    /// value of `expr` on the period's last day, if it depends on nothing but
+    /// the date. Otherwise they get today's, which is an error if a value it
+    /// reads changes during them.
     fn spread(
         &self,
-        amount: Decimal,
         expr: &crate::compile::Expr,
         unit: TimeUnit,
+        locals: &[Decimal],
         span: Span,
     ) -> Result<Decimal, Diagnostic> {
-        let entry = self.firing.expect("only entries spread amounts");
-        let share = self.program.entries[entry].schedule.share(unit, self.date);
-        if share.carried > 0 {
-            self.check_carried(expr, unit, span)?;
-        }
-        spread(amount, share).ok_or_else(|| {
+        let amount = self.eval_num(expr, locals)?;
+        let entry = &self.program.entries[self.firing.expect("only entries spread amounts")];
+        let share = entry.schedule.share(unit, self.date);
+        let overflow = || {
             Diagnostic::new(
                 span,
                 format!("arithmetic overflow spreading {amount} per {unit}"),
             )
-        })
+        };
+        let mut carried = Decimal::ZERO;
+        if share.carried > 0 && dated(expr, entry) {
+            let mut slots = Vec::new();
+            locals_in(expr, entry, &mut slots);
+            for start in entry.schedule.carried_periods(unit, self.date) {
+                let last = unit
+                    .next_period_start(start)
+                    .and_then(|next| next.pred_opt())
+                    .expect("a period before today ends");
+                let frame = self.frame_on(entry, locals, &slots, last)?;
+                let own = self.eval_num_at(expr, &frame, last)?;
+                carried = carried.checked_add(own).ok_or_else(overflow)?;
+            }
+        } else if share.carried > 0 {
+            self.check_carried(expr, entry, unit, span)?;
+            carried = amount
+                .checked_mul(share.carried.into())
+                .ok_or_else(overflow)?;
+        }
+        spread(amount, carried, share).ok_or_else(overflow)
     }
 
-    /// Errors if a param `expr` reads takes a different arm on a day of the
+    /// `entry`'s `let`s on `date`: `locals`, with those in `slots`, which
+    /// depend on nothing but the date, worked out again for `date`.
+    fn frame_on(
+        &self,
+        entry: &crate::compile::Entry,
+        locals: &[Decimal],
+        slots: &[usize],
+        date: NaiveDate,
+    ) -> Result<Vec<Decimal>, Diagnostic> {
+        let mut frame = locals.to_vec();
+        for stmt in &entry.body {
+            if let crate::compile::EntryStmt::Let { slot, value } = stmt
+                && slots.contains(slot)
+            {
+                frame[*slot] = self.eval_num_at(value, &frame, date)?;
+            }
+        }
+        Ok(frame)
+    }
+
+    /// Errors if a value `expr` reads takes a different arm on a day of the
     /// periods that roll into today's firing, which get its value today.
     fn check_carried(
         &self,
         expr: &crate::compile::Expr,
+        entry: &crate::compile::Entry,
         unit: TimeUnit,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        let entry = &self.program.entries[self.firing.expect("only entries spread")];
         let carried = entry.schedule.carried_periods(unit, self.date);
         let own = unit.period_start(self.date);
-        for param in self.params_read(expr) {
+        for param in self.params_read(expr, entry) {
             let crate::compile::ParamBody::Arms(arms) = &self.program.params[param].body else {
                 continue;
             };
@@ -923,7 +968,7 @@ impl State<'_> {
                     span,
                     format!(
                         "`{}` changes during the {unit}s before {} that `{}` covers, \
-                         but they'd all get its value on {}",
+                         but this reads balances or totals too, so they'd all get its value on {}",
                         self.program.params[param].name, own, entry.label, self.date
                     ),
                 )
@@ -938,18 +983,23 @@ impl State<'_> {
         Ok(())
     }
 
-    /// The params `expr` reads, directly or through other params.
-    fn params_read(&self, expr: &crate::compile::Expr) -> Vec<usize> {
+    /// The values `expr` reads, directly, through other values, or through
+    /// `entry`'s `let`s.
+    fn params_read(
+        &self,
+        expr: &crate::compile::Expr,
+        entry: &crate::compile::Entry,
+    ) -> Vec<usize> {
         let mut found = Vec::new();
-        params_in(expr, &mut found);
+        params_in(expr, entry, &mut found);
         let mut i = 0;
         while let Some(&param) = found.get(i) {
             let mut more = Vec::new();
             match &self.program.params[param].body {
-                crate::compile::ParamBody::Const(e) => params_in(e, &mut more),
+                crate::compile::ParamBody::Const(e) => params_in(e, entry, &mut more),
                 crate::compile::ParamBody::Arms(arms) => {
                     for arm in arms {
-                        params_in(&arm.value, &mut more);
+                        params_in(&arm.value, entry, &mut more);
                     }
                 }
             }
@@ -993,8 +1043,9 @@ impl State<'_> {
         arg: &crate::compile::Expr,
         callee: &str,
         locals: &[Decimal],
+        date: NaiveDate,
     ) -> Result<Decimal, Diagnostic> {
-        match self.eval(arg, locals)? {
+        match self.eval_at(arg, locals, date)? {
             Value::Num(n) => Ok(n),
             _ => Err(Diagnostic::new(
                 arg.span,
@@ -1003,17 +1054,19 @@ impl State<'_> {
         }
     }
 
-    /// Runs `function` with its arguments already in the first slots of `frame`.
+    /// Runs `function` on `date`, with its arguments already in the first
+    /// slots of `frame`.
     fn call(
         &self,
         function: &Function,
         mut frame: Vec<Decimal>,
         call_span: Span,
+        date: NaiveDate,
     ) -> Result<Value, Diagnostic> {
         debug_assert!(function.arity <= frame.len());
         for stmt in &function.body {
             match stmt {
-                Stmt::Let { slot, name, value } => match self.eval(value, &frame)? {
+                Stmt::Let { slot, name, value } => match self.eval_at(value, &frame, date)? {
                     Value::Num(n) => frame[*slot] = n,
                     Value::Bool(_) => {
                         return Err(Diagnostic::new(
@@ -1022,7 +1075,7 @@ impl State<'_> {
                         ));
                     }
                 },
-                Stmt::Return(e) => return self.eval(e, &frame),
+                Stmt::Return(e) => return self.eval_at(e, &frame, date),
             }
         }
         Err(Diagnostic::new(
@@ -1083,55 +1136,125 @@ fn apply_growth(growth: &Growth, base: Decimal, total: Decimal) -> Result<Decima
     .ok_or_else(|| Diagnostic::new(growth.by.span, "arithmetic overflow growing a value"))
 }
 
-/// Adds the params `e` reads directly to `out`.
-fn params_in(e: &crate::compile::Expr, out: &mut Vec<usize>) {
+/// The `let` of `entry` that fills `slot`.
+fn let_value(entry: &crate::compile::Entry, slot: usize) -> &crate::compile::Expr {
+    entry
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            crate::compile::EntryStmt::Let { slot: s, value } if *s == slot => Some(value),
+            _ => None,
+        })
+        .expect("every slot has a `let`")
+}
+
+/// Adds the values `e` reads directly, or through `entry`'s `let`s, to `out`.
+fn params_in(e: &crate::compile::Expr, entry: &crate::compile::Entry, out: &mut Vec<usize>) {
+    let mut visit = |e: &crate::compile::Expr| params_in(e, entry, out);
     match &e.kind {
         ExprKind::Param(param) => out.push(*param),
+        ExprKind::Local(slot) => visit(let_value(entry, *slot)),
         ExprKind::Num(_)
         | ExprKind::Bool(_)
         | ExprKind::Balance { .. }
         | ExprKind::AccountTotal { .. }
-        | ExprKind::Local(_)
         | ExprKind::Total(..) => {}
         ExprKind::Neg(x)
         | ExprKind::Not(x)
         | ExprKind::Per(x, _)
         | ExprKind::Spread(x, _)
-        | ExprKind::Fill(x, ..) => params_in(x, out),
+        | ExprKind::Fill(x, ..) => visit(x),
         ExprKind::Bin(a, _, b) => {
-            params_in(a, out);
-            params_in(b, out);
+            visit(a);
+            visit(b);
         }
         ExprKind::If(c, t, f) => {
-            params_in(c, out);
-            params_in(t, out);
-            params_in(f, out);
+            visit(c);
+            visit(t);
+            visit(f);
         }
-        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => {
-            for arg in args {
-                params_in(arg, out);
-            }
+        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => args.iter().for_each(visit),
+    }
+}
+
+/// Adds the slots of the `let`s of `entry` that `e` reads, directly or
+/// through other `let`s, to `out`.
+fn locals_in(e: &crate::compile::Expr, entry: &crate::compile::Entry, out: &mut Vec<usize>) {
+    if let ExprKind::Local(slot) = e.kind {
+        if !out.contains(&slot) {
+            out.push(slot);
+            locals_in(let_value(entry, slot), entry, out);
         }
+        return;
+    }
+    let mut visit = |e: &crate::compile::Expr| locals_in(e, entry, out);
+    match &e.kind {
+        ExprKind::Local(_) => unreachable!("handled above"),
+        ExprKind::Num(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Param(_)
+        | ExprKind::Balance { .. }
+        | ExprKind::AccountTotal { .. }
+        | ExprKind::Total(..) => {}
+        ExprKind::Neg(x)
+        | ExprKind::Not(x)
+        | ExprKind::Per(x, _)
+        | ExprKind::Spread(x, _)
+        | ExprKind::Fill(x, ..) => visit(x),
+        ExprKind::Bin(a, _, b) => {
+            visit(a);
+            visit(b);
+        }
+        ExprKind::If(c, t, f) => {
+            visit(c);
+            visit(t);
+            visit(f);
+        }
+        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => args.iter().for_each(visit),
+    }
+}
+
+/// Whether `e` depends on nothing but the date, through `entry`'s `let`s too,
+/// so it can be evaluated on another day.
+fn dated(e: &crate::compile::Expr, entry: &crate::compile::Entry) -> bool {
+    let dated = |e: &crate::compile::Expr| dated(e, entry);
+    match &e.kind {
+        ExprKind::Num(_) | ExprKind::Bool(_) | ExprKind::Param(_) => true,
+        ExprKind::Local(slot) => dated(let_value(entry, *slot)),
+        ExprKind::Balance { .. }
+        | ExprKind::AccountTotal { .. }
+        | ExprKind::Total(..)
+        | ExprKind::Spread(..)
+        | ExprKind::Fill(..)
+        | ExprKind::Builtin(Builtin::Fill, _) => false,
+        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::Per(x, _) => dated(x),
+        ExprKind::Bin(a, _, b) => dated(a) && dated(b),
+        ExprKind::If(c, t, f) => dated(c) && dated(t) && dated(f),
+        // Functions only read their arguments and values.
+        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => args.iter().all(dated),
     }
 }
 
 /// A firing's part of `amount` per period, in cents: the difference between
 /// two running totals rounded to cents, counted from the start of the periods
-/// that roll into its own. Each firing is rounded once, and a period's firings
-/// add up to exactly its amount.
-fn spread(amount: Decimal, share: Share) -> Option<Decimal> {
+/// that roll into its own, which come to `carried`. Each firing is rounded
+/// once, and a period's firings add up to exactly its amount.
+fn spread(amount: Decimal, carried: Decimal, share: Share) -> Option<Decimal> {
     debug_assert!(share.index >= 1 && share.index <= share.count);
-    // Positions in `count`ths of a period. The first firing starts from the
-    // carried periods; the others start where the previous one ended.
-    let end = u64::from(share.carried) * u64::from(share.count) + u64::from(share.index);
-    let start = if share.index == 1 { 0 } else { end - 1 };
-    let running = |parts: u64| {
-        let total = amount
+    // The running total through the `parts`th of `count` parts of the
+    // firing's own period. The first firing starts from nothing; the others
+    // start where the previous one ended.
+    let through = |parts: u32| {
+        let own = amount
             .checked_mul(parts.into())?
             .checked_div(share.count.into())?;
-        Some(total.round_dp(2))
+        Some(carried.checked_add(own)?.round_dp(2))
     };
-    running(end)?.checked_sub(running(start)?)
+    let start = match share.index {
+        1 => Decimal::ZERO,
+        index => through(index - 1)?,
+    };
+    through(share.index)?.checked_sub(start)
 }
 
 fn checked_sum<'a>(values: impl IntoIterator<Item = &'a Decimal>) -> Option<Decimal> {

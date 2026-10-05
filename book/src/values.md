@@ -19,10 +19,11 @@ let max_401k = 24_500/year
 A `%` after a number divides it by 100, so `5%` is `0.05`. `/year` makes the
 value a rate (see [Rates](#rates)).
 
-The expression is evaluated at the start of each simulated day and again after
-each entry fires. For expressions built from numbers and other constant values,
-the value never changes. A value that reads an account balance follows that
-balance as it changes.
+A value depends on nothing but the date: it can use numbers, other values and
+functions, but not account balances or totals, which change as entries fire.
+That way saldo can work a value out for any day. To work something out from a
+balance, use a `let` in an entry (see [Entries](./entries.md#let)) or write it
+in a check.
 
 ## Values that change over time
 
@@ -76,11 +77,10 @@ An entry reads a value on the day it fires, so that's the day an arm's days
 are checked, whatever the money is for. Rent for September paid on August 31
 needs an arm that covers August 31.
 
-When an entry posts a rate for periods that have no firing of their own, like
-a quarterly entry posting an amount per month, each of those periods gets the
-value from the day it fires. If a value it reads changes during them, that
-would be wrong, so saldo stops with an error. Fire the entry at least once a
-period, here every month.
+When an entry moves a rate for periods that have no firing of their own, like
+a quarterly entry moving an amount per month, each of those periods gets its
+own value, from its last day. A quarterly bill of `power` above moves
+January's, February's and March's amounts together at the end of March.
 
 A more complete example:
 
@@ -124,8 +124,7 @@ kind as the value, like an amount `/month`, or a plain number, which takes on
 the value's kind.
 
 Each step uses the rate or amount on the day it's taken, so a rate that changes
-over time compounds each year at that year's rate. That's why it can only use
-numbers, and values made of numbers.
+over time compounds each year at that year's rate.
 
 A value that grows from 1, like `prices` above, is an index: multiply other
 amounts by it, like `80_000/year * prices`, to have them rise with it.

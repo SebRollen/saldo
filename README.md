@@ -136,7 +136,9 @@ on different days, each arm covering a set of days and the first that covers a
 day giving its value, like `jul | aug => 0` for a summer break, and grow, like
 `2026.. => 1 compounding 3% every year`. `/year` (or `/day`, `/week`, `/month`,
 `/quarter`) after a value makes it a rate: entries spread it over their
-firings, so each year's paychecks add up to exactly the yearly salary.
+firings, so each year's paychecks add up to exactly the yearly salary. Values
+depend on nothing but the date, so they can't read balances or totals; an
+entry's `let` can.
 
 ### Sets of days
 

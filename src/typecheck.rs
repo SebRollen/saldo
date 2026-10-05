@@ -58,9 +58,8 @@ pub fn check(model: &Model) -> Vec<Diagnostic> {
         for stmt in &entry.body {
             match stmt {
                 EntryStmt::Let { name, value } => {
-                    if let Some(ty) = checker.type_of(value) {
-                        checker.locals.insert(name.0.clone(), ty);
-                    }
+                    checker.expect(value, Ty::Num, "a `let`");
+                    checker.locals.insert(name.0.clone(), Ty::Num);
                 }
                 EntryStmt::Move(m) => checker.expect(&m.amount, Ty::Num, "an amount"),
             }
@@ -79,7 +78,7 @@ struct Checker<'a> {
     /// Return types of user functions; `None` if the body has a type error
     /// (already reported) or is still being checked.
     returns: HashMap<&'a str, Option<Ty>>,
-    /// Types of the `let`s in scope.
+    /// Types of the parameters and `let`s in scope.
     locals: HashMap<String, Ty>,
     diags: Vec<Diagnostic>,
 }
@@ -112,9 +111,8 @@ impl<'a> Checker<'a> {
         for stmt in &def.body {
             match stmt {
                 Stmt::Let { name, value } => {
-                    if let Some(found) = self.type_of(value) {
-                        self.locals.insert(name.clone(), found);
-                    }
+                    self.expect(value, Ty::Num, "a `let`");
+                    self.locals.insert(name.clone(), Ty::Num);
                 }
                 Stmt::Return(e) => ty = self.type_of(e),
             }

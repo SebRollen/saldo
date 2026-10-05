@@ -557,7 +557,7 @@ impl<'a> Resolver<'a> {
             }
         }
         self.check_param_cycles();
-        self.check_growth_rates();
+        self.check_values_read_no_state();
         validate_fn_calls(&self.fns, &mut self.diags);
         self.check_accounts();
     }
@@ -1090,56 +1090,40 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Reports growth rates that read anything but numbers and values made of
-    /// numbers, which have a value on any date without simulating it.
-    fn check_growth_rates(&mut self) {
+    /// Reports values that read balances or totals. Values depend on nothing
+    /// but the date, so they can be worked out for any day.
+    fn check_values_read_no_state(&mut self) {
         let mut diags = Vec::new();
+        let mut visit = |e: &SpannedExpr| {
+            walk_expr(e, &mut |sub| {
+                let what = match sub.0.as_ref() {
+                    Expr::Balance(_) => "balances",
+                    Expr::TagTotal { .. } | Expr::AccountTotal(..) => "totals",
+                    _ => return,
+                };
+                diags.push(Diagnostic::new(
+                    sub.1,
+                    format!(
+                        "values can't read {what}, which change as entries fire; \
+                         read this in an entry's `let` or in a check"
+                    ),
+                ));
+            });
+        };
         for body in self.params.values() {
-            let ParamBody::Arms(arms) = body else {
-                continue;
-            };
-            for growth in arms.iter().filter_map(|arm| arm.growth.as_ref()) {
-                if let Some(span) = self.first_non_number(&growth.by, &mut HashSet::new()) {
-                    diags.push(Diagnostic::new(
-                        span,
-                        format!(
-                            "`{}` can only use numbers, and values made of numbers",
-                            growth.kind.keyword()
-                        ),
-                    ));
+            match body {
+                ParamBody::Const(e) => visit(e),
+                ParamBody::Arms(arms) => {
+                    for arm in arms {
+                        visit(&arm.value);
+                        if let Some(growth) = &arm.growth {
+                            visit(&growth.by);
+                        }
+                    }
                 }
             }
         }
         self.diags.extend(diags);
-    }
-
-    /// The first part of `e` that isn't a number or a value made of numbers.
-    fn first_non_number(&self, e: &SpannedExpr, seen: &mut HashSet<String>) -> Option<Span> {
-        match e.0.as_ref() {
-            Expr::Num(_) => None,
-            Expr::Neg(x) | Expr::Per(x, _) => self.first_non_number(x, seen),
-            Expr::Bin(a, _, b) => self
-                .first_non_number(a, seen)
-                .or_else(|| self.first_non_number(b, seen)),
-            Expr::Global(name) if self.params.contains_key(name) => {
-                // A value in a cycle is reported elsewhere.
-                if !seen.insert(name.clone()) {
-                    return None;
-                }
-                let numbers = match &self.params[name] {
-                    ParamBody::Const(e) => self.first_non_number(e, seen).is_none(),
-                    ParamBody::Arms(arms) => arms.iter().all(|arm| {
-                        self.first_non_number(&arm.value, seen).is_none()
-                            && arm
-                                .growth
-                                .as_ref()
-                                .is_none_or(|g| self.first_non_number(&g.by, seen).is_none())
-                    }),
-                };
-                (!numbers).then_some(e.1)
-            }
-            _ => Some(e.1),
-        }
     }
 
     fn into_model(self) -> Model {

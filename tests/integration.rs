@@ -533,11 +533,41 @@ fn opening_balance_can_reference_a_value() {
 }
 
 #[test]
-fn value_can_read_an_account_once_it_opens() {
+fn values_cant_read_balances_or_totals() {
+    let cases = [
+        (
+            "let doubled = assets.savings * 2",
+            "values can't read balances",
+        ),
+        ("let paid = pay.k401[year]", "values can't read totals"),
+        (
+            "let income_so_far = income.salary[year]",
+            "values can't read totals",
+        ),
+        (
+            "let grown { 2026.. => 1 compounding assets.savings every year }",
+            "values can't read balances",
+        ),
+    ];
+    for (decl, message) in cases {
+        let src = format!(
+            "balances @ 2025-01-01 {{ assets.savings = 10 }}
+             entry pay @ last {{ income.salary -> assets.cash : 1 #k401 }}
+             {decl}"
+        );
+        let errors = run(&src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+        assert!(has_error(&errors, message), "{decl}: {errors:?}");
+    }
+}
+
+#[test]
+fn entry_lets_read_balances_once_they_open() {
     let src = r#"
         balances @ 2025-01-03 { assets.savings = 10 }
-        let doubled = assets.savings * 2
-        entry interest "Interest" @ 2025-01-03 { income.interest -> assets.cash : doubled }
+        entry interest "Interest" @ 2025-01-03 {
+          let doubled = assets.savings * 2
+          income.interest -> assets.cash : doubled
+        }
     "#;
     let output = run(src, &opts("2025-01-01", "2025-01-03")).unwrap();
     let tx = output
@@ -550,13 +580,15 @@ fn value_can_read_an_account_once_it_opens() {
 }
 
 #[test]
-fn value_sees_earlier_entries_that_day() {
+fn entries_see_earlier_entries_that_day() {
     let src = "
         balances @ 2025-01-01 { assets.cash = 100 }
-        let half = assets.cash / 2
         entry paycheck @ 2025-01-02 { income.salary -> assets.cash : 1_000 }
-        entry save @ 2025-01-02 { assets.cash -> assets.savings : half }
-        check half >= 275 @ 2025-01-02
+        entry save @ 2025-01-02 {
+          let half = assets.cash / 2
+          assets.cash -> assets.savings : half
+        }
+        check assets.savings == 550 @ 2025-01-02
     ";
     let output = run(src, &opts("2025-01-01", "2025-01-02")).unwrap();
     assert_eq!(postings_to(&output, "assets.savings"), [usd("550")]);
@@ -569,8 +601,8 @@ fn totals_include_earlier_entries_that_day() {
           income.salary -> assets.cash       : 1_000
           assets.cash   -> assets.retirement : 100 #k401
         }
-        let deducted = paycheck.k401[year]
         entry year_end @ last {
+          let deducted = paycheck.k401[year]
           assets.cash -> expenses.tax  : deducted
           assets.cash -> expenses.fees : paycheck.k401[year]
         }
@@ -871,7 +903,7 @@ fn arms_take_quarters_years_and_month_ranges() {
 const QUARTER_ENDS: &str = "mar 31 | jun 30 | sep 30 | dec 31";
 
 #[test]
-fn a_value_changing_in_periods_without_a_firing_is_an_error() {
+fn each_period_rolled_into_a_firing_gets_its_own_value() {
     let src = format!(
         r#"
         let power {{
@@ -882,12 +914,48 @@ fn a_value_changing_in_periods_without_a_firing_is_an_error() {
         entry bill "Power bill" @ {QUARTER_ENDS} {{
           assets.cash -> expenses.power : power
         }}
+        entry bill_through_a_let "Power bill too" @ {QUARTER_ENDS} {{
+          let amount = power * 2
+          assets.cash -> expenses.power_too : amount
+        }}
+    "#
+    );
+    let output = run(&src, &opts("2027-01-01", "2027-06-30")).unwrap();
+    assert_eq!(
+        postings_to(&output, "expenses.power"),
+        [usd("600"), usd("900")]
+    );
+    assert_eq!(
+        postings_to(&output, "expenses.power_too"),
+        [usd("1200"), usd("1800")]
+    );
+}
+
+#[test]
+fn a_rate_of_a_balance_changing_in_periods_without_a_firing_is_an_error() {
+    // The balance only has today's value, so the months before can't each
+    // get their own.
+    let src = format!(
+        r#"
+        balances @ 2027-01-01 {{ liabilities.loan = 1_000 }}
+        let interest {{
+          jan => 1%/month
+          feb => 2%/month
+          _   => 3%/month
+        }}
+        entry bill "Interest" @ {QUARTER_ENDS} {{
+          liabilities.loan -> expenses.interest : liabilities.loan * interest
+        }}
     "#
     );
     let errors = run(&src, &opts("2027-01-01", "2027-03-31")).unwrap_err();
     assert_eq!(
-        highlighted(&src, &errors, "changes during the months before 2027-03-01"),
-        "power"
+        highlighted(
+            &src,
+            &errors,
+            "`interest` changes during the months before 2027-03-01"
+        ),
+        "liabilities.loan * interest"
     );
 }
 
@@ -1090,6 +1158,26 @@ fn each_step_compounds_at_the_rate_on_its_day() {
 }
 
 #[test]
+fn growth_can_use_any_value() {
+    let src = "
+        fn half(x) { x / 2 }
+        let inflation {
+          2027 => 20%
+          _    => 10%
+        }
+        let prices {
+          2026.. => 1_000 compounding half(inflation) every year
+        }
+        entry other @ dec 31 { assets.cash -> expenses.other : prices }
+    ";
+    let output = run(src, &opts("2026-01-01", "2028-12-31")).unwrap();
+    assert_eq!(
+        postings_to(&output, "expenses.other"),
+        ["1000", "1100", "1155"].map(usd)
+    );
+}
+
+#[test]
 fn growth_errors_point_at_the_offending_text() {
     let cases = [
         (
@@ -1114,7 +1202,7 @@ fn growth_errors_point_at_the_offending_text() {
         ),
         (
             "balances @ 2026-01-01 { assets.a = 1 }\nlet p {\n 2026.. => 1 compounding assets.a every year\n}",
-            "can only use numbers",
+            "values can't read balances",
             "assets.a",
         ),
         (
@@ -1135,7 +1223,7 @@ fn growth_errors_point_at_the_offending_text() {
 }
 
 #[test]
-fn growth_steps_count_as_changes_in_periods_without_a_firing() {
+fn growth_steps_in_periods_without_a_firing_count_in_each_period() {
     let monthly = format!(
         "
         let fee {{
@@ -1144,10 +1232,11 @@ fn growth_steps_count_as_changes_in_periods_without_a_firing() {
         entry fee_pay @ {QUARTER_ENDS} {{ assets.cash -> expenses.fee : fee }}
     "
     );
-    let errors = run(&monthly, &opts("2027-01-01", "2027-03-31")).unwrap_err();
+    let output = run(&monthly, &opts("2027-01-01", "2027-06-30")).unwrap();
+    // 100 + 110 + 120, then 130 + 140 + 150.
     assert_eq!(
-        highlighted(&monthly, &errors, "changes during the months"),
-        "fee"
+        postings_to(&output, "expenses.fee"),
+        [330, 420].map(Decimal::from)
     );
     // Yearly steps fall on January 1st, which a quarterly entry's firings
     // never straddle.
@@ -1377,7 +1466,7 @@ fn type_errors_are_reported_before_simulating() {
         ),
         (
             "entry x {\n let big = 1 > 0\n income.b -> assets.a : big\n}",
-            "an amount must be a number, but this is a bool",
+            "a `let` must be a number, but this is a bool",
         ),
         (
             "balances @ 2025-01-01 { assets.a = 1 > 0 }",
@@ -1643,7 +1732,7 @@ fn functions_pass_rates_through() {
 fn rates_and_amounts_dont_mix_outside_entries() {
     let cases = [
         (
-            "let x = salary + assets.cash",
+            "check salary + assets.cash > 0",
             "`+` mixes an amount per year with an amount",
         ),
         (
@@ -1672,7 +1761,7 @@ fn rates_and_amounts_dont_mix_outside_entries() {
              a year isn't a fixed number of weeks",
         ),
         (
-            "let x = job.paid[year]/year",
+            "check job.paid[year]/year > 0",
             "`/year` can't apply to a year-to-date total, \
              which is an amount so far, not per period",
         ),
@@ -1681,11 +1770,11 @@ fn rates_and_amounts_dont_mix_outside_entries() {
             "can't convert an amount per year to per month inside a function",
         ),
         (
-            "let x {\n 2026-01-01..2026-02-01 => salary\n 2026-02-01.. => assets.cash\n}",
-            "`x` is an amount per year in one arm but an amount in another",
+            "let x {\n 2026-01-01..2026-02-01 => salary\n 2026-02-01.. => rent\n}",
+            "`x` is an amount per year in one arm but an amount per month in another",
         ),
         (
-            "fn f(a, b) { a - b }\nlet x = f(salary, assets.cash)",
+            "fn f(a, b) { a - b }\ncheck f(salary, assets.cash) > 0",
             "`-` mixes an amount per year with an amount",
         ),
     ];
