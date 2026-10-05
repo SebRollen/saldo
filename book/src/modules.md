@@ -96,7 +96,6 @@ loans.saldo      mod car
 loans/car.saldo
 ```
 
-Each file is one module, read once. The order of declarations still matters in
-two places: entries that fire on the same day fire in the order they're written,
-with a module's declarations where its `mod` is, and the CSV output orders
-accounts by name.
+Each file is one module, read once. Where a `mod` is written barely matters:
+entries that fire on the same day and don't read what each other moves fire in
+the order they're written, with a module's declarations where its `mod` is.

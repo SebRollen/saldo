@@ -382,6 +382,85 @@ fn near_identical_accounts_warn() {
     );
 }
 
+#[test]
+fn entries_fire_after_the_entries_that_move_what_they_read() {
+    // `save` reads cash, which `paycheck` moves, so it fires after it, though
+    // it's written first.
+    let src = "
+        balances @ 2025-01-01 { assets.cash = 100 }
+        entry save @ 2025-01-02 {
+          assets.cash -> assets.savings : assets.cash / 2
+        }
+        entry paycheck @ 2025-01-02 { income.salary -> assets.cash : 1_000 }
+        entry rent @ 2025-01-02 { assets.cash -> expenses.rent : 10 }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-01-02")).unwrap();
+    let labels: Vec<&str> = output.log.transactions.iter().map(|t| &*t.label).collect();
+    // `rent` doesn't read anything, so it keeps its place after `paycheck`.
+    assert_eq!(labels, ["paycheck", "rent", "save"]);
+    assert_eq!(postings_to(&output, "assets.savings"), [usd("545")]);
+}
+
+#[test]
+fn entries_that_read_each_others_moves_need_after() {
+    let src = "
+        balances @ 2025-01-01 { liabilities.loan = 10_000 }
+        entry accrual {
+          liabilities.accrued -> expenses.interest : liabilities.loan * 1%
+        }
+        entry payment @ 17th {
+          assets.cash -> liabilities.accrued : liabilities.accrued
+          assets.cash -> liabilities.loan    : 100
+        }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(has_error(
+        &errors,
+        "`accrual` and `payment` each read what the other moves, so it isn't clear which fires first"
+    ));
+    let rendered = saldo::format_errors("test.saldo", src, &errors, false);
+    assert!(
+        rendered.contains("add `after accrual` to `payment`"),
+        "{rendered}"
+    );
+
+    // The payment clears what accrued before it, including that day's.
+    let ordered = src.replace(
+        "entry payment @ 17th {",
+        "entry payment @ 17th after accrual {",
+    );
+    let output = run(&ordered, &opts("2025-01-01", "2025-01-31")).unwrap();
+    assert_eq!(postings_to(&output, "liabilities.accrued")[17], usd("1700"));
+    // The other way round, the accrual sees the paid-down loan.
+    let reversed = src.replace("entry accrual {", "entry accrual after payment {");
+    let output = run(&reversed, &opts("2025-01-01", "2025-01-31")).unwrap();
+    let accrued = postings_to(&output, "liabilities.accrued");
+    assert_eq!(accrued[16], usd("1600"));
+    assert_eq!(accrued[17], usd("-99"));
+}
+
+#[test]
+fn after_names_an_entry() {
+    let cases = [
+        (
+            "entry a after b { income.x -> assets.y : 1 }",
+            "unknown name `b`",
+        ),
+        (
+            "let b = 1\nentry a after b { income.x -> assets.y : 1 }",
+            "`b` isn't an entry",
+        ),
+        (
+            "entry a after a { income.x -> assets.y : 1 }",
+            "can't fire after itself",
+        ),
+    ];
+    for (src, message) in cases {
+        let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
+        assert!(has_error(&errors, message), "{src}: {errors:?}");
+    }
+}
+
 // --- functions ---
 
 #[test]
@@ -1289,7 +1368,7 @@ const KITCHEN_SINK: &str = r#"
       liabilities.accrued_interest -> expenses.interest : liabilities.loan * interest_rate / 365
     }
 
-    entry loan_payment "Loan payment" @ 17th {
+    entry loan_payment "Loan payment" @ 17th after accrual {
       assets.cash -> liabilities.accrued_interest : liabilities.accrued_interest
       assets.cash -> liabilities.loan             : 1_000
     }

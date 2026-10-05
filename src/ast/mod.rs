@@ -510,6 +510,8 @@ pub enum Decl {
         label: Option<String>,
         /// The days it fires, or every day.
         when: Option<SpannedExpr>,
+        /// The entries it fires after, on days they both fire.
+        after: Vec<Spanned<Path>>,
         body: Vec<EntryStmt>,
     },
     Check {

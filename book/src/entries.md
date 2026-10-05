@@ -62,7 +62,7 @@ Since accounts read positive for their kind (see
 [Accounts](./accounts.md#kinds)), moving an account's balance clears it:
 
 ```
-entry loan_payment "Loan payment" @ 17th {
+entry loan_payment "Loan payment" @ 17th after accrual {
   assets.cash -> liabilities.accrued_interest : liabilities.accrued_interest
   assets.cash -> liabilities.loan             : 2_000
 }
@@ -71,9 +71,46 @@ entry loan_payment "Loan payment" @ 17th {
 ## Reading balances
 
 Every move in an entry is worked out from the balances before the entry fired,
-so one move never sees another move of the same entry. Entries that fire on
-the same day fire in the order they're written, so a later entry sees what
-earlier ones moved.
+so one move never sees another move of the same entry.
+
+### Which fires first
+
+On a day several entries fire, an entry that reads an account, or a total,
+fires after the entries that move money into or out of it, so it sees what
+they moved. A savings sweep that reads `assets.cash` fires after the paycheck
+that moves money into it, wherever each is written:
+
+```
+entry sweep @ last {
+  assets.cash -> assets.savings : assets.cash - 2_000
+}
+
+entry paycheck @ 15th | last {
+  income.salary -> assets.cash : 4_000
+}
+```
+
+Entries that don't read what the others move fire in the order they're
+written.
+
+Two entries can each read what the other moves. Here the interest accrual
+reads the loan, which the payment moves, and the payment reads the accrued
+interest, which the accrual moves. Which goes first changes the result, so
+saldo asks you to choose with `after`:
+
+```
+entry accrual "Interest accrual" {
+  liabilities.accrued_interest -> expenses.interest : liabilities.loan * 5%/year
+}
+
+entry loan_payment "Loan payment" @ 17th after accrual {
+  assets.cash -> liabilities.accrued_interest : liabilities.accrued_interest
+  assets.cash -> liabilities.loan             : 2_000
+}
+```
+
+`after` takes a list of entries, by their full names, like `after paycheck,
+loans.car`. It only matters on days both fire.
 
 ## `let`
 

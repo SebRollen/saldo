@@ -380,6 +380,19 @@ impl<'src> Parser<'src> {
         } else {
             None
         };
+        let mut after = Vec::new();
+        if self.eat_keyword("after").is_some() {
+            loop {
+                let Some(entry) = self.try_parse_path() else {
+                    self.error_here("expected an entry after `after`");
+                    return None;
+                };
+                after.push(entry);
+                if self.eat(&Token::Comma).is_none() {
+                    break;
+                }
+            }
+        }
         if *self.peek() != Token::LBrace {
             self.error_here("expected `{` to start the entry, or `@` and when it fires");
             return None;
@@ -394,6 +407,7 @@ impl<'src> Parser<'src> {
             name,
             label,
             when,
+            after,
             body,
         })
     }
@@ -850,7 +864,7 @@ mod tests {
                income.salary -> assets.cash : gross
                assets.cash   -> assets.retirement : min(gross * 16%, 1_000)  #contribution
              }
-             entry interest {
+             entry interest after paycheck, loans.repay {
                liabilities.accrued -> expenses.interest : liabilities.loan * 5%/year
              }",
         );
@@ -859,6 +873,7 @@ mod tests {
             label,
             when,
             body,
+            ..
         } = &prog.decls[0].0
         else {
             panic!("not an entry")
@@ -879,10 +894,15 @@ mod tests {
             matches!(m.amount.0.as_ref(), Expr::Call(callee, args) if callee.join() == "min" && args.len() == 2)
         );
         assert_eq!(m.tag.as_ref().map(|t| t.0.as_str()), Some("contribution"));
-        let Decl::Entry { label, when, .. } = &prog.decls[1].0 else {
+        let Decl::Entry {
+            label, when, after, ..
+        } = &prog.decls[1].0
+        else {
             panic!("not an entry")
         };
         assert!(label.is_none() && when.is_none());
+        let after: Vec<String> = after.iter().map(|(p, _)| p.join()).collect();
+        assert_eq!(after, ["paycheck", "loans.repay"]);
     }
 
     #[test]

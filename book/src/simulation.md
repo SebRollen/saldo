@@ -29,10 +29,12 @@ Every simulated day runs these steps in order:
 2. Values are evaluated. They depend on nothing but the date, so this happens
    once a day.
 3. Accounts whose opening date is today get their opening balance.
-4. Entries whose days include today fire, in the order they're written. A
-   later entry sees the balances and totals left by earlier ones. Within one
-   entry, every move is worked out from the balances before the entry fired,
-   and its own tags' totals don't include the firing in progress.
+4. Entries whose days include today fire. An entry fires after the entries
+   that move what it reads, so it sees what they moved, and after the
+   entries it names with `after`; other entries fire in the order they're
+   written (see [Entries](./entries.md#which-fires-first)). Within one entry,
+   every move is worked out from the balances before the entry fired, and
+   its own tags' totals don't include the firing in progress.
 5. Checks whose days include today are checked against the balances and
    values after all entries fired.
 

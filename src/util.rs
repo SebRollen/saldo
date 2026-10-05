@@ -1,9 +1,12 @@
-use std::collections::VecDeque;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
-/// Kahn's topological sort on nodes `0..dependents.len()`.
-/// `dependents[i]` lists the nodes that depend on node `i` (i.e. the edges i → j).
-/// Returns `(order, had_cycle)`. When `had_cycle` is true, `order.len() < n` and
-/// cycle members are omitted — callers handle them however they like.
+/// Kahn's topological sort on nodes `0..dependents.len()`, taking the lowest
+/// ready node first, so nodes that don't depend on each other keep their
+/// order. `dependents[i]` lists the nodes that depend on node `i` (i.e. the
+/// edges i → j). Returns `(order, had_cycle)`. When `had_cycle` is true,
+/// `order.len() < n` and cycle members are omitted — callers handle them
+/// however they like.
 pub fn topological_sort(dependents: &[Vec<usize>]) -> (Vec<usize>, bool) {
     let n = dependents.len();
     let mut in_deg = vec![0usize; n];
@@ -12,18 +15,18 @@ pub fn topological_sort(dependents: &[Vec<usize>]) -> (Vec<usize>, bool) {
             in_deg[j] += 1;
         }
     }
-    let mut queue: VecDeque<usize> = in_deg
+    let mut ready: BinaryHeap<Reverse<usize>> = in_deg
         .iter()
         .enumerate()
-        .filter_map(|(i, deg)| if *deg == 0 { Some(i) } else { None })
+        .filter_map(|(i, deg)| (*deg == 0).then_some(Reverse(i)))
         .collect();
     let mut order = Vec::with_capacity(n);
-    while let Some(i) = queue.pop_front() {
+    while let Some(Reverse(i)) = ready.pop() {
         order.push(i);
         for &j in &dependents[i] {
             in_deg[j] -= 1;
             if in_deg[j] == 0 {
-                queue.push_back(j);
+                ready.push(Reverse(j));
             }
         }
     }
@@ -131,6 +134,14 @@ mod tests {
             assert_eq!(order[0], 0);
             assert_eq!(order[3], 3);
             assert!(order[1] == 1 || order[1] == 2);
+        }
+
+        #[test]
+        fn independent_nodes_keep_their_order() {
+            // 2 must come before 0; 1 and 3 depend on nothing.
+            let (order, had_cycle) = topological_sort(&[vec![], vec![], vec![0], vec![]]);
+            assert_eq!(vec![1, 2, 0, 3], order);
+            assert!(!had_cycle);
         }
 
         #[test]

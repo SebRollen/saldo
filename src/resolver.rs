@@ -28,6 +28,8 @@ pub struct EntryDef {
     pub body: Vec<EntryStmt>,
     /// The names of the tags on its moves.
     pub tags: Vec<String>,
+    /// The entries it fires after, by full name, and where they're named.
+    pub after: Vec<(String, Span)>,
     pub span: Span,
 }
 
@@ -104,11 +106,23 @@ enum Symbol {
     Mod(Vec<String>),
 }
 
+/// For each pair of entries where the first fires before the second, why:
+/// where the second reads something, what it is, and where the first moves
+/// it, or `None` if the second names the first with `after`.
+type Before = BTreeMap<(usize, usize), Option<(Span, String, Span)>>;
+
+/// Something an entry reads that another entry can change.
+enum Read {
+    Account(Path),
+    /// A tag, by its entry's index and its name.
+    Tag(usize, String),
+}
+
 /// What a path names.
 enum Target {
     Let(usize),
     Fn(String),
-    Entry,
+    Entry(String),
     Mod,
     Tag(String, String),
     Account(Path),
@@ -140,6 +154,7 @@ struct EntryDecl<'a> {
     full: String,
     label: Option<&'a String>,
     when: Option<&'a SpannedExpr>,
+    after: &'a [Spanned<Path>],
     body: &'a [EntryStmt],
     tags: HashSet<String>,
     span: Span,
@@ -255,6 +270,7 @@ impl<'a> Resolver<'a> {
                     name,
                     label,
                     when,
+                    after,
                     body,
                 } => {
                     let full = join(module, &name.0);
@@ -271,6 +287,7 @@ impl<'a> Resolver<'a> {
                             full,
                             label: label.as_ref(),
                             when: when.as_ref(),
+                            after,
                             body,
                             tags,
                             span,
@@ -389,7 +406,7 @@ impl<'a> Resolver<'a> {
         Ok(match symbol {
             Symbol::Let(i) => Target::Let(i),
             Symbol::Fn(full) => Target::Fn(full),
-            Symbol::Entry(..) => Target::Entry,
+            Symbol::Entry(full, _) => Target::Entry(full),
             Symbol::Mod(_) => Target::Mod,
         })
     }
@@ -560,6 +577,9 @@ impl<'a> Resolver<'a> {
         self.check_values_read_no_state();
         validate_fn_calls(&self.fns, &mut self.diags);
         self.check_accounts();
+        if self.diags.is_empty() {
+            self.order_entries();
+        }
     }
 
     fn resolve_let(&mut self, i: usize) {
@@ -711,6 +731,21 @@ impl<'a> Resolver<'a> {
         let (module, full, span, when) =
             (decl.module.clone(), decl.full.clone(), decl.span, decl.when);
         let (label, body, tags) = (decl.label.cloned(), decl.body, decl.tags.clone());
+        let mut after = Vec::new();
+        for (path, path_span) in decl.after {
+            match self.lookup(&module, path, *path_span) {
+                Ok(Target::Entry(other)) if other == full => self.diags.push(Diagnostic::new(
+                    *path_span,
+                    "an entry can't fire after itself",
+                )),
+                Ok(Target::Entry(other)) => after.push((other, *path_span)),
+                Ok(_) => self.diags.push(Diagnostic::new(
+                    *path_span,
+                    format!("`{path}` isn't an entry"),
+                )),
+                Err(diag) => self.diags.push(diag),
+            }
+        }
         let mut locals: Vec<String> = Vec::new();
         let mut resolved = Vec::new();
         for stmt in body {
@@ -760,6 +795,7 @@ impl<'a> Resolver<'a> {
             schedule,
             body: resolved,
             tags,
+            after,
             span,
         });
     }
@@ -875,7 +911,7 @@ impl<'a> Resolver<'a> {
             }
             Target::Let(i) => return Some(Expr::Global(self.lets[i].full.clone())),
             Target::Fn(_) => format!("`{path}` is a function; call it like `{path}(…)`"),
-            Target::Entry => format!(
+            Target::Entry(_) => format!(
                 "`{path}` is an entry; read what its tagged moves moved with `{path}.<tag>[year]`"
             ),
             Target::Tag(..) => {
@@ -1062,6 +1098,177 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
+    }
+
+    /// Orders the entries so that each fires after the entries that move
+    /// what it reads, on days they both fire, and after the entries it names
+    /// with `after`. Entries that don't depend on each other keep the order
+    /// they're written in.
+    fn order_entries(&mut self) {
+        let index: HashMap<&str, usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.name.as_str(), i))
+            .collect();
+        // What each entry moves money into or out of, and the tags it moves
+        // with, and where.
+        let mut writes: Vec<Vec<(&Path, Span)>> = Vec::new();
+        let mut tags: Vec<Vec<(&str, Span)>> = Vec::new();
+        // What each entry reads, and where.
+        let mut reads: Vec<Vec<(Read, Span)>> = Vec::new();
+        for entry in &self.entries {
+            let (mut w, mut t, mut r) = (Vec::new(), Vec::new(), Vec::new());
+            let mut read = |e: &SpannedExpr| {
+                walk_expr(e, &mut |sub| match sub.0.as_ref() {
+                    Expr::Balance(path) | Expr::AccountTotal(path, _) => {
+                        r.push((Read::Account(path.clone()), sub.1));
+                    }
+                    Expr::TagTotal { entry, tag, .. } => {
+                        r.push((Read::Tag(index[entry.as_str()], tag.clone()), sub.1));
+                    }
+                    _ => {}
+                });
+            };
+            for stmt in &entry.body {
+                match stmt {
+                    EntryStmt::Let { value, .. } => read(value),
+                    EntryStmt::Move(m) => {
+                        read(&m.amount);
+                        w.push((&m.from.0, m.from.1));
+                        w.push((&m.to.0, m.to.1));
+                        if let Some((tag, tag_span)) = &m.tag {
+                            t.push((tag.as_str(), *tag_span));
+                        }
+                    }
+                }
+            }
+            writes.push(w);
+            tags.push(t);
+            reads.push(r);
+        }
+
+        // Why entry `i` fires before entry `j`: where `j` reads something,
+        // what it is, and where `i` moves it.
+        let mut before: Before = BTreeMap::new();
+        for (j, entry_reads) in reads.iter().enumerate() {
+            for (read, read_span) in entry_reads {
+                let writers: Vec<(usize, Span, String)> = match read {
+                    Read::Account(path) => (0..writes.len())
+                        .filter_map(|i| {
+                            let (_, span) = writes[i].iter().find(|(w, _)| w.starts_with(path))?;
+                            Some((i, *span, format!("`{path}`")))
+                        })
+                        .collect(),
+                    Read::Tag(i, tag) => tags[*i]
+                        .iter()
+                        .filter(|(t, _)| t == tag)
+                        .take(1)
+                        .map(|(_, span)| (*i, *span, format!("`{}.{tag}`", self.entries[*i].name)))
+                        .collect(),
+                };
+                for (i, write_span, what) in writers {
+                    if i != j {
+                        before
+                            .entry((i, j))
+                            .or_insert(Some((*read_span, what, write_span)));
+                    }
+                }
+            }
+        }
+        // `after` wins over what an entry reads.
+        for (j, entry) in self.entries.iter().enumerate() {
+            for (other, _) in &entry.after {
+                let i = index[other.as_str()];
+                before.remove(&(j, i));
+                before.insert((i, j), None);
+            }
+        }
+
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); self.entries.len()];
+        for &(i, j) in before.keys() {
+            dependents[i].push(j);
+        }
+        let (order, had_cycle) = crate::util::topological_sort(&dependents);
+        if had_cycle {
+            self.report_entry_cycle(&order, &before);
+            return;
+        }
+        let mut entries: Vec<Option<EntryDef>> = std::mem::take(&mut self.entries)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.entries = order
+            .into_iter()
+            .map(|i| entries[i].take().expect("each entry is ordered once"))
+            .collect();
+    }
+
+    /// Reports a cycle among the entries that `order` leaves out, which each
+    /// read what the next one moves.
+    fn report_entry_cycle(&mut self, order: &[usize], before: &Before) {
+        let ordered: HashSet<usize> = order.iter().copied().collect();
+        let next = |i: usize| {
+            before
+                .keys()
+                .find(|&&(a, b)| a == i && !ordered.contains(&b))
+                .map(|&(_, b)| b)
+        };
+        // Follow the edges from an unordered entry until one repeats.
+        let start = (0..self.entries.len())
+            .find(|i| !ordered.contains(i))
+            .expect("a cycle leaves an entry out");
+        let mut path = vec![start];
+        let mut current = start;
+        while let Some(n) = next(current) {
+            if let Some(pos) = path.iter().position(|&p| p == n) {
+                path.drain(..pos);
+                break;
+            }
+            path.push(n);
+            current = n;
+        }
+        let names: Vec<String> = path
+            .iter()
+            .map(|&i| format!("`{}`", self.entries[i].name))
+            .collect();
+        let message = if let [a, b] = names.as_slice() {
+            format!(
+                "{a} and {b} each read what the other moves, so it isn't clear which fires first"
+            )
+        } else {
+            format!(
+                "{} each read what the next moves, so it isn't clear which fires first",
+                names.join(", ")
+            )
+        };
+        // Each entry in the cycle reads something the one before it moves.
+        let mut notes = Vec::new();
+        for (k, &reader) in path.iter().enumerate() {
+            let writer = path[(k + path.len() - 1) % path.len()];
+            if let Some(Some((read_span, what, write_span))) = before.get(&(writer, reader)) {
+                notes.push((
+                    *read_span,
+                    format!("`{}` reads {what} here", self.entries[reader].name),
+                ));
+                notes.push((
+                    *write_span,
+                    format!("which `{}` moves here", self.entries[writer].name),
+                ));
+            }
+        }
+        let (a, b) = (&self.entries[path[0]].name, &self.entries[path[1]].name);
+        let primary = notes
+            .first()
+            .map_or(self.entries[path[0]].span, |(span, _)| *span);
+        let mut diag = Diagnostic::new(primary, message).with_note(
+            primary,
+            format!("to choose, add `after {a}` to `{b}`, or the other way round"),
+        );
+        for (span, note) in notes {
+            diag = diag.with_note(span, note);
+        }
+        self.diags.push(diag);
     }
 
     fn check_param_cycles(&mut self) {
