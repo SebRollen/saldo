@@ -1440,6 +1440,30 @@ fn day_sets_combine_with_operators() {
 }
 
 #[test]
+fn schedules_can_end_and_arms_can_use_any_days() {
+    let src = "
+        let tip {
+          fri  => 5
+          last => 20
+          _    => 0
+        }
+        entry tips @ 2026-01-01..2026-02-01 & (fri | last) {
+          assets.cash -> expenses.tips : tip
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-03-31")).unwrap();
+    // Fridays in January 2026, then the 31st; nothing after the range ends.
+    assert_eq!(
+        postings_to(&output, "expenses.tips"),
+        ["5", "5", "5", "5", "5", "20"].map(usd)
+    );
+    assert_eq!(
+        output.log.transactions.last().unwrap().date,
+        d("2026-01-31")
+    );
+}
+
+#[test]
 fn every_nth_without_a_start_is_reported_once() {
     let src = "
         let biweekly = sun / 2
