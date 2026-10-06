@@ -69,6 +69,14 @@ impl Sources {
                 Error::Read { path, error } => {
                     writeln!(out, "could not read `{}`: {error}", path.display()).ok();
                 }
+                Error::UnknownSeries { name, close } => {
+                    write!(out, "`{name}` isn't an account, a group or a value").ok();
+                    match close {
+                        Some(close) => writeln!(out, "; did you mean `{close}`?"),
+                        None => writeln!(out),
+                    }
+                    .ok();
+                }
                 Error::Diagnostic(d) => {
                     out.push_str(&errors::format_diagnostics(
                         self,

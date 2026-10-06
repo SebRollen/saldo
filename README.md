@@ -87,12 +87,17 @@ The transactions can be piped into other PTA tools for reporting:
 ## Usage
 
 ```
-saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv] [--seed N]
+saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]
+      [--every UNIT] [--series NAME,...] [--seed N]
 ```
 
 - `--from` / `--to` — inclusive date range to simulate
 - `--format ledger` (default) — outputs double-entry ledger transactions
 - `--format csv` — outputs the daily balance of every account as CSV
+- `--every week|month|quarter|year` — with CSV, report the last day of each
+  period instead of every day
+- `--series assets.cash,assets,prices` — with CSV, report these accounts,
+  groups of accounts (summed) or values instead of every account
 - `--seed N` — the seed random draws come from; the same seed repeats a run
   (default: a random seed, which saldo prints)
 

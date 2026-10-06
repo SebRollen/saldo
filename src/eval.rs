@@ -85,6 +85,9 @@ pub struct DaySnapshot {
     /// End-of-day ledger balance of every account, in the order of
     /// `Output::accounts`.
     pub balances: Vec<Decimal>,
+    /// The values asked for, in the order asked, or `None` for one that has
+    /// no value that day.
+    pub values: Vec<Option<Decimal>>,
 }
 
 impl Model {
@@ -306,12 +309,16 @@ struct State<'p> {
 }
 
 impl Program {
+    /// Simulates from `first_day` and reports from `start` to `end`, drawing
+    /// with `seed`. Snapshots are of the last day of each `every` in the
+    /// report, and record `values`, by index, besides the balances.
     pub fn simulate(
         &self,
         first_day: NaiveDate,
-        start: NaiveDate,
-        end: NaiveDate,
+        (start, end): (NaiveDate, NaiveDate),
         seed: u64,
+        every: TimeUnit,
+        values: &[usize],
     ) -> Result<SimLog, Diagnostic> {
         let mut state = State {
             program: self,
@@ -399,7 +406,10 @@ impl Program {
             }
             state.run_checks(report)?;
 
-            if report {
+            let last_of_period = t
+                .succ_opt()
+                .is_none_or(|next| every.period_start(next) != every.period_start(t));
+            if report && (last_of_period || t == end) {
                 log.snapshots.push(DaySnapshot {
                     date: t,
                     balances: state
@@ -407,6 +417,14 @@ impl Program {
                         .iter()
                         .map(|b| b.unwrap_or(Decimal::ZERO))
                         .collect(),
+                    values: values
+                        .iter()
+                        .map(|&param| match &state.params[param] {
+                            ParamValue::Value(v) => Ok(Some(*v)),
+                            ParamValue::Inactive => Ok(None),
+                            ParamValue::Error(diag) => Err(diag.clone()),
+                        })
+                        .collect::<Result<_, _>>()?,
                 });
             }
 

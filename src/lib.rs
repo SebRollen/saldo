@@ -16,7 +16,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::io;
 
-pub use ast::{Path, Span};
+pub use ast::{Path, Span, TimeUnit};
 pub use errors::{Diagnostic, Error};
 pub use eval::{CheckFailure, DaySnapshot, SimLog, Transaction};
 pub use sources::Sources;
@@ -26,6 +26,11 @@ pub struct RunOpts {
     pub to: NaiveDate,
     /// What random draws depend on: the same seed draws the same numbers.
     pub seed: u64,
+    /// CSV reports the last day of each of these, from `from` to `to`.
+    pub every: TimeUnit,
+    /// What CSV reports, by name: accounts, groups of them or values. Empty
+    /// for every account.
+    pub series: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -38,6 +43,24 @@ pub struct Output {
     /// Whether the model draws at random, so that what it does depends on
     /// the seed.
     pub draws: bool,
+    /// What CSV reports.
+    columns: Vec<Column>,
+}
+
+/// A column of CSV output.
+#[derive(Debug, Clone)]
+struct Column {
+    name: String,
+    of: Measure,
+}
+
+#[derive(Debug, Clone)]
+enum Measure {
+    /// The sum of these accounts' ledger balances, times the sign that reads
+    /// their kind positive.
+    Accounts(Vec<usize>, Decimal),
+    /// The value a snapshot records at this index.
+    Value(usize),
 }
 
 impl Output {
@@ -60,19 +83,42 @@ impl Output {
         emit_ledger(out, &self.accounts, &self.log)
     }
 
-    /// Writes the daily balance of every account as CSV, read as each kind
-    /// reads: liabilities and income positive.
+    /// Writes the series asked for as CSV, one row per day reported, with
+    /// accounts read as each kind reads: liabilities and income positive.
     pub fn write_csv(&self, out: &mut impl io::Write) -> io::Result<()> {
-        emit_csv(out, &self.accounts, &self.log)
+        emit_csv(out, &self.columns, &self.log)
     }
+}
+
+/// A model that's been read and checked, ready to simulate as often as wanted.
+pub struct Model {
+    model: resolver::Model,
+    program: compile::Program,
+}
+
+/// Reads and checks a model given as text. It can't have modules in other
+/// files; use [`load_file`] for that.
+pub fn load(src: &str) -> Result<Model, Vec<Error>> {
+    let program = sources::load_text(&mut Sources::default(), src)?;
+    Model::new(&program)
+}
+
+/// Reads and checks the model in the file at `path`, reading the files of its
+/// modules. `sources` collects the text of every file read, for
+/// [`Sources::format_errors`] and [`Sources::format_warnings`].
+pub fn load_file(
+    path: impl AsRef<std::path::Path>,
+    sources: &mut Sources,
+) -> Result<Model, Vec<Error>> {
+    let program = sources::load_file(sources, path.as_ref())?;
+    Model::new(&program)
 }
 
 /// Simulates a model given as text. It can't have modules in other files; use
 /// [`run_file`] for that.
 pub fn run(src: &str, opts: &RunOpts) -> Result<Output, Vec<Error>> {
     check_range(opts)?;
-    let program = sources::load_text(&mut Sources::default(), src)?;
-    simulate(&program, opts)
+    load(src)?.simulate(opts)
 }
 
 /// Simulates the model in the file at `path`, reading the files of its
@@ -84,8 +130,7 @@ pub fn run_file(
     sources: &mut Sources,
 ) -> Result<Output, Vec<Error>> {
     check_range(opts)?;
-    let program = sources::load_file(sources, path.as_ref())?;
-    simulate(&program, opts)
+    load_file(path, sources)?.simulate(opts)
 }
 
 fn check_range(opts: &RunOpts) -> Result<(), Vec<Error>> {
@@ -98,39 +143,112 @@ fn check_range(opts: &RunOpts) -> Result<(), Vec<Error>> {
     Ok(())
 }
 
-fn simulate(program: &ast::Program, opts: &RunOpts) -> Result<Output, Vec<Error>> {
-    let model = resolver::resolve(program)
-        .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
-
-    let mut program = compile::compile(&model);
-    let diags = units::check(&mut program);
-    if !diags.is_empty() {
-        return Err(diags.into_iter().map(Error::Diagnostic).collect());
+impl Model {
+    fn new(program: &ast::Program) -> Result<Self, Vec<Error>> {
+        let model = resolver::resolve(program)
+            .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
+        let mut program = compile::compile(&model);
+        let diags = units::check(&mut program);
+        if !diags.is_empty() {
+            return Err(diags.into_iter().map(Error::Diagnostic).collect());
+        }
+        Ok(Model { model, program })
     }
 
-    let first_day = model.first_day(opts.from);
-    let log = program
-        .simulate(first_day, opts.from, opts.to, opts.seed)
-        .map_err(|mut d| {
-            // What went wrong may depend on what was drawn.
-            if !program.draws.is_empty() {
-                d.message = format!("{} (drawing with seed {})", d.message, opts.seed);
-            }
-            vec![Error::Diagnostic(d)]
-        })?;
+    /// Whether the model draws at random, so that what it does depends on
+    /// the seed.
+    pub fn draws(&self) -> bool {
+        !self.program.draws.is_empty()
+    }
 
-    let accounts = model.accounts.keys().cloned().collect();
-    let mut warnings = model.warnings.clone();
-    warnings.extend(model.missed_aggregate_warnings(first_day));
-    warnings.extend(program.missed_fill_warnings(first_day));
-    warnings.sort_by_key(|d| d.span.start);
+    /// Simulates the model as `opts` says.
+    pub fn simulate(&self, opts: &RunOpts) -> Result<Output, Vec<Error>> {
+        check_range(opts)?;
+        let (columns, values) = self.columns(&opts.series)?;
+        let first_day = self.model.first_day(opts.from);
+        let log = self
+            .program
+            .simulate(
+                first_day,
+                (opts.from, opts.to),
+                opts.seed,
+                opts.every,
+                &values,
+            )
+            .map_err(|mut d| {
+                // What went wrong may depend on what was drawn.
+                if self.draws() {
+                    d.message = format!("{} (drawing with seed {})", d.message, opts.seed);
+                }
+                vec![Error::Diagnostic(d)]
+            })?;
 
-    Ok(Output {
-        accounts,
-        log,
-        warnings,
-        draws: !program.draws.is_empty(),
-    })
+        let accounts = self.model.accounts.keys().cloned().collect();
+        let mut warnings = self.model.warnings.clone();
+        warnings.extend(self.model.missed_aggregate_warnings(first_day));
+        warnings.extend(self.program.missed_fill_warnings(first_day));
+        warnings.sort_by_key(|d| d.span.start);
+
+        Ok(Output {
+            accounts,
+            log,
+            warnings,
+            draws: self.draws(),
+            columns,
+        })
+    }
+
+    /// The columns for `series`, or for every account if it's empty, and the
+    /// values snapshots have to record for them.
+    fn columns(&self, series: &[String]) -> Result<(Vec<Column>, Vec<usize>), Vec<Error>> {
+        let accounts = &self.program.accounts;
+        let sign = |path: &Path| path.account_kind().expect("accounts have kinds").sign();
+        if series.is_empty() {
+            let columns = accounts
+                .iter()
+                .enumerate()
+                .map(|(i, path)| Column {
+                    name: path.ledger_name(),
+                    of: Measure::Accounts(vec![i], sign(path)),
+                })
+                .collect();
+            return Ok((columns, Vec::new()));
+        }
+        let (mut columns, mut values, mut errors) = (Vec::new(), Vec::new(), Vec::new());
+        for name in series {
+            let path = Path(name.split('.').map(str::to_string).collect());
+            let under: Vec<usize> = (0..accounts.len())
+                .filter(|&i| accounts[i].starts_with(&path))
+                .collect();
+            let of = if path.account_kind().is_some() && !under.is_empty() {
+                Measure::Accounts(under, sign(&path))
+            } else if let Some(param) = self.program.params.iter().position(|p| p.name == *name) {
+                values.push(param);
+                Measure::Value(values.len() - 1)
+            } else {
+                let names: Vec<String> = accounts
+                    .iter()
+                    .map(|a| a.to_string())
+                    .chain(self.program.params.iter().map(|p| p.name.clone()))
+                    .collect();
+                errors.push(Error::UnknownSeries {
+                    name: name.clone(),
+                    close: util::closest(name, names.iter().map(String::as_str))
+                        .map(str::to_string),
+                });
+                continue;
+            };
+            columns.push(Column {
+                name: name.clone(),
+                of,
+            });
+        }
+        if errors.is_empty() {
+            Ok((columns, values))
+        } else {
+            Err(errors)
+        }
+    }
 }
 
 /// Renders errors from [`run`] for display, naming the model `path`. `color`
@@ -197,26 +315,30 @@ fn write_transaction(
     writeln!(out)
 }
 
-fn emit_csv(out: &mut impl io::Write, accounts: &[Path], log: &eval::SimLog) -> io::Result<()> {
+fn emit_csv(out: &mut impl io::Write, columns: &[Column], log: &eval::SimLog) -> io::Result<()> {
     write!(out, "\"date\"")?;
-    for path in accounts {
-        write!(out, ",\"{}\"", path.ledger_name())?;
+    for column in columns {
+        write!(out, ",\"{}\"", column.name)?;
     }
     writeln!(out)?;
 
-    let signs: Vec<Decimal> = accounts
-        .iter()
-        .map(|p| {
-            p.account_kind()
-                .map_or(Decimal::ONE, ast::AccountKind::sign)
-        })
-        .collect();
     for snap in &log.snapshots {
         write!(out, "{}", snap.date)?;
-        for (v, sign) in snap.balances.iter().zip(&signs) {
-            // Avoid printing -0.00.
-            let v = if v.is_zero() { Decimal::ZERO } else { v * sign };
-            write!(out, ",{v:.2}")?;
+        for column in columns {
+            match &column.of {
+                Measure::Accounts(accounts, sign) => {
+                    let v: Decimal = accounts.iter().map(|&i| snap.balances[i]).sum();
+                    // Avoid printing -0.00.
+                    let v = if v.is_zero() { Decimal::ZERO } else { v * sign };
+                    write!(out, ",{v:.2}")?;
+                }
+                // Values aren't amounts, like an index of prices, so they
+                // keep their digits.
+                Measure::Value(i) => match snap.values[*i] {
+                    Some(v) => write!(out, ",{}", v.normalize())?,
+                    None => write!(out, ",")?,
+                },
+            }
         }
         writeln!(out)?;
     }

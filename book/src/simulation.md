@@ -59,3 +59,16 @@ The CSV output (`--format csv`) has one row per day with every account's
 balance at the end of that day, ordered by the accounts' names. Balances read
 as their kind reads (see [Accounts](./accounts.md#kinds)), so what you owe on a
 loan is positive.
+
+`--every week`, `month`, `quarter` or `year` reports the last day of each
+period instead of every day, and `--to` if it's partway through one.
+`--series` picks the columns, named as given:
+
+```
+saldo budget.saldo --from 2026-01-01 --to 2030-12-31 --format csv \
+  --every month --series assets.cash,assets,liabilities,prices
+```
+
+Each is an account; a group, which reports the sum of its accounts, so
+`assets` and `liabilities` give net worth; or a value, like `prices`, which
+is empty on days it has no value.

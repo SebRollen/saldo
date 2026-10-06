@@ -89,5 +89,11 @@ pub enum Error {
         path: PathBuf,
         error: std::io::Error,
     },
+    /// A series asked for in `RunOpts::series` that isn't an account, a
+    /// group of them or a value, and the closest name that is.
+    UnknownSeries {
+        name: String,
+        close: Option<String>,
+    },
     Diagnostic(Diagnostic),
 }

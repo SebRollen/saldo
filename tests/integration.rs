@@ -11,6 +11,8 @@ fn opts(from: &str, to: &str) -> RunOpts {
         from: d(from),
         to: d(to),
         seed: 0,
+        every: saldo::TimeUnit::Day,
+        series: Vec::new(),
     }
 }
 
@@ -2740,6 +2742,89 @@ fn a_named_every_nth_counts_from_where_its_used() {
     let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
     let dates: Vec<NaiveDate> = output.log.transactions.iter().map(|tx| tx.date).collect();
     assert_eq!(dates, ["2026-01-02", "2026-01-16", "2026-01-30"].map(d));
+}
+
+// --- sampling and series ---
+
+#[test]
+fn every_reports_the_last_day_of_each_period_and_the_last_day() {
+    let src = "entry pay @ 15th { income.salary -> assets.cash : 100 }";
+    let output = run(
+        src,
+        &RunOpts {
+            every: saldo::TimeUnit::Month,
+            ..opts("2026-01-10", "2026-04-20")
+        },
+    )
+    .unwrap();
+    let dates: Vec<NaiveDate> = output.log.snapshots.iter().map(|s| s.date).collect();
+    assert_eq!(
+        dates,
+        ["2026-01-31", "2026-02-28", "2026-03-31", "2026-04-20"].map(d)
+    );
+    assert!(output.to_csv().ends_with("2026-04-20,400.00,400.00\n"));
+}
+
+#[test]
+fn series_report_accounts_groups_and_values() {
+    let src = "
+        let prices { 2026.. => 1 compounding 10% every year }
+        let bonus { 2026 => 1_000 }
+        balances @ 2026-01-01 {
+          assets.cash      = 1_000
+          assets.savings   = 500
+          liabilities.loan = 300
+        }
+    ";
+    let output = run(
+        src,
+        &RunOpts {
+            series: ["assets.cash", "assets", "liabilities", "prices", "bonus"]
+                .map(str::to_string)
+                .to_vec(),
+            ..opts("2026-12-31", "2027-01-01")
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        output.to_csv(),
+        "\"date\",\"assets.cash\",\"assets\",\"liabilities\",\"prices\",\"bonus\"\n\
+         2026-12-31,1000.00,1500.00,300.00,1,1000\n\
+         2027-01-01,1000.00,1500.00,300.00,1.1,\n"
+    );
+}
+
+#[test]
+fn an_unknown_series_suggests_a_close_name() {
+    let errors = run(
+        "let prices = 1\nbalances @ 2026-01-01 { assets.cash = 1 }",
+        &RunOpts {
+            series: ["assets.csh", "nope"].map(str::to_string).to_vec(),
+            ..opts("2026-01-01", "2026-01-01")
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        &errors[..],
+        [
+            saldo::Error::UnknownSeries { name: a, close: Some(c) },
+            saldo::Error::UnknownSeries { name: b, close: None },
+        ] if a == "assets.csh" && c == "assets.cash" && b == "nope"
+    ));
+}
+
+#[test]
+fn cli_rejects_sampling_the_ledger() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_saldo"))
+        .args(["model.saldo", "--from", "2026-01-01", "--to", "2026-01-31"])
+        .args(["--every", "month"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--every and --series pick what CSV reports")
+    );
 }
 
 // --- random draws ---

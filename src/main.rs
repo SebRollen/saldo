@@ -1,11 +1,11 @@
 use chrono::NaiveDate;
-use saldo::{RunOpts, Sources, run_file};
+use saldo::{RunOpts, Sources, TimeUnit, run_file};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
-const USAGE: &str =
-    "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv] [--seed N]";
+const USAGE: &str = "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv] \
+                     [--every UNIT] [--series NAME,...] [--seed N]";
 
 const HELP: &str = "\
 Simulate a saldo model and print the resulting transactions or balances.
@@ -15,6 +15,11 @@ Options:
   --to YYYY-MM-DD     last day to report (inclusive)
   --format FORMAT     `ledger` (default): double-entry transactions
                       `csv`: daily balance of every account
+  --every UNIT        with csv, report the last day of each `week`, `month`,
+                      `quarter` or `year` instead of every day
+  --series NAME,...   with csv, report these accounts, groups of accounts
+                      (summed) or values, like `assets.cash,assets,prices`,
+                      instead of every account
   --seed N            draw the model's random numbers from seed N, a whole
                       number, to repeat a run (default: a random seed)
   -h, --help          print this help
@@ -45,6 +50,8 @@ fn main() -> ExitCode {
         to,
         format,
         seed,
+        every,
+        series,
     } = match parse_args(&args) {
         Ok(x) => x,
         Err(msg) => {
@@ -57,6 +64,8 @@ fn main() -> ExitCode {
         from,
         to,
         seed: seed.unwrap_or_else(|| RandomState::new().hash_one(())),
+        every,
+        series,
     };
     let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut sources = Sources::default();
@@ -95,7 +104,13 @@ fn main() -> ExitCode {
         }
         Err(errors) => {
             eprint!("{}", sources.format_errors(&errors, color));
-            ExitCode::from(1)
+            let bad_arguments = errors.iter().all(|e| {
+                matches!(
+                    e,
+                    saldo::Error::InvalidDateRange { .. } | saldo::Error::UnknownSeries { .. }
+                )
+            });
+            ExitCode::from(if bad_arguments { 2 } else { 1 })
         }
     }
 }
@@ -106,6 +121,8 @@ struct Args {
     to: NaiveDate,
     format: OutputFormat,
     seed: Option<u64>,
+    every: TimeUnit,
+    series: Vec<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
@@ -114,6 +131,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut to: Option<NaiveDate> = None;
     let mut format = OutputFormat::Ledger;
     let mut seed: Option<u64> = None;
+    let mut every: Option<TimeUnit> = None;
+    let mut series: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -144,6 +163,24 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     )
                 })?);
             }
+            "--every" => {
+                i += 1;
+                let value = args.get(i).ok_or("missing value for --every")?;
+                every = Some(TimeUnit::from_name(value).ok_or_else(|| {
+                    format!("bad --every `{value}`: `day`, `week`, `month`, `quarter` or `year`")
+                })?);
+            }
+            "--series" => {
+                i += 1;
+                let value = args.get(i).ok_or("missing value for --series")?;
+                series.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string),
+                );
+            }
             other if !other.starts_with("--") => {
                 if path.is_some() {
                     return Err(format!("unexpected positional arg `{other}`"));
@@ -154,12 +191,20 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         }
         i += 1;
     }
+    if matches!(format, OutputFormat::Ledger) && (every.is_some() || !series.is_empty()) {
+        return Err(
+            "--every and --series pick what CSV reports; the ledger has every transaction"
+                .to_string(),
+        );
+    }
     Ok(Args {
         path: path.ok_or("missing source path")?,
         from: from.ok_or("missing --from")?,
         to: to.ok_or("missing --to")?,
         format,
         seed,
+        every: every.unwrap_or(TimeUnit::Day),
+        series,
     })
 }
 
