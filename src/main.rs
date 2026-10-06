@@ -5,7 +5,7 @@ use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv] \
-                     [--every UNIT] [--series NAME,...] [--seed N] [--runs N] [--scenario NAME]";
+                     [--every UNIT] [--series NAME,...] [--seed N] [--runs N] [--scenario NAME,...]";
 
 const HELP: &str = "\
 Simulate a saldo model and print the resulting transactions or balances.
@@ -25,8 +25,10 @@ Options:
   --runs N            simulate N runs, each drawing with its own seed, and
                       write them all as CSV, with each run's number and seed;
                       `--seed` with a run's seed repeats it
-  --scenario NAME     simulate the model with scenario NAME, or with the
-                      scenarios NAME joins with `+`, like `prepay+daycare`
+  --scenario NAME,... simulate the model with scenario NAME, or with the
+                      scenarios NAME joins with `+`, like `prepay+daycare`;
+                      several, like `base,prepay`, write CSV with each one's
+                      name, and draw the same numbers in each
   -h, --help          print this help
   -V, --version       print the version";
 
@@ -59,7 +61,7 @@ fn main() -> ExitCode {
         every,
         series,
         runs,
-        scenario,
+        scenarios,
     } = match parse_args(&args) {
         Ok(x) => x,
         Err(msg) => {
@@ -77,21 +79,43 @@ fn main() -> ExitCode {
     };
     let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut sources = Sources::default();
-    let model = match saldo::load_file(&path, &mut sources).and_then(|model| match &scenario {
-        Some(name) => model.scenario(name),
-        None => Ok(model),
-    }) {
+    let model = match saldo::load_file(&path, &mut sources) {
         Ok(model) => model,
+        Err(errors) => return report_errors(&sources, &errors, color),
+    };
+    // Many runs, and several scenarios, are simulated side by side.
+    if runs.is_none() && scenarios.len() <= 1 {
+        let model = match scenarios.first() {
+            Some(name) => match model.scenario(name) {
+                Ok(model) => model,
+                Err(errors) => return report_errors(&sources, &errors, color),
+            },
+            None => model,
+        };
+        let report = Report {
+            sources: &sources,
+            color,
+            random_seed: seed.is_none() && model.draws(),
+        };
+        return report.one(&model, &opts, format);
+    }
+    let names = if scenarios.is_empty() {
+        vec!["base".to_string()]
+    } else {
+        scenarios
+    };
+    let models = match model.side_by_side(&names, &opts.series) {
+        Ok(models) => models,
         Err(errors) => return report_errors(&sources, &errors, color),
     };
     let report = Report {
         sources: &sources,
         color,
-        random_seed: seed.is_none() && model.draws(),
+        random_seed: seed.is_none() && models.draws(),
     };
     match runs {
-        None => report.one(&model, &opts, format),
-        Some(runs) => report.many(&model, &opts, runs),
+        None => report.several(&models, &opts),
+        Some(runs) => report.many(&models, &opts, runs),
     }
 }
 
@@ -134,16 +158,54 @@ impl Report<'_> {
         self.report_failed_checks(failed)
     }
 
-    /// Simulates `model` `runs` times and writes every run's CSV to stdout.
-    fn many(&self, model: &saldo::Model, opts: &RunOpts, runs: u32) -> ExitCode {
-        if runs > 1 && !model.draws() {
-            eprintln!("note: the model doesn't draw at random, so every run is the same");
+    /// Simulates each of `models`, several scenarios, once, and writes their
+    /// CSV to stdout, one after another.
+    fn several(&self, models: &saldo::SideBySide, opts: &RunOpts) -> ExitCode {
+        let outputs = match models.simulate(opts) {
+            Ok(outputs) => outputs,
+            Err(errors) => return report_errors(self.sources, &errors, self.color),
+        };
+        let mut warned = Vec::new();
+        for output in &outputs {
+            self.warn(&mut warned, &output.warnings);
         }
         self.note_seed(opts.seed);
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        let mut failed = Vec::new();
+        for (i, (name, output)) in models.names().zip(&outputs).enumerate() {
+            if let Err(code) =
+                written_or_exit(output.write_scenario_csv(&mut out, name, None, i == 0))
+            {
+                return code;
+            }
+            failed.extend(
+                output
+                    .log
+                    .failed_checks
+                    .iter()
+                    .map(|failure| failure.diagnostic_in(Some(name))),
+            );
+        }
+        if let Err(code) = written_or_exit(out.flush()) {
+            return code;
+        }
+        self.report_failed_checks(failed)
+    }
+
+    /// Simulates each of `models` `runs` times and writes every run's CSV to
+    /// stdout, with each one's name if there are several.
+    fn many(&self, models: &saldo::SideBySide, opts: &RunOpts, runs: u32) -> ExitCode {
+        if runs > 1 && !models.draws() {
+            eprintln!("note: the model doesn't draw at random, so every run is the same");
+        }
+        self.note_seed(opts.seed);
+        let names: Vec<&str> = models.names().collect();
+        let named = names.len() > 1;
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        let mut warned = Vec::new();
         let mut failures: Vec<RunsFailed> = Vec::new();
         let mut stopped: Option<ExitCode> = None;
-        model.simulate_runs(opts, runs, |run| {
+        models.simulate_runs(opts, runs, |run| {
             let output = match run.result {
                 Ok(output) => output,
                 Err(errors) => {
@@ -152,13 +214,13 @@ impl Report<'_> {
                 }
             };
             if run.number == 1 {
-                eprint!(
-                    "{}",
-                    self.sources.format_warnings(&output.warnings, self.color)
-                );
+                self.warn(&mut warned, &output.warnings);
             }
             for failure in &output.log.failed_checks {
-                match failures.iter_mut().find(|f| f.first.span == failure.span) {
+                match failures
+                    .iter_mut()
+                    .find(|f| f.scenario == run.scenario && f.first.span == failure.span)
+                {
                     Some(failed) => {
                         failed.runs += 1;
                         // Runs come in order, so a tie goes to the earlier.
@@ -167,7 +229,7 @@ impl Report<'_> {
                                 first: failure.clone(),
                                 number: run.number,
                                 seed: run.seed,
-                                runs: failed.runs,
+                                ..*failed
                             };
                         }
                     }
@@ -175,16 +237,23 @@ impl Report<'_> {
                         first: failure.clone(),
                         number: run.number,
                         seed: run.seed,
+                        scenario: run.scenario,
                         runs: 1,
                     }),
                 }
             }
-            match written_or_exit(output.write_run_csv(
-                &mut out,
-                run.number,
-                run.seed,
-                run.number == 1,
-            )) {
+            let header = run.number == 1 && run.scenario == 0;
+            let written = if named {
+                output.write_scenario_csv(
+                    &mut out,
+                    names[run.scenario],
+                    Some((run.number, run.seed)),
+                    header,
+                )
+            } else {
+                output.write_run_csv(&mut out, run.number, run.seed, header)
+            };
+            match written_or_exit(written) {
                 Ok(()) => true,
                 Err(code) => {
                     stopped = Some(code);
@@ -198,7 +267,7 @@ impl Report<'_> {
         if let Err(code) = written_or_exit(out.flush()) {
             return code;
         }
-        failures.sort_by_key(|f| f.first.span.start);
+        failures.sort_by_key(|f| (f.first.span.start, f.scenario));
         let failed = failures
             .iter()
             .map(|f| {
@@ -207,16 +276,33 @@ impl Report<'_> {
                     .found
                     .as_ref()
                     .map_or(String::new(), |found| format!(": {found}"));
+                let of = if named {
+                    format!(" of {}", names[f.scenario])
+                } else {
+                    String::new()
+                };
                 Diagnostic::new(
                     f.first.span,
                     format!(
-                        "check failed in {} of {runs} runs, first on {} in run {} (seed {}){found}",
+                        "check failed in {} of {runs} runs{of}, first on {} in run {} (seed {}){found}",
                         f.runs, f.first.first, f.number, f.seed
                     ),
                 )
             })
             .collect();
         self.report_failed_checks(failed)
+    }
+
+    /// Prints `warnings`, except those in `warned`, which it adds them to:
+    /// scenarios share the model's warnings.
+    fn warn(&self, warned: &mut Vec<(saldo::Span, String)>, warnings: &[Diagnostic]) {
+        let new: Vec<Diagnostic> = warnings
+            .iter()
+            .filter(|w| !warned.contains(&(w.span, w.message.clone())))
+            .cloned()
+            .collect();
+        warned.extend(new.iter().map(|w| (w.span, w.message.clone())));
+        eprint!("{}", self.sources.format_warnings(&new, self.color));
     }
 
     fn note_seed(&self, seed: u64) {
@@ -237,12 +323,13 @@ impl Report<'_> {
     }
 }
 
-/// A check that failed in some of many runs: in how many, and the run where
-/// it failed first.
+/// A check that failed in some of many runs of a scenario: in how many, and
+/// the run where it failed first.
 struct RunsFailed {
     first: CheckFailure,
     number: u32,
     seed: u64,
+    scenario: usize,
     runs: u32,
 }
 
@@ -283,7 +370,7 @@ struct Args {
     every: TimeUnit,
     series: Vec<String>,
     runs: Option<u32>,
-    scenario: Option<String>,
+    scenarios: Vec<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
@@ -295,7 +382,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut runs: Option<u32> = None;
     let mut every: Option<TimeUnit> = None;
     let mut series: Vec<String> = Vec::new();
-    let mut scenario: Option<String> = None;
+    let mut scenarios: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -357,7 +444,13 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--scenario" => {
                 i += 1;
                 let value = args.get(i).ok_or("missing value for --scenario")?;
-                scenario = Some(value.trim().to_string());
+                scenarios.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string),
+                );
             }
             other if !other.starts_with("--") => {
                 if path.is_some() {
@@ -369,16 +462,24 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         }
         i += 1;
     }
-    // Many runs write CSV; a run's ledger is its seed away.
-    let format = match (format, runs) {
-        (Some(OutputFormat::Ledger), Some(_)) => {
+    // Many runs, and several scenarios, write CSV; a run's ledger is its seed
+    // away, and a scenario's its name.
+    let several = scenarios.len() > 1;
+    let format = match format {
+        Some(OutputFormat::Ledger) if runs.is_some() => {
             return Err(
                 "--runs writes CSV; for a run's ledger, pass its seed with --seed".to_string(),
             );
         }
-        (Some(format), _) => format,
-        (None, Some(_)) => OutputFormat::Csv,
-        (None, None) => OutputFormat::Ledger,
+        Some(OutputFormat::Ledger) if several => {
+            return Err(
+                "several scenarios write CSV; for one's ledger, pass it alone to --scenario"
+                    .to_string(),
+            );
+        }
+        Some(format) => format,
+        None if runs.is_some() || several => OutputFormat::Csv,
+        None => OutputFormat::Ledger,
     };
     if matches!(format, OutputFormat::Ledger) && (every.is_some() || !series.is_empty()) {
         return Err(
@@ -395,7 +496,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         every: every.unwrap_or(TimeUnit::Day),
         series,
         runs,
-        scenario,
+        scenarios,
     })
 }
 

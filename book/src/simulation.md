@@ -12,7 +12,8 @@ from a seed. `--seed N` sets it, and the same seed repeats a run exactly;
 without one, saldo picks a seed at random and prints it. `--runs` simulates
 many runs at once (see [Many runs](./monte-carlo.md)).
 
-`--scenario NAME` simulates the model with one of its scenarios (see
+`--scenario NAME` simulates the model with one of its scenarios, and
+`--scenario base,NAME` the model and the scenario side by side (see
 [Scenarios](./scenarios.md)).
 
 ## Warm-up

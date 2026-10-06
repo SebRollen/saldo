@@ -88,7 +88,7 @@ The transactions can be piped into other PTA tools for reporting:
 
 ```
 saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]
-      [--every UNIT] [--series NAME,...] [--seed N] [--runs N] [--scenario NAME]
+      [--every UNIT] [--series NAME,...] [--seed N] [--runs N] [--scenario NAME,...]
 ```
 
 - `--from` / `--to` — inclusive date range to simulate
@@ -102,8 +102,10 @@ saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]
   (default: a random seed, which saldo prints)
 - `--runs N` — simulate N runs, each with its own seed, as one CSV with each
   run's number and seed; `--seed` with a run's seed repeats it
-- `--scenario NAME` — simulate the model with scenario NAME, or with the
-  scenarios NAME joins with `+`, like `prepay+daycare`
+- `--scenario NAME,...` — simulate the model with scenario NAME, or with the
+  scenarios NAME joins with `+`, like `prepay+daycare`; several, like
+  `base,prepay`, run side by side as one CSV with each one's name, drawing the
+  same numbers in each
 
 saldo exits with 0 when all is well, 1 for an error in the model, 2 for bad
 arguments, and 3 when a check failed (it still writes all the output).
@@ -325,7 +327,8 @@ replaces the declaration there, or adds it if there's none. In a value that
 replaces another, its own name reads the one it replaces, like
 `let pay.salary = pay.salary * 80%`. `drop` stops an entry, or a module's
 entries and checks, on some days or all of them. With the same seed, a
-scenario draws what the model draws, except where it changes it.
+scenario draws what the model draws, except where it changes it, so
+`--scenario base,prepay --runs 1000` compares the two run by run.
 
 ## Building
 

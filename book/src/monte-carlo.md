@@ -41,6 +41,10 @@ just that run, with its ledger:
 saldo budget.saldo --from 2026-01-01 --to 2029-12-31 --seed 1137475080
 ```
 
+With several scenarios (see [Scenarios](./scenarios.md#side-by-side)), each
+run draws with the same seed in every one, and the CSV says which scenario
+each row is.
+
 ## Checks
 
 A check that fails doesn't stop a run. Once every run is written, saldo

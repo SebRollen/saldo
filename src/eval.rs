@@ -68,7 +68,16 @@ pub struct CheckFailure {
 impl CheckFailure {
     /// Says when the check failed, pointing at it.
     pub fn diagnostic(&self) -> Diagnostic {
-        let mut message = format!("check failed on {}", self.first);
+        self.diagnostic_in(None)
+    }
+
+    /// Says when the check failed, in `scenario` if it's one of several,
+    /// pointing at it.
+    pub fn diagnostic_in(&self, scenario: Option<&str>) -> Diagnostic {
+        let mut message = match scenario {
+            Some(scenario) => format!("check failed in {scenario} on {}", self.first),
+            None => format!("check failed on {}", self.first),
+        };
         if let Some(found) = &self.found {
             message = format!("{message}: {found}");
         }

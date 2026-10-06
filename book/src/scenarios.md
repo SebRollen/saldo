@@ -64,7 +64,8 @@ saldo budget.saldo --from 2026-01-01 --to 2026-12-31 --scenario prepay
 
 `--scenario` simulates the model with the scenario, and writes what it
 would without one: a ledger, or CSV with `--format csv`. `--scenario base` is
-the model as it's written.
+the model as it's written. To compare scenarios, run them side by side (see
+[below](#side-by-side)).
 
 ## Replacing and adding
 
@@ -153,6 +154,57 @@ saldo budget.saldo --from 2026-01-01 --to 2026-12-31 --scenario prepay+daycare
 It's an error if two of them change the same declaration, or one changes a
 module and the other something in it. Days that either drops are dropped, and
 checks from both are checked.
+
+## Side by side
+
+Several scenarios, separated by commas, run side by side, as one CSV with a
+`scenario` column:
+
+```
+saldo budget.saldo --from 2026-01-01 --to 2026-12-31 --every quarter \
+  --series assets.cash,liabilities --scenario base,prepay,daycare
+```
+
+```
+"scenario","date","assets.cash","liabilities"
+base,2026-03-31,20950.00,16200.00
+base,2026-06-30,31900.00,14400.00
+…
+prepay,2026-03-31,18250.00,13500.00
+…
+daycare,2026-12-31,58150.00,10800.00
+```
+
+The columns are the same for each: every account in any of them, or the
+series asked for. An account a scenario doesn't have reads 0 there, and a value
+it doesn't have is empty. A check that fails is reported for each scenario it
+fails in, naming it. With `check assets.cash >= 30_000 @ 2026-06-30`:
+
+```
+Error: check failed in prepay on 2026-06-30: 26500 >= 30000
+```
+
+With `--runs` (see [Many runs](./monte-carlo.md)), each run comes first, then
+each scenario in it, and run 17 draws with the same seed in every scenario. If
+the groceries were drawn at random, say with `normal(250, 60)` each Sunday,
+both would buy the same groceries in run 17, so the difference between `base`
+and `prepay` there is what paying the car off early does, and not luck:
+
+```
+saldo budget.saldo --from 2026-01-01 --to 2026-12-31 --runs 1000 --every year \
+  --series assets.cash,liabilities --scenario base,prepay
+```
+
+```
+"run","seed","scenario","date","assets.cash","liabilities"
+1,9716232063330790915,base,2026-12-31,40630.99,10800.00
+1,9716232063330790915,prepay,2026-12-31,29830.99,0.00
+2,13066309581097501094,base,2026-12-31,40924.92,10800.00
+…
+```
+
+`--seed` with a run's seed and `--scenario prepay` repeats that run of
+`prepay`, with its ledger.
 
 ## Mistakes
 

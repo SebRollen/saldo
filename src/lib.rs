@@ -64,6 +64,8 @@ enum Measure {
     Accounts(Vec<usize>, Decimal),
     /// The value a snapshot records at this index.
     Value(usize),
+    /// A value the model doesn't have, which is always empty.
+    Missing,
 }
 
 impl Output {
@@ -89,7 +91,7 @@ impl Output {
     /// Writes the series asked for as CSV, one row per day reported, with
     /// accounts read as each kind reads: liabilities and income positive.
     pub fn write_csv(&self, out: &mut impl io::Write) -> io::Result<()> {
-        emit_csv(out, &self.columns, &self.log, None, true)
+        emit_csv(out, &self.columns, &self.log, None, None, true)
     }
 
     /// Writes CSV as [`Output::write_csv`] does, for run `number` of many,
@@ -102,7 +104,28 @@ impl Output {
         seed: u64,
         header: bool,
     ) -> io::Result<()> {
-        emit_csv(out, &self.columns, &self.log, Some((number, seed)), header)
+        emit_csv(
+            out,
+            &self.columns,
+            &self.log,
+            Some((number, seed)),
+            None,
+            header,
+        )
+    }
+
+    /// Writes CSV as [`Output::write_csv`] does, for scenario `scenario` of
+    /// several, and for `run`'s number and seed if it's one of many runs:
+    /// each row starts with them, and the header, if `header`, names them
+    /// `run`, `seed` and `scenario`.
+    pub fn write_scenario_csv(
+        &self,
+        out: &mut impl io::Write,
+        scenario: &str,
+        run: Option<(u32, u64)>,
+        header: bool,
+    ) -> io::Result<()> {
+        emit_csv(out, &self.columns, &self.log, run, Some(scenario), header)
     }
 }
 
@@ -111,6 +134,8 @@ impl Output {
 pub struct Run {
     pub number: u32,
     pub seed: u64,
+    /// Which of the models side by side it's a run of, from 0.
+    pub scenario: usize,
     pub result: Result<Output, Vec<Error>>,
 }
 
@@ -121,6 +146,8 @@ pub struct Model {
     program: compile::Program,
     /// The model as written, and its scenarios, to apply them to.
     source: Arc<ast::Program>,
+    /// The scenarios applied to it, by their places in `source`.
+    applied: Vec<usize>,
 }
 
 /// Reads and checks a model given as text. It can't have modules in other
@@ -178,18 +205,17 @@ impl Model {
             return Err(diags.into_iter().map(Error::Diagnostic).collect());
         }
         let source = Arc::new(source);
-        Self::build(&source, &source, &scenario::Applied::default())
+        Self::build(&source, &[])
             .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect())
     }
 
-    /// The model `program` describes, which is `source` with the changes
-    /// `applied` describes.
-    fn build(
-        source: &Arc<ast::Program>,
-        program: &ast::Program,
-        applied: &scenario::Applied,
-    ) -> Result<Self, Vec<Diagnostic>> {
-        let model = resolver::resolve(program, applied)?;
+    /// The model `source` describes, with its scenarios at `applied`, one
+    /// after another.
+    fn build(source: &Arc<ast::Program>, applied: &[usize]) -> Result<Self, Vec<Diagnostic>> {
+        let scenarios: Vec<&ast::Scenario> =
+            applied.iter().map(|&i| &source.scenarios[i]).collect();
+        let (program, changes) = scenario::apply(source, &scenarios)?;
+        let model = resolver::resolve(&program, &changes)?;
         let mut program = compile::compile(&model);
         let diags = units::check(&mut program);
         if !diags.is_empty() {
@@ -199,6 +225,7 @@ impl Model {
             model,
             program,
             source: Arc::clone(source),
+            applied: applied.to_vec(),
         })
     }
 
@@ -211,14 +238,14 @@ impl Model {
     /// `name` joins with `+`, one after another. `base` is the model as it's
     /// written.
     pub fn scenario(&self, name: &str) -> Result<Model, Vec<Error>> {
-        let mut scenarios = Vec::new();
+        let mut applied = Vec::new();
         let mut errors = Vec::new();
         for part in name.split('+').map(str::trim) {
             if part == scenario::BASE {
                 continue;
             }
-            match self.source.scenarios.iter().find(|s| s.name.0 == part) {
-                Some(found) => scenarios.push(found),
+            match self.scenarios().position(|s| s == part) {
+                Some(i) => applied.push(i),
                 None => errors.push(Error::UnknownScenario {
                     name: part.to_string(),
                     close: util::closest(part, self.scenarios().chain([scenario::BASE]))
@@ -229,27 +256,32 @@ impl Model {
         if !errors.is_empty() {
             return Err(errors);
         }
-        if scenarios.is_empty() {
+        if applied == self.applied {
             return Ok(self.clone());
         }
-        // An error may show up in the model, away from the scenario that
-        // causes it.
-        let named = |diags: Vec<Diagnostic>| -> Vec<Error> {
-            diags
-                .into_iter()
-                .map(|diag| {
-                    if scenarios.iter().any(|s| scenario::contains(s, diag.span)) {
-                        return diag;
-                    }
-                    scenarios.iter().fold(diag, |diag, s| {
-                        diag.with_note(s.name.1, format!("with scenario `{}`", s.name.0))
-                    })
-                })
-                .map(Error::Diagnostic)
-                .collect()
-        };
-        let (program, applied) = scenario::apply(&self.source, &scenarios).map_err(named)?;
-        Self::build(&self.source, &program, &applied).map_err(named)
+        Self::build(&self.source, &applied)
+            .map_err(|diags| named_errors(&self.source, &applied, diags))
+    }
+
+    /// The scenarios `names`, each as [`Model::scenario`] takes it, to
+    /// simulate side by side, reporting `series` as CSV.
+    pub fn side_by_side(
+        &self,
+        names: &[String],
+        series: &[String],
+    ) -> Result<SideBySide, Vec<Error>> {
+        let mut models = Vec::new();
+        let mut errors = Vec::new();
+        for name in names {
+            match self.scenario(name) {
+                Ok(model) => models.push((name.clone(), model)),
+                Err(e) => errors.extend(e),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        SideBySide::new(models, series)
     }
 
     /// Whether the model draws at random, so that what it does depends on
@@ -260,7 +292,8 @@ impl Model {
 
     /// Simulates the model as `opts` says.
     pub fn simulate(&self, opts: &RunOpts) -> Result<Output, Vec<Error>> {
-        self.simulate_keeping(opts, true)
+        let columns = self.columns(&opts.series)?;
+        self.simulate_keeping(opts, true, &columns)
     }
 
     /// The seed that run `number` of many draws with, when `seed` is the
@@ -274,67 +307,30 @@ impl Model {
     /// of number. Stops when `each` returns `false`. Runs don't keep their
     /// transactions; simulate a run's seed for its ledger.
     pub fn simulate_runs(&self, opts: &RunOpts, runs: u32, mut each: impl FnMut(Run) -> bool) {
-        let workers = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZero::get)
-            .min(runs as usize);
-        let next = std::sync::atomic::AtomicU32::new(1);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                let sender = sender.clone();
-                let next = &next;
-                // Each worker has its own copy, whose caches it needn't
-                // share.
-                let model = self.clone();
-                scope.spawn(move || {
-                    loop {
-                        let number = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if number > runs {
-                            break;
-                        }
-                        let seed = Self::run_seed(opts.seed, number);
-                        let opts = RunOpts {
-                            seed,
-                            ..opts.clone()
-                        };
-                        let result = model.simulate_keeping(&opts, false);
-                        // The receiver hangs up when `each` says to stop.
-                        if sender
-                            .send(Run {
-                                number,
-                                seed,
-                                result,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
+        match SideBySide::new(vec![(String::new(), self.clone())], &opts.series) {
+            Ok(models) => models.simulate_runs(opts, runs, each),
+            Err(errors) => {
+                each(Run {
+                    number: 1,
+                    seed: Self::run_seed(opts.seed, 1),
+                    scenario: 0,
+                    result: Err(errors),
                 });
             }
-            drop(sender);
-            // Runs finish in any order; hand them over in order.
-            let mut waiting = std::collections::BTreeMap::new();
-            let mut due = 1;
-            for run in receiver {
-                waiting.insert(run.number, run);
-                while let Some(run) = waiting.remove(&due) {
-                    due += 1;
-                    if !each(run) {
-                        return;
-                    }
-                }
-            }
-        });
+        }
     }
 
-    fn simulate_keeping(&self, opts: &RunOpts, transactions: bool) -> Result<Output, Vec<Error>> {
+    fn simulate_keeping(
+        &self,
+        opts: &RunOpts,
+        transactions: bool,
+        (columns, values): &Columns,
+    ) -> Result<Output, Vec<Error>> {
         check_range(opts)?;
-        let (columns, values) = self.columns(&opts.series)?;
         let first_day = self.model.first_day(opts.from);
         let record = eval::Record {
             every: opts.every,
-            values: &values,
+            values,
             transactions,
         };
         let log = self
@@ -345,7 +341,7 @@ impl Model {
                 if self.draws() {
                     d.message = format!("{} (drawing with seed {})", d.message, opts.seed);
                 }
-                vec![Error::Diagnostic(d)]
+                named_errors(&self.source, &self.applied, vec![d])
             })?;
 
         let accounts = self.model.accounts.keys().cloned().collect();
@@ -359,60 +355,244 @@ impl Model {
             log,
             warnings,
             draws: self.draws(),
-            columns,
+            columns: columns.clone(),
         })
     }
 
     /// The columns for `series`, or for every account if it's empty, and the
     /// values snapshots have to record for them.
-    fn columns(&self, series: &[String]) -> Result<(Vec<Column>, Vec<usize>), Vec<Error>> {
+    fn columns(&self, series: &[String]) -> Result<Columns, Vec<Error>> {
+        let mut columns = shared_columns(&[self], series)?;
+        Ok(columns.pop().expect("a model has columns"))
+    }
+
+    /// What column `name` of CSV reports, if it names something in the model:
+    /// an account, the sum of a group of accounts, or a value, which is added
+    /// to the `values` snapshots record.
+    fn measure(&self, name: &str, values: &mut Vec<usize>) -> Option<Measure> {
         let accounts = &self.program.accounts;
-        let sign = |path: &Path| path.account_kind().expect("accounts have kinds").sign();
-        if series.is_empty() {
-            let columns = accounts
-                .iter()
-                .enumerate()
-                .map(|(i, path)| Column {
-                    name: path.ledger_name(),
-                    of: Measure::Accounts(vec![i], sign(path)),
-                })
-                .collect();
-            return Ok((columns, Vec::new()));
+        let path = Path(name.split('.').map(str::to_string).collect());
+        let under: Vec<usize> = (0..accounts.len())
+            .filter(|&i| accounts[i].starts_with(&path))
+            .collect();
+        if path.account_kind().is_some() && !under.is_empty() {
+            return Some(Measure::Accounts(under, sign(&path)));
         }
-        let (mut columns, mut values, mut errors) = (Vec::new(), Vec::new(), Vec::new());
-        for name in series {
-            let path = Path(name.split('.').map(str::to_string).collect());
-            let under: Vec<usize> = (0..accounts.len())
-                .filter(|&i| accounts[i].starts_with(&path))
-                .collect();
-            let of = if path.account_kind().is_some() && !under.is_empty() {
-                Measure::Accounts(under, sign(&path))
-            } else if let Some(param) = self.program.params.iter().position(|p| p.name == *name) {
-                values.push(param);
-                Measure::Value(values.len() - 1)
-            } else {
-                let names: Vec<String> = accounts
+        let param = self.program.params.iter().position(|p| p.name == *name)?;
+        values.push(param);
+        Some(Measure::Value(values.len() - 1))
+    }
+
+    /// The name closest to `name` that a column of CSV can report.
+    fn closest_series(&self, name: &str) -> Option<String> {
+        let names: Vec<String> = self
+            .program
+            .accounts
+            .iter()
+            .map(|a| a.to_string())
+            .chain(self.program.params.iter().map(|p| p.name.clone()))
+            .collect();
+        util::closest(name, names.iter().map(String::as_str)).map(str::to_string)
+    }
+}
+
+/// The columns of CSV for a model, and the values its snapshots record for
+/// them.
+type Columns = (Vec<Column>, Vec<usize>);
+
+/// The sign that reads an account of `path`'s kind positive.
+fn sign(path: &Path) -> Decimal {
+    path.account_kind().expect("accounts have kinds").sign()
+}
+
+/// What CSV reports for each of `models`: the same columns, for `series`, or
+/// for every account in any of them if it's empty, each read from the model's
+/// own accounts and values. An account a model doesn't have reads 0, and a
+/// value it doesn't have is empty.
+fn shared_columns(models: &[&Model], series: &[String]) -> Result<Vec<Columns>, Vec<Error>> {
+    if series.is_empty() {
+        let paths: std::collections::BTreeSet<&Path> = models
+            .iter()
+            .flat_map(|m| m.program.accounts.iter().map(AsRef::as_ref))
+            .collect();
+        return Ok(models
+            .iter()
+            .map(|model| {
+                let columns = paths
                     .iter()
-                    .map(|a| a.to_string())
-                    .chain(self.program.params.iter().map(|p| p.name.clone()))
+                    .map(|&path| Column {
+                        name: path.ledger_name(),
+                        of: Measure::Accounts(
+                            model
+                                .program
+                                .accounts
+                                .iter()
+                                .position(|a| **a == *path)
+                                .into_iter()
+                                .collect(),
+                            sign(path),
+                        ),
+                    })
                     .collect();
-                errors.push(Error::UnknownSeries {
-                    name: name.clone(),
-                    close: util::closest(name, names.iter().map(String::as_str))
-                        .map(str::to_string),
-                });
-                continue;
-            };
+                (columns, Vec::new())
+            })
+            .collect());
+    }
+    let mut columns: Vec<Columns> = vec![(Vec::new(), Vec::new()); models.len()];
+    let mut errors = Vec::new();
+    for name in series {
+        let measures: Vec<Option<Measure>> = models
+            .iter()
+            .zip(&mut columns)
+            .map(|(model, (_, values))| model.measure(name, values))
+            .collect();
+        if measures.iter().all(Option::is_none) {
+            errors.push(Error::UnknownSeries {
+                name: name.clone(),
+                close: models.first().and_then(|m| m.closest_series(name)),
+            });
+            continue;
+        }
+        let path = Path(name.split('.').map(str::to_string).collect());
+        let missing = match path.account_kind() {
+            Some(_) => Measure::Accounts(Vec::new(), sign(&path)),
+            None => Measure::Missing,
+        };
+        for ((columns, _), measure) in columns.iter_mut().zip(measures) {
             columns.push(Column {
                 name: name.clone(),
-                of,
+                of: measure.unwrap_or_else(|| missing.clone()),
             });
         }
-        if errors.is_empty() {
-            Ok((columns, values))
-        } else {
-            Err(errors)
-        }
+    }
+    if errors.is_empty() {
+        Ok(columns)
+    } else {
+        Err(errors)
+    }
+}
+
+/// `diags` as errors, each with a note naming the scenarios of `source` at
+/// `applied`, since one may show up in the model, away from the scenario that
+/// causes it. Errors in the scenarios themselves don't need it.
+fn named_errors(source: &ast::Program, applied: &[usize], diags: Vec<Diagnostic>) -> Vec<Error> {
+    let scenarios: Vec<&ast::Scenario> = applied.iter().map(|&i| &source.scenarios[i]).collect();
+    diags
+        .into_iter()
+        .map(|diag| {
+            if scenarios.iter().any(|s| scenario::contains(s, diag.span)) {
+                return diag;
+            }
+            scenarios.iter().fold(diag, |diag, s| {
+                diag.with_note(s.name.1, format!("with scenario `{}`", s.name.0))
+            })
+        })
+        .map(Error::Diagnostic)
+        .collect()
+}
+
+/// Models simulated side by side, like a model with several of its
+/// scenarios: their CSV has the same columns, and each run draws with the
+/// same seed in every one.
+#[derive(Clone)]
+pub struct SideBySide {
+    /// Each model, and its name.
+    models: Vec<(String, Model)>,
+    /// What each one's CSV reports.
+    columns: Vec<Columns>,
+}
+
+impl SideBySide {
+    fn new(models: Vec<(String, Model)>, series: &[String]) -> Result<Self, Vec<Error>> {
+        let refs: Vec<&Model> = models.iter().map(|(_, m)| m).collect();
+        let columns = shared_columns(&refs, series)?;
+        Ok(SideBySide { models, columns })
+    }
+
+    /// The models' names, in order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.models.iter().map(|(name, _)| name.as_str())
+    }
+
+    /// Whether any of the models draws at random.
+    pub fn draws(&self) -> bool {
+        self.models.iter().any(|(_, m)| m.draws())
+    }
+
+    /// Simulates each model once, with the seed in `opts`. Their outputs
+    /// don't keep transactions, since they're for CSV.
+    pub fn simulate(&self, opts: &RunOpts) -> Result<Vec<Output>, Vec<Error>> {
+        self.models
+            .iter()
+            .zip(&self.columns)
+            .map(|((_, model), columns)| model.simulate_keeping(opts, false, columns))
+            .collect()
+    }
+
+    /// Simulates runs 1 to `runs` of each model, each run drawing with its
+    /// own seed (see [`Model::run_seed`]), the same in every model, on every
+    /// core. Hands them to `each` in order of number, and of model within a
+    /// number. Stops when `each` returns `false`.
+    pub fn simulate_runs(&self, opts: &RunOpts, runs: u32, mut each: impl FnMut(Run) -> bool) {
+        let per_run = self.models.len() as u64;
+        let total = u64::from(runs) * per_run;
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZero::get)
+            .min(usize::try_from(total).unwrap_or(usize::MAX));
+        let next = std::sync::atomic::AtomicU64::new(0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let sender = sender.clone();
+                let next = &next;
+                // Each worker has its own copy, whose caches it needn't
+                // share.
+                let models = self.clone();
+                scope.spawn(move || {
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= total {
+                            break;
+                        }
+                        let number = u32::try_from(i / per_run + 1).expect("at most `runs`");
+                        let scenario = (i % per_run) as usize;
+                        let seed = Model::run_seed(opts.seed, number);
+                        let opts = RunOpts {
+                            seed,
+                            ..opts.clone()
+                        };
+                        let result = models.models[scenario].1.simulate_keeping(
+                            &opts,
+                            false,
+                            &models.columns[scenario],
+                        );
+                        let run = Run {
+                            number,
+                            seed,
+                            scenario,
+                            result,
+                        };
+                        // The receiver hangs up when `each` says to stop.
+                        if sender.send((i, run)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(sender);
+            // Runs finish in any order; hand them over in order.
+            let mut waiting = std::collections::BTreeMap::new();
+            let mut due = 0;
+            for (i, run) in receiver {
+                waiting.insert(i, run);
+                while let Some(run) = waiting.remove(&due) {
+                    due += 1;
+                    if !each(run) {
+                        return;
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -485,11 +665,15 @@ fn emit_csv(
     columns: &[Column],
     log: &eval::SimLog,
     run: Option<(u32, u64)>,
+    scenario: Option<&str>,
     header: bool,
 ) -> io::Result<()> {
     if header {
         if run.is_some() {
             write!(out, "\"run\",\"seed\",")?;
+        }
+        if scenario.is_some() {
+            write!(out, "\"scenario\",")?;
         }
         write!(out, "\"date\"")?;
         for column in columns {
@@ -501,6 +685,9 @@ fn emit_csv(
     for snap in &log.snapshots {
         if let Some((number, seed)) = run {
             write!(out, "{number},{seed},")?;
+        }
+        if let Some(scenario) = scenario {
+            write!(out, "{scenario},")?;
         }
         write!(out, "{}", snap.date)?;
         for column in columns {
@@ -517,6 +704,7 @@ fn emit_csv(
                     Some(v) => write!(out, ",{}", v.normalize())?,
                     None => write!(out, ",")?,
                 },
+                Measure::Missing => write!(out, ",")?,
             }
         }
         writeln!(out)?;

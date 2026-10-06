@@ -1,6 +1,9 @@
 # Scenarios
 
-Status: planned.
+Status: implemented on branch `scenarios`. Where this plan and the code
+differ, the code is right: several models simulated together are a
+`SideBySide`, which `Model::side_by_side` makes and `Model::simulate_runs` now
+uses for one.
 
 A model describes one future, with one set of decisions. A scenario is another
 set: pay the car off early, change childcare, buy a house. It's written as

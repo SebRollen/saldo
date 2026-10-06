@@ -3870,3 +3870,161 @@ fn cli_runs_a_scenario() {
         "the model has no scenario `rise`; did you mean `raise`?\n"
     );
 }
+
+#[test]
+fn scenarios_side_by_side_share_columns() {
+    let src = format!(
+        "{HOUSEHOLD}
+        scenario daycare {{
+          let tuition = 1_800
+          entry daycare @ 1st {{ assets.cash -> expenses.daycare : tuition }}
+        }}
+        "
+    );
+    let model = saldo::load(&src).unwrap();
+    let names = ["base".to_string(), "daycare".to_string()];
+    let opts = RunOpts {
+        every: saldo::TimeUnit::Year,
+        ..opts("2026-01-01", "2026-12-31")
+    };
+    let csv = |series: &[&str]| -> Vec<String> {
+        let series: Vec<String> = series.iter().map(|s| s.to_string()).collect();
+        let models = model.side_by_side(&names, &series).unwrap();
+        let outputs = models.simulate(&opts).unwrap();
+        let mut csv = Vec::new();
+        for (i, (name, output)) in models.names().zip(&outputs).enumerate() {
+            output
+                .write_scenario_csv(&mut csv, name, None, i == 0)
+                .unwrap();
+        }
+        String::from_utf8(csv)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    // Every account in either, reading 0 where there's none.
+    assert_eq!(
+        csv(&[]),
+        [
+            r#""scenario","date","Assets:Cash","Expenses:Daycare","Expenses:Nanny","Income:Salary","Liabilities:Car""#,
+            "base,2026-12-31,38000.00,0.00,26000.00,60000.00,4000.00",
+            "daycare,2026-12-31,16400.00,21600.00,26000.00,60000.00,4000.00",
+        ]
+    );
+    // A value that one doesn't have is empty there.
+    assert_eq!(
+        csv(&["expenses.daycare", "tuition"]),
+        [
+            r#""scenario","date","expenses.daycare","tuition""#,
+            "base,2026-12-31,0.00,",
+            "daycare,2026-12-31,21600.00,1800",
+        ]
+    );
+    let unknown = model
+        .side_by_side(&names, &["tution".to_string()])
+        .err()
+        .unwrap();
+    assert!(matches!(
+        &unknown[..],
+        [saldo::Error::UnknownSeries { name, .. }] if name == "tution"
+    ));
+}
+
+#[test]
+fn runs_of_scenarios_side_by_side_draw_the_same_numbers() {
+    let src = r#"
+        entry food @ sun { assets.cash -> expenses.food : uniform(100, 200) }
+        scenario cook {
+          entry dinner @ sat { assets.cash -> expenses.dinner : 50 }
+        }
+    "#;
+    let model = saldo::load(src).unwrap();
+    let models = model
+        .side_by_side(&["base".to_string(), "cook".to_string()], &[])
+        .unwrap();
+    let mut runs = Vec::new();
+    models.simulate_runs(&seeded("2026-01-01", "2026-03-31", 9), 10, |run| {
+        let output = run.result.unwrap();
+        runs.push((
+            run.number,
+            run.scenario,
+            run.seed,
+            posted_in(&output, "expenses.food", 2026),
+        ));
+        true
+    });
+    assert_eq!(runs.len(), 20);
+    for (i, pair) in runs.chunks(2).enumerate() {
+        let number = u32::try_from(i + 1).unwrap();
+        let [(n0, s0, seed0, food0), (n1, s1, seed1, food1)] = pair else {
+            unreachable!()
+        };
+        assert_eq!((*n0, *s0, *n1, *s1), (number, 0, number, 1));
+        assert_eq!(seed0, seed1);
+        assert_eq!(*seed0, saldo::Model::run_seed(9, number));
+        assert_eq!(food0, food1);
+    }
+}
+
+#[test]
+fn cli_writes_scenarios_side_by_side() {
+    use std::process::Command;
+
+    let dir = write_model(
+        "cli_side_by_side",
+        &[(
+            "model.saldo",
+            "balances @ 2026-01-01 { assets.cash = 100 }\n\
+             entry spend @ last { assets.cash -> expenses.x : uniform(0, 200) }\n\
+             check assets.cash >= 0 @ jan 31\n\
+             scenario frugal { balances @ 2026-01-01 { assets.cash = 1_000 } }\n",
+        )],
+    );
+    let saldo = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_saldo"))
+            .arg(dir.join("model.saldo"))
+            .args(["--from", "2026-01-01", "--to", "2026-01-31", "--seed", "5"])
+            .args(["--scenario", "base,frugal", "--every", "month"])
+            .args(extra)
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap()
+    };
+    let once = saldo(&[]);
+    let stdout = String::from_utf8_lossy(&once.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], r#""scenario","date","Assets:Cash","Expenses:X""#);
+    assert!(lines[1].starts_with("base,2026-01-31,"));
+    assert!(lines[2].starts_with("frugal,2026-01-31,"));
+    // They spend the same, from different balances.
+    assert_eq!(lines[1].split(',').nth(3), lines[2].split(',').nth(3));
+
+    let runs = saldo(&["--runs", "50"]);
+    let stdout = String::from_utf8_lossy(&runs.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines[0],
+        r#""run","seed","scenario","date","Assets:Cash","Expenses:X""#
+    );
+    assert_eq!(lines.len(), 101);
+    assert!(lines[1].starts_with("1,") && lines[1].contains(",base,"));
+    assert!(lines[2].starts_with("1,") && lines[2].contains(",frugal,"));
+    let failed = lines[1..]
+        .iter()
+        .filter(|l| l.contains(",base,") && l.split(',').nth(4).unwrap().starts_with('-'))
+        .count();
+    let stderr = String::from_utf8_lossy(&runs.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "check failed in {failed} of 50 runs of base, first on"
+        )),
+        "{stderr}"
+    );
+    // Frugal starts with more than any month's spending.
+    assert!(!stderr.contains("runs of frugal"), "{stderr}");
+    assert_eq!(runs.status.code(), Some(3));
+
+    let ledger = saldo(&["--format", "ledger"]);
+    assert_eq!(ledger.status.code(), Some(2));
+}
