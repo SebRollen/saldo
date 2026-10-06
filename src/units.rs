@@ -463,6 +463,7 @@ impl Checker<'_> {
                     }
                     BinOp::Mul => self.multiply(ka, kb, span),
                     BinOp::Div => self.divide(ka, b, kb, span),
+                    BinOp::Pow => self.power(a, ka, b, kb),
                     BinOp::Add | BinOp::Sub => {
                         self.combine(a, ka, b, kb, Combiner::Op(*op), span, cx)
                     }
@@ -797,6 +798,20 @@ impl Checker<'_> {
             (Rate(u), _) | (_, Rate(u)) => Some(Rate(u)),
             _ => Some(Amount),
         }
+    }
+
+    /// The kind of `a ^ b`: a plain number, of plain numbers.
+    fn power(&mut self, a: &Expr, ka: Kind, b: &Expr, kb: Kind) -> Option<Kind> {
+        for (e, kind) in [(a, ka), (b, kb)] {
+            if kind != Kind::Number {
+                self.error(Diagnostic::new(
+                    e.span,
+                    format!("`^` takes plain numbers, like `1.06^(1/12)`, not {kind}"),
+                ));
+                return None;
+            }
+        }
+        Some(Kind::Number)
     }
 
     fn divide(&mut self, ka: Kind, b: &Expr, kb: Kind, span: Span) -> Option<Kind> {

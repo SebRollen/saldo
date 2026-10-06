@@ -672,7 +672,8 @@ impl<'src> Parser<'src> {
 
     /// An expression whose binary operators bind at least as tightly as
     /// `min`, by precedence climbing: from loosest to tightest, `or`, `and`,
-    /// `not`, comparisons, `|`, `&`, ranges, `+ -`, and `* /`.
+    /// `not`, comparisons, `|`, `&`, ranges, `+ -`, and `* /`. `^` binds
+    /// tighter still (see `parse_power`).
     fn parse_binary(&mut self, min: u8) -> Option<SpannedExpr> {
         let mut left = match self.eat_keyword("not") {
             Some(not_span) if min <= NOT => {
@@ -769,8 +770,20 @@ impl<'src> Parser<'src> {
             let span = Span::new(minus_span.start, inner.1.end);
             Some((Box::new(Expr::Neg(inner)), span))
         } else {
-            self.parse_postfix()
+            self.parse_power()
         }
+    }
+
+    /// `a ^ b`, which binds tighter than a minus before it and groups to the
+    /// right, as in maths: `-2^2` is -4, `2^3^2` is 2^9, and `2^-1` is 0.5.
+    fn parse_power(&mut self) -> Option<SpannedExpr> {
+        let base = self.parse_postfix()?;
+        if self.eat(&Token::Caret).is_none() {
+            return Some(base);
+        }
+        self.nest()?;
+        let exponent = self.parse_unary()?;
+        Some(Self::bin(base, BinOp::Pow, exponent))
     }
 
     /// An atom followed by any number of `%` and `[unit]`.
@@ -1207,6 +1220,32 @@ mod tests {
             }
         ));
         assert!(matches!(expr("* / 3"), Expr::Bin(_, BinOp::Div, _)));
+    }
+
+    #[test]
+    fn powers_bind_tightest_and_group_to_the_right() {
+        // `-2^2` is `-(2^2)`.
+        let Expr::Neg(power) = expr("-2^2") else {
+            panic!()
+        };
+        assert!(matches!(*power.0, Expr::Bin(_, BinOp::Pow, _)));
+        // `2^3^2` is `2^(3^2)`.
+        let Expr::Bin(base, BinOp::Pow, exponent) = expr("2^3^2") else {
+            panic!()
+        };
+        assert!(matches!(*base.0, Expr::Num(_)));
+        assert!(matches!(*exponent.0, Expr::Bin(_, BinOp::Pow, _)));
+        // `2 * 3^2` is `2 * (3^2)`, and an exponent can be negative.
+        let Expr::Bin(_, BinOp::Mul, power) = expr("2 * 3^2") else {
+            panic!()
+        };
+        assert!(matches!(*power.0, Expr::Bin(_, BinOp::Pow, _)));
+        let Expr::Bin(_, BinOp::Pow, exponent) = expr("2^-1") else {
+            panic!()
+        };
+        assert!(matches!(*exponent.0, Expr::Neg(_)));
+        // A unit applies to the power, like any `/`.
+        assert!(matches!(expr("1.06^2/year"), Expr::Per(..)));
     }
 
     #[test]

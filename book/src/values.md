@@ -21,6 +21,15 @@ A `%` after a number divides it by 100, so `5%` is `0.05`. `/year` makes the
 value a rate (see [Rates](#rates)), and `[year]` a limit (see
 [Limits](#limits)).
 
+`+`, `-`, `*` and `/` do arithmetic, and `^` raises a number to a power. `^`
+binds tighter than the others, a minus in front of it included, and groups to
+the right, as in maths: `-2^2` is -4 and `2^3^2` is 512. It's handy for
+compounding:
+
+```
+let monthly_return = 1.06^(1/12) - 1     // 0.4868% a month is 6% a year
+```
+
 A value depends on nothing but the date: it can use numbers, other values and
 functions, but not account balances or totals, which change as entries fire.
 That way saldo can work a value out for any day. (A value that draws at random
@@ -161,6 +170,7 @@ saldo checks how rates combine before it simulates anything:
 | `salary - assets.cash` | an error, except in an entry |
 | `salary + rent` | an error, except in an entry |
 | `salary - income.salary[year]` | an error: a rate accrues, so it doesn't compare with what's moved so far |
+| `salary^2` | an error: `^` takes plain numbers |
 
 Amounts, like account balances, only mix with rates in entries, where a rate
 means the firing's share of it.

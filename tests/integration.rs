@@ -1781,6 +1781,53 @@ fn keywords_are_lowercase_only() {
     assert!(errors.is_err());
 }
 
+// --- powers ---
+
+#[test]
+fn powers_raise_numbers_exactly_or_as_closely_as_f64_can() {
+    let src = "
+        let monthly = 1.06^(1/12) - 1
+        entry e @ 2026-01-01 {
+          income.x -> expenses.a : 1.03^2 * 10_000
+          income.x -> expenses.b : -2^2
+          income.x -> expenses.c : 2^3^2
+          income.x -> expenses.d : 2^-1
+          income.x -> expenses.e : monthly * 1_000_000_000
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-01-01")).unwrap();
+    assert_eq!(posting(&output, 0, "expenses.a"), usd("10609"));
+    assert_eq!(posting(&output, 0, "expenses.b"), usd("-4"));
+    assert_eq!(posting(&output, 0, "expenses.c"), usd("512"));
+    assert_eq!(posting(&output, 0, "expenses.d"), usd("0.5"));
+    // 1.06^(1/12) - 1 is 0.004867550565343...
+    assert_eq!(posting(&output, 0, "expenses.e"), usd("4867550.57"));
+}
+
+#[test]
+fn powers_take_plain_numbers_and_need_a_value() {
+    let errors = |src: &str| run(src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
+    assert!(has_error(
+        &errors(
+            "let salary = 100_000/year
+             entry e @ last { income.x -> expenses.a : salary^2 }"
+        ),
+        "`^` takes plain numbers, like `1.06^(1/12)`, not an amount per year"
+    ));
+    assert!(has_error(
+        &errors("entry e @ last { income.x -> expenses.a : (-8)^(1/3) }"),
+        "a negative number has no fractional power"
+    ));
+    assert!(has_error(
+        &errors("entry e @ last { income.x -> expenses.a : 0^-1 }"),
+        "division by zero"
+    ));
+    assert!(has_error(
+        &errors("entry e @ last { income.x -> expenses.a : 10^100 }"),
+        "arithmetic overflow in `10 ^ 100`"
+    ));
+}
+
 // --- logical operators ---
 
 fn assert_holds(condition: &str) {

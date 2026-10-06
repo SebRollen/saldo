@@ -468,6 +468,10 @@
             "named": true
           },
           {
+            "type": "power_operator",
+            "named": true
+          },
+          {
             "type": "union_operator",
             "named": true
           }
@@ -3453,6 +3457,10 @@
   },
   {
     "type": "ordinal",
+    "named": true
+  },
+  {
+    "type": "power_operator",
     "named": true
   },
   {

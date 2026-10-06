@@ -33,6 +33,7 @@ pub enum Token<'src> {
     Minus,
     Star,
     Slash,
+    Caret,
     Colon,
     Period,
     Comma,
@@ -85,6 +86,7 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Minus => write!(f, "-"),
             Token::Star => write!(f, "*"),
             Token::Slash => write!(f, "/"),
+            Token::Caret => write!(f, "^"),
             Token::Colon => write!(f, ":"),
             Token::Period => write!(f, "."),
             Token::Comma => write!(f, ","),
@@ -403,6 +405,7 @@ impl<'src> Lexer<'src> {
             }
             b'*' => return self.emit_token(Token::Star),
             b'/' => return self.emit_token(Token::Slash),
+            b'^' => return self.emit_token(Token::Caret),
             b':' => return self.emit_token(Token::Colon),
             b'.' => {
                 if self.matches(b'.') {

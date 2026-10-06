@@ -157,7 +157,7 @@ impl<'a> Checker<'a> {
                 Some(Ty::Bool)
             }
             Expr::Bin(a, op, b) => match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow => {
                     self.operands(a, b, *op, Ty::Num);
                     Some(Ty::Num)
                 }

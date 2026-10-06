@@ -13,8 +13,9 @@ const PREC = {
   sum: 8,
   product: 9,
   unary: 10,
-  postfix: 11,
-  call: 12,
+  power: 11,
+  postfix: 12,
+  call: 13,
 };
 
 const commaSep1 = (rule) => seq(rule, repeat(seq(",", rule)), optional(","));
@@ -275,6 +276,15 @@ module.exports = grammar({
         level(PREC.inter, $.inter_operator),
         level(PREC.sum, $.additive_operator),
         level(PREC.product, $.multiplicative_operator),
+        // `2^3^2` is 2^9, and `-2^2` is -4.
+        prec.right(
+          PREC.power,
+          seq(
+            field("left", $._expr),
+            field("operator", $.power_operator),
+            field("right", $._expr),
+          ),
+        ),
       );
     },
 
@@ -285,6 +295,7 @@ module.exports = grammar({
     inter_operator: (_) => "&",
     additive_operator: (_) => choice("+", "-"),
     multiplicative_operator: (_) => choice("*", "/"),
+    power_operator: (_) => "^",
 
     not_expr: ($) => prec(PREC.not, seq("not", field("operand", $._expr))),
 

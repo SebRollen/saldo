@@ -210,6 +210,7 @@ stops with an error if one fails.
 | `contribution[year]`, `paycheck.contribution[year]` | Tag total |
 | `income.salary[year]` | Account total |
 | `a + b`, `a - b`, `a * b`, `a / b` | Arithmetic |
+| `1.06^(1/12)` | Power of plain numbers; binds tightest and groups to the right, so `-2^2 == -4` |
 | `a == b`, `a != b`, `a < b`, `a <= b`, `a > b`, `a >= b` | Comparison (can't be chained) |
 | `a and b`, `a or b`, `not a` | Logical operators |
 | `if c then a else b` | Conditional |

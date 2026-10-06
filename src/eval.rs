@@ -8,7 +8,7 @@ use crate::resolver::{Counted, Model, ParamBody, walk_expr};
 use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -1509,6 +1509,35 @@ pub const BUILTINS: &[(&str, usize)] = &[
     ("chance", 1),
 ];
 
+/// `x` to the power `y`, or `None` if it's too large. A whole power multiplies
+/// exactly; any other goes through `f64`, which is as close as an `f64` gets.
+fn power(x: Decimal, y: Decimal) -> Option<Decimal> {
+    if !y.fract().is_zero() {
+        let result = x.to_f64()?.powf(y.to_f64()?);
+        return if result.is_finite() {
+            Decimal::from_f64(result)
+        } else {
+            None
+        };
+    }
+    // By squaring: `x` to each power of two, times those that make up `y`.
+    let (mut result, mut square, mut n) = (Decimal::ONE, x, y.abs().to_u64()?);
+    while n > 0 {
+        if n & 1 == 1 {
+            result = result.checked_mul(square)?;
+        }
+        n >>= 1;
+        if n > 0 {
+            square = square.checked_mul(square)?;
+        }
+    }
+    if y.is_sign_negative() {
+        Decimal::ONE.checked_div(result)
+    } else {
+        Some(result)
+    }
+}
+
 fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagnostic> {
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
@@ -1546,6 +1575,23 @@ fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagn
                 BinOp::GtEq => x >= y,
                 _ => unreachable!(),
             }))
+        }
+        BinOp::Pow => {
+            let (Value::Num(x), Value::Num(y)) = (a, b) else {
+                return Err(Diagnostic::new(span, "`^` requires numeric operands"));
+            };
+            if x.is_zero() && y.is_sign_negative() {
+                return Err(Diagnostic::new(span, "division by zero"));
+            }
+            if x.is_sign_negative() && !y.fract().is_zero() {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("`{x} ^ {y}` has no value: a negative number has no fractional power"),
+                ));
+            }
+            power(x, y)
+                .map(Value::Num)
+                .ok_or_else(|| Diagnostic::new(span, format!("arithmetic overflow in `{x} ^ {y}`")))
         }
         BinOp::Eq => Ok(Value::Bool(a == b)),
         BinOp::NotEq => Ok(Value::Bool(a != b)),

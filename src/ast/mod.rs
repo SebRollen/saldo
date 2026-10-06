@@ -318,6 +318,8 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    /// `^`: raises to a power.
+    Pow,
     Lt,
     LtEq,
     Gt,
@@ -339,6 +341,7 @@ impl std::fmt::Display for BinOp {
             BinOp::Sub => "-",
             BinOp::Mul => "*",
             BinOp::Div => "/",
+            BinOp::Pow => "^",
             BinOp::Lt => "<",
             BinOp::LtEq => "<=",
             BinOp::Gt => ">",
