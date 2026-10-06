@@ -42,6 +42,7 @@ const STOP_WORDS: &[&str] = &[
     "compounding",
     "adding",
     "every",
+    "after",
 ];
 
 pub struct Parser<'src> {

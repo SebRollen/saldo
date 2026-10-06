@@ -4028,3 +4028,45 @@ fn cli_writes_scenarios_side_by_side() {
     let ledger = saldo(&["--format", "ledger"]);
     assert_eq!(ledger.status.code(), Some(2));
 }
+
+#[test]
+fn a_cycle_of_entries_is_reported_without_what_fires_after_it() {
+    // `report` reads what `accrual` moves, so it's left out of the order
+    // along with the cycle, but it isn't in it.
+    let src = "
+        balances @ 2025-01-01 { liabilities.loan = 10_000 }
+        entry accrual {
+          liabilities.accrued -> expenses.interest : liabilities.loan * 1%
+        }
+        entry report @ last {
+          assets.cash -> expenses.report : expenses.interest / 100
+        }
+        entry payment @ 17th {
+          assets.cash -> liabilities.accrued : liabilities.accrued
+          assets.cash -> liabilities.loan    : 100
+        }
+    ";
+    let errors = run(src, &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(
+        has_error(
+            &errors,
+            "`accrual` and `payment` each read what the other moves"
+        ),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn an_open_range_ends_before_after() {
+    let src = "
+        entry pay @ last { income.salary -> assets.cash : 1_000 }
+        entry save @ last & 2025-02-01.. after pay {
+          assets.cash -> assets.savings : assets.cash / 2
+        }
+    ";
+    let output = run(src, &opts("2025-01-01", "2025-03-31")).unwrap();
+    assert_eq!(
+        postings_to(&output, "assets.savings"),
+        [usd("1000"), usd("1000")]
+    );
+}

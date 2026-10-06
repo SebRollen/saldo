@@ -1786,26 +1786,38 @@ impl<'a> Resolver<'a> {
     /// read what the next one moves.
     fn report_entry_cycle(&mut self, order: &[usize], before: &Before) {
         let ordered: HashSet<usize> = order.iter().copied().collect();
-        let next = |i: usize| {
+        let previous = |i: usize| {
             before
                 .keys()
-                .find(|&&(a, b)| a == i && !ordered.contains(&b))
-                .map(|&(_, b)| b)
+                .find(|&&(a, b)| b == i && !ordered.contains(&a))
+                .map(|&(a, _)| a)
         };
-        // Follow the edges from an unordered entry until one repeats.
+        // Follow the edges back from an unordered entry until one repeats.
+        // One that's left out always fires after another that's left out,
+        // but what fires after it may be left out only for firing after the
+        // cycle, so following edges forward can miss the cycle.
         let start = (0..self.entries.len())
             .find(|i| !ordered.contains(i))
             .expect("a cycle leaves an entry out");
         let mut path = vec![start];
         let mut current = start;
-        while let Some(n) = next(current) {
-            if let Some(pos) = path.iter().position(|&p| p == n) {
+        while let Some(p) = previous(current) {
+            if let Some(pos) = path.iter().position(|&q| q == p) {
                 path.drain(..pos);
                 break;
             }
-            path.push(n);
-            current = n;
+            path.push(p);
+            current = p;
         }
+        // Each fires before the one before it in `path`. Start with the one
+        // written first.
+        path.reverse();
+        let first = path
+            .iter()
+            .enumerate()
+            .min_by_key(|&(_, &i)| i)
+            .map_or(0, |(k, _)| k);
+        path.rotate_left(first);
         let names: Vec<String> = path
             .iter()
             .map(|&i| format!("`{}`", self.entries[i].name))
