@@ -21,6 +21,7 @@ pub use errors::{Diagnostic, Error};
 pub use eval::{CheckFailure, DaySnapshot, SimLog, Transaction};
 pub use sources::Sources;
 
+#[derive(Clone)]
 pub struct RunOpts {
     pub from: NaiveDate,
     pub to: NaiveDate,
@@ -86,11 +87,33 @@ impl Output {
     /// Writes the series asked for as CSV, one row per day reported, with
     /// accounts read as each kind reads: liabilities and income positive.
     pub fn write_csv(&self, out: &mut impl io::Write) -> io::Result<()> {
-        emit_csv(out, &self.columns, &self.log)
+        emit_csv(out, &self.columns, &self.log, None, true)
+    }
+
+    /// Writes CSV as [`Output::write_csv`] does, for run `number` of many,
+    /// which drew with `seed`: each row starts with them, and the header, if
+    /// `header`, names them `run` and `seed`.
+    pub fn write_run_csv(
+        &self,
+        out: &mut impl io::Write,
+        number: u32,
+        seed: u64,
+        header: bool,
+    ) -> io::Result<()> {
+        emit_csv(out, &self.columns, &self.log, Some((number, seed)), header)
     }
 }
 
+/// One of many runs: its number, from 1, the seed it drew with, and what it
+/// did.
+pub struct Run {
+    pub number: u32,
+    pub seed: u64,
+    pub result: Result<Output, Vec<Error>>,
+}
+
 /// A model that's been read and checked, ready to simulate as often as wanted.
+#[derive(Clone)]
 pub struct Model {
     model: resolver::Model,
     program: compile::Program,
@@ -163,18 +186,86 @@ impl Model {
 
     /// Simulates the model as `opts` says.
     pub fn simulate(&self, opts: &RunOpts) -> Result<Output, Vec<Error>> {
+        self.simulate_keeping(opts, true)
+    }
+
+    /// The seed that run `number` of many draws with, when `seed` is the
+    /// seed of them all.
+    pub fn run_seed(seed: u64, number: u32) -> u64 {
+        random::mix(seed, number.into())
+    }
+
+    /// Simulates runs 1 to `runs`, each drawing with its own seed (see
+    /// [`Model::run_seed`]), on every core, and hands each to `each` in order
+    /// of number. Stops when `each` returns `false`. Runs don't keep their
+    /// transactions; simulate a run's seed for its ledger.
+    pub fn simulate_runs(&self, opts: &RunOpts, runs: u32, mut each: impl FnMut(Run) -> bool) {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZero::get)
+            .min(runs as usize);
+        let next = std::sync::atomic::AtomicU32::new(1);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let sender = sender.clone();
+                let next = &next;
+                // Each worker has its own copy, whose caches it needn't
+                // share.
+                let model = self.clone();
+                scope.spawn(move || {
+                    loop {
+                        let number = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if number > runs {
+                            break;
+                        }
+                        let seed = Self::run_seed(opts.seed, number);
+                        let opts = RunOpts {
+                            seed,
+                            ..opts.clone()
+                        };
+                        let result = model.simulate_keeping(&opts, false);
+                        // The receiver hangs up when `each` says to stop.
+                        if sender
+                            .send(Run {
+                                number,
+                                seed,
+                                result,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(sender);
+            // Runs finish in any order; hand them over in order.
+            let mut waiting = std::collections::BTreeMap::new();
+            let mut due = 1;
+            for run in receiver {
+                waiting.insert(run.number, run);
+                while let Some(run) = waiting.remove(&due) {
+                    due += 1;
+                    if !each(run) {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    fn simulate_keeping(&self, opts: &RunOpts, transactions: bool) -> Result<Output, Vec<Error>> {
         check_range(opts)?;
         let (columns, values) = self.columns(&opts.series)?;
         let first_day = self.model.first_day(opts.from);
+        let record = eval::Record {
+            every: opts.every,
+            values: &values,
+            transactions,
+        };
         let log = self
             .program
-            .simulate(
-                first_day,
-                (opts.from, opts.to),
-                opts.seed,
-                opts.every,
-                &values,
-            )
+            .simulate(first_day, (opts.from, opts.to), opts.seed, &record)
             .map_err(|mut d| {
                 // What went wrong may depend on what was drawn.
                 if self.draws() {
@@ -315,14 +406,28 @@ fn write_transaction(
     writeln!(out)
 }
 
-fn emit_csv(out: &mut impl io::Write, columns: &[Column], log: &eval::SimLog) -> io::Result<()> {
-    write!(out, "\"date\"")?;
-    for column in columns {
-        write!(out, ",\"{}\"", column.name)?;
+fn emit_csv(
+    out: &mut impl io::Write,
+    columns: &[Column],
+    log: &eval::SimLog,
+    run: Option<(u32, u64)>,
+    header: bool,
+) -> io::Result<()> {
+    if header {
+        if run.is_some() {
+            write!(out, "\"run\",\"seed\",")?;
+        }
+        write!(out, "\"date\"")?;
+        for column in columns {
+            write!(out, ",\"{}\"", column.name)?;
+        }
+        writeln!(out)?;
     }
-    writeln!(out)?;
 
     for snap in &log.snapshots {
+        if let Some((number, seed)) = run {
+            write!(out, "{number},{seed},")?;
+        }
         write!(out, "{}", snap.date)?;
         for column in columns {
             match &column.of {
@@ -355,6 +460,7 @@ mod doc_tests {
             "distributions.md",
             include_str!("../book/src/distributions.md"),
         ),
+        ("monte-carlo.md", include_str!("../book/src/monte-carlo.md")),
         ("entries.md", include_str!("../book/src/entries.md")),
         ("fns.md", include_str!("../book/src/fns.md")),
         ("intro.md", include_str!("../book/src/intro.md")),

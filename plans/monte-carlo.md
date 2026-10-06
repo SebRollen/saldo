@@ -1,6 +1,9 @@
 # Monte Carlo
 
-Status: designed, not started.
+Status: implemented on branch `random-distributions-plan`. Where this plan
+and the code differ, the code is right: failed checks are on `SimLog`, and
+each worker simulates its own copy of the model, whose caches it then needn't
+share.
 
 A model that draws at random (see `plans/random-distributions.md`) gives one
 possible future per seed. Monte Carlo runs it many times and writes every

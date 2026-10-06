@@ -1,11 +1,11 @@
 use chrono::NaiveDate;
-use saldo::{RunOpts, Sources, TimeUnit, run_file};
+use saldo::{CheckFailure, Diagnostic, RunOpts, Sources, TimeUnit};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv] \
-                     [--every UNIT] [--series NAME,...] [--seed N]";
+                     [--every UNIT] [--series NAME,...] [--seed N] [--runs N]";
 
 const HELP: &str = "\
 Simulate a saldo model and print the resulting transactions or balances.
@@ -22,6 +22,9 @@ Options:
                       instead of every account
   --seed N            draw the model's random numbers from seed N, a whole
                       number, to repeat a run (default: a random seed)
+  --runs N            simulate N runs, each drawing with its own seed, and
+                      write them all as CSV, with each run's number and seed;
+                      `--seed` with a run's seed repeats it
   -h, --help          print this help
   -V, --version       print the version";
 
@@ -29,6 +32,7 @@ Options:
 /// exit with 1, and bad arguments with 2.
 const CHECK_FAILED: u8 = 3;
 
+#[derive(Clone, Copy)]
 enum OutputFormat {
     Ledger,
     Csv,
@@ -52,6 +56,7 @@ fn main() -> ExitCode {
         seed,
         every,
         series,
+        runs,
     } = match parse_args(&args) {
         Ok(x) => x,
         Err(msg) => {
@@ -69,50 +74,196 @@ fn main() -> ExitCode {
     };
     let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut sources = Sources::default();
-    match run_file(&path, &opts, &mut sources) {
-        Ok(output) => {
-            eprint!("{}", sources.format_warnings(&output.warnings, color));
-            if output.draws && seed.is_none() {
-                let seed = opts.seed;
-                eprintln!("note: drew with seed {seed}; pass --seed {seed} to reproduce");
-            }
-            let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-            let written = match format {
-                OutputFormat::Ledger => output.write_ledger(&mut out),
-                OutputFormat::Csv => output.write_csv(&mut out),
-            }
-            .and_then(|()| out.flush());
-            match written {
-                Ok(()) if !output.log.failed_checks.is_empty() => {
-                    let failed: Vec<saldo::Error> = output
-                        .log
-                        .failed_checks
-                        .iter()
-                        .map(|failure| saldo::Error::Diagnostic(failure.diagnostic()))
-                        .collect();
-                    eprint!("{}", sources.format_errors(&failed, color));
-                    ExitCode::from(CHECK_FAILED)
-                }
-                Ok(()) => ExitCode::SUCCESS,
-                // The reader went away (e.g. `saldo … | head`); that's not an error.
-                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("could not write output: {e}");
-                    ExitCode::from(1)
-                }
-            }
+    let model = match saldo::load_file(&path, &mut sources) {
+        Ok(model) => model,
+        Err(errors) => return report_errors(&sources, &errors, color),
+    };
+    let report = Report {
+        sources: &sources,
+        color,
+        random_seed: seed.is_none() && model.draws(),
+    };
+    match runs {
+        None => report.one(&model, &opts, format),
+        Some(runs) => report.many(&model, &opts, runs),
+    }
+}
+
+/// How to report what a model did.
+struct Report<'a> {
+    sources: &'a Sources,
+    color: bool,
+    /// Whether the model draws with a seed picked at random, which the user
+    /// needs to see to repeat the run.
+    random_seed: bool,
+}
+
+impl Report<'_> {
+    /// Simulates `model` once and writes `format` to stdout.
+    fn one(&self, model: &saldo::Model, opts: &RunOpts, format: OutputFormat) -> ExitCode {
+        let output = match model.simulate(opts) {
+            Ok(output) => output,
+            Err(errors) => return report_errors(self.sources, &errors, self.color),
+        };
+        eprint!(
+            "{}",
+            self.sources.format_warnings(&output.warnings, self.color)
+        );
+        self.note_seed(opts.seed);
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        let written = match format {
+            OutputFormat::Ledger => output.write_ledger(&mut out),
+            OutputFormat::Csv => output.write_csv(&mut out),
         }
-        Err(errors) => {
-            eprint!("{}", sources.format_errors(&errors, color));
-            let bad_arguments = errors.iter().all(|e| {
-                matches!(
-                    e,
-                    saldo::Error::InvalidDateRange { .. } | saldo::Error::UnknownSeries { .. }
+        .and_then(|()| out.flush());
+        if let Err(code) = written_or_exit(written) {
+            return code;
+        }
+        let failed: Vec<Diagnostic> = output
+            .log
+            .failed_checks
+            .iter()
+            .map(CheckFailure::diagnostic)
+            .collect();
+        self.report_failed_checks(failed)
+    }
+
+    /// Simulates `model` `runs` times and writes every run's CSV to stdout.
+    fn many(&self, model: &saldo::Model, opts: &RunOpts, runs: u32) -> ExitCode {
+        if runs > 1 && !model.draws() {
+            eprintln!("note: the model doesn't draw at random, so every run is the same");
+        }
+        self.note_seed(opts.seed);
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        let mut failures: Vec<RunsFailed> = Vec::new();
+        let mut stopped: Option<ExitCode> = None;
+        model.simulate_runs(opts, runs, |run| {
+            let output = match run.result {
+                Ok(output) => output,
+                Err(errors) => {
+                    stopped = Some(report_errors(self.sources, &errors, self.color));
+                    return false;
+                }
+            };
+            if run.number == 1 {
+                eprint!(
+                    "{}",
+                    self.sources.format_warnings(&output.warnings, self.color)
+                );
+            }
+            for failure in &output.log.failed_checks {
+                match failures.iter_mut().find(|f| f.first.span == failure.span) {
+                    Some(failed) => {
+                        failed.runs += 1;
+                        // Runs come in order, so a tie goes to the earlier.
+                        if failure.first < failed.first.first {
+                            *failed = RunsFailed {
+                                first: failure.clone(),
+                                number: run.number,
+                                seed: run.seed,
+                                runs: failed.runs,
+                            };
+                        }
+                    }
+                    None => failures.push(RunsFailed {
+                        first: failure.clone(),
+                        number: run.number,
+                        seed: run.seed,
+                        runs: 1,
+                    }),
+                }
+            }
+            match written_or_exit(output.write_run_csv(
+                &mut out,
+                run.number,
+                run.seed,
+                run.number == 1,
+            )) {
+                Ok(()) => true,
+                Err(code) => {
+                    stopped = Some(code);
+                    false
+                }
+            }
+        });
+        if let Some(code) = stopped {
+            return code;
+        }
+        if let Err(code) = written_or_exit(out.flush()) {
+            return code;
+        }
+        failures.sort_by_key(|f| f.first.span.start);
+        let failed = failures
+            .iter()
+            .map(|f| {
+                let found = f
+                    .first
+                    .found
+                    .as_ref()
+                    .map_or(String::new(), |found| format!(": {found}"));
+                Diagnostic::new(
+                    f.first.span,
+                    format!(
+                        "check failed in {} of {runs} runs, first on {} in run {} (seed {}){found}",
+                        f.runs, f.first.first, f.number, f.seed
+                    ),
                 )
-            });
-            ExitCode::from(if bad_arguments { 2 } else { 1 })
+            })
+            .collect();
+        self.report_failed_checks(failed)
+    }
+
+    fn note_seed(&self, seed: u64) {
+        if self.random_seed {
+            eprintln!("note: drew with seed {seed}; pass --seed {seed} to reproduce");
         }
     }
+
+    /// Reports checks that failed, which the run (or runs) went on after, and
+    /// exits with the status that says so.
+    fn report_failed_checks(&self, failed: Vec<Diagnostic>) -> ExitCode {
+        if failed.is_empty() {
+            return ExitCode::SUCCESS;
+        }
+        let failed: Vec<saldo::Error> = failed.into_iter().map(saldo::Error::Diagnostic).collect();
+        eprint!("{}", self.sources.format_errors(&failed, self.color));
+        ExitCode::from(CHECK_FAILED)
+    }
+}
+
+/// A check that failed in some of many runs: in how many, and the run where
+/// it failed first.
+struct RunsFailed {
+    first: CheckFailure,
+    number: u32,
+    seed: u64,
+    runs: u32,
+}
+
+/// `Err` with the status to exit with if writing failed. The reader going
+/// away, as with `saldo … | head`, isn't an error.
+fn written_or_exit(written: std::io::Result<()>) -> Result<(), ExitCode> {
+    match written {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Err(ExitCode::SUCCESS),
+        Err(e) => {
+            eprintln!("could not write output: {e}");
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+/// Reports errors, exiting with 2 if they're all in the arguments and 1
+/// otherwise.
+fn report_errors(sources: &Sources, errors: &[saldo::Error], color: bool) -> ExitCode {
+    eprint!("{}", sources.format_errors(errors, color));
+    let bad_arguments = errors.iter().all(|e| {
+        matches!(
+            e,
+            saldo::Error::InvalidDateRange { .. } | saldo::Error::UnknownSeries { .. }
+        )
+    });
+    ExitCode::from(if bad_arguments { 2 } else { 1 })
 }
 
 struct Args {
@@ -123,14 +274,16 @@ struct Args {
     seed: Option<u64>,
     every: TimeUnit,
     series: Vec<String>,
+    runs: Option<u32>,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut path: Option<String> = None;
     let mut from: Option<NaiveDate> = None;
     let mut to: Option<NaiveDate> = None;
-    let mut format = OutputFormat::Ledger;
+    let mut format: Option<OutputFormat> = None;
     let mut seed: Option<u64> = None;
+    let mut runs: Option<u32> = None;
     let mut every: Option<TimeUnit> = None;
     let mut series: Vec<String> = Vec::new();
     let mut i = 0;
@@ -147,8 +300,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--format" => {
                 i += 1;
                 format = match args.get(i).map(String::as_str) {
-                    Some("ledger") => OutputFormat::Ledger,
-                    Some("csv") => OutputFormat::Csv,
+                    Some("ledger") => Some(OutputFormat::Ledger),
+                    Some("csv") => Some(OutputFormat::Csv),
                     Some(other) => return Err(format!("unknown format `{other}`")),
                     None => return Err("missing value for --format".to_string()),
                 };
@@ -162,6 +315,16 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                         u64::MAX
                     )
                 })?);
+            }
+            "--runs" => {
+                i += 1;
+                let value = args.get(i).ok_or("missing value for --runs")?;
+                runs =
+                    Some(
+                        value.parse().ok().filter(|&n: &u32| n > 0).ok_or_else(|| {
+                            format!("bad --runs `{value}`: a whole number from 1")
+                        })?,
+                    );
             }
             "--every" => {
                 i += 1;
@@ -191,6 +354,17 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         }
         i += 1;
     }
+    // Many runs write CSV; a run's ledger is its seed away.
+    let format = match (format, runs) {
+        (Some(OutputFormat::Ledger), Some(_)) => {
+            return Err(
+                "--runs writes CSV; for a run's ledger, pass its seed with --seed".to_string(),
+            );
+        }
+        (Some(format), _) => format,
+        (None, Some(_)) => OutputFormat::Csv,
+        (None, None) => OutputFormat::Ledger,
+    };
     if matches!(format, OutputFormat::Ledger) && (every.is_some() || !series.is_empty()) {
         return Err(
             "--every and --series pick what CSV reports; the ledger has every transaction"
@@ -205,6 +379,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         seed,
         every: every.unwrap_or(TimeUnit::Day),
         series,
+        runs,
     })
 }
 

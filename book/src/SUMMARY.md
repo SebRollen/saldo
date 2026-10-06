@@ -13,3 +13,4 @@
   - [Functions](./fns.md)
   - [Modules](./modules.md)
   - [Random draws](./distributions.md)
+  - [Many runs](./monte-carlo.md)

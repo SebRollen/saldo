@@ -38,6 +38,18 @@ pub struct SimLog {
     pub failed_checks: Vec<CheckFailure>,
 }
 
+/// What a simulation keeps, besides each reported day's balances.
+#[derive(Clone, Copy)]
+pub struct Record<'a> {
+    /// Snapshots are of the last day of each of these in the report, and of
+    /// its last day.
+    pub every: TimeUnit,
+    /// The values snapshots record, by index.
+    pub values: &'a [usize],
+    /// Whether to keep transactions, which the ledger lists.
+    pub transactions: bool,
+}
+
 /// A check that failed on some of the days reported.
 #[derive(Debug, Clone)]
 pub struct CheckFailure {
@@ -310,16 +322,19 @@ struct State<'p> {
 
 impl Program {
     /// Simulates from `first_day` and reports from `start` to `end`, drawing
-    /// with `seed`. Snapshots are of the last day of each `every` in the
-    /// report, and record `values`, by index, besides the balances.
+    /// with `seed`, keeping what `record` says.
     pub fn simulate(
         &self,
         first_day: NaiveDate,
         (start, end): (NaiveDate, NaiveDate),
         seed: u64,
-        every: TimeUnit,
-        values: &[usize],
+        record: &Record,
     ) -> Result<SimLog, Diagnostic> {
+        let Record {
+            every,
+            values,
+            transactions,
+        } = *record;
         let mut state = State {
             program: self,
             seed,
@@ -385,7 +400,7 @@ impl Program {
             // Accounts opening after the start of the range get their own
             // opening transaction so ledger output agrees with the balances.
             let report = t >= start;
-            if t > start {
+            if t > start && transactions {
                 let opened = opened
                     .into_iter()
                     .map(|i| (self.accounts[i].clone(), state.balance(i)));
@@ -400,6 +415,7 @@ impl Program {
                 let tx = state.fire(i)?;
                 if let Some(tx) = tx
                     && report
+                    && transactions
                 {
                     log.transactions.push(tx);
                 }

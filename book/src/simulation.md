@@ -9,7 +9,8 @@ saldo simulates one day at a time and reports every day from `--from` to
 
 A model that draws at random (see [Random draws](./distributions.md)) draws
 from a seed. `--seed N` sets it, and the same seed repeats a run exactly;
-without one, saldo picks a seed at random and prints it.
+without one, saldo picks a seed at random and prints it. `--runs` simulates
+many runs at once (see [Many runs](./monte-carlo.md)).
 
 ## Warm-up
 

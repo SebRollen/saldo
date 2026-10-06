@@ -88,7 +88,7 @@ The transactions can be piped into other PTA tools for reporting:
 
 ```
 saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]
-      [--every UNIT] [--series NAME,...] [--seed N]
+      [--every UNIT] [--series NAME,...] [--seed N] [--runs N]
 ```
 
 - `--from` / `--to` — inclusive date range to simulate
@@ -100,6 +100,11 @@ saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]
   groups of accounts (summed) or values instead of every account
 - `--seed N` — the seed random draws come from; the same seed repeats a run
   (default: a random seed, which saldo prints)
+- `--runs N` — simulate N runs, each with its own seed, as one CSV with each
+  run's number and seed; `--seed` with a run's seed repeats it
+
+saldo exits with 0 when all is well, 1 for an error in the model, 2 for bad
+arguments, and 3 when a check failed (it still writes all the output).
 
 ## Documentation
 

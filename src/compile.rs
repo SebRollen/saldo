@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct Program {
     /// Accounts, ordered by path.
     pub accounts: Vec<Arc<Path>>,
@@ -33,6 +34,7 @@ pub struct Program {
 
 /// A random draw, which depends only on the seed, its site and the period
 /// it's drawn for.
+#[derive(Clone)]
 pub struct Draw {
     /// Where it's written, which keeps it apart from every other draw.
     pub site: u64,
@@ -44,6 +46,7 @@ pub struct Draw {
 
 /// A `fill` in one of `entry`'s moves, which tracks what the move has moved
 /// in the current `unit`.
+#[derive(Clone)]
 pub struct Fill {
     pub entry: usize,
     /// The tag of the move, whose total is what's been moved so far.
@@ -54,6 +57,7 @@ pub struct Fill {
 
 /// A total that a `balances` block sets: what a tag or an account has moved
 /// so far in the `agg` period containing `date`, as of that day.
+#[derive(Clone)]
 pub struct TotalSoFar {
     pub counted: Counted,
     pub agg: AggKind,
@@ -61,12 +65,14 @@ pub struct TotalSoFar {
     pub value: Expr,
 }
 
+#[derive(Clone)]
 pub enum Counted {
     Tag(usize),
     /// An account, and what its ledger balance is multiplied by to read it.
     Account(usize, Decimal),
 }
 
+#[derive(Clone)]
 pub struct Param {
     pub name: String,
     pub body: ParamBody,
@@ -76,12 +82,14 @@ pub struct Param {
     pub draws_every: Option<TimeUnit>,
 }
 
+#[derive(Clone)]
 pub enum ParamBody {
     Const(Expr),
     /// Arms, of which the first that covers a day gives the value.
     Arms(Vec<Arm>),
 }
 
+#[derive(Clone)]
 pub struct Arm {
     pub when: DaySet,
     pub value: Expr,
@@ -90,6 +98,7 @@ pub struct Arm {
 
 /// How an arm's value grows: a step every `every` from `anchor`, the arm's
 /// start, compounding at or adding `by`.
+#[derive(Clone)]
 pub struct Growth {
     pub kind: GrowthKind,
     pub by: Expr,
@@ -97,6 +106,7 @@ pub struct Growth {
     pub anchor: NaiveDate,
 }
 
+#[derive(Clone)]
 pub struct Function {
     pub name: String,
     pub arity: usize,
@@ -105,6 +115,7 @@ pub struct Function {
     pub body: Vec<Stmt>,
 }
 
+#[derive(Clone)]
 pub enum Stmt {
     Let {
         slot: usize,
@@ -114,6 +125,7 @@ pub enum Stmt {
     Return(Expr),
 }
 
+#[derive(Clone)]
 pub struct Entry {
     pub label: Arc<str>,
     pub schedule: Schedule,
@@ -123,6 +135,7 @@ pub struct Entry {
     pub span: Span,
 }
 
+#[derive(Clone)]
 pub enum EntryStmt {
     Let {
         slot: usize,
@@ -157,6 +170,7 @@ impl EntryStmt {
     }
 }
 
+#[derive(Clone)]
 pub struct Move {
     pub from: usize,
     pub to: usize,
@@ -170,16 +184,19 @@ pub struct Move {
 }
 
 /// A tag on the moves of an entry.
+#[derive(Clone)]
 pub struct Tag {
     pub name: String,
     pub entry: usize,
 }
 
+#[derive(Clone)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
 }
 
+#[derive(Clone)]
 pub enum ExprKind {
     Num(Decimal),
     Bool(bool),

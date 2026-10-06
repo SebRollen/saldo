@@ -2827,6 +2827,125 @@ fn cli_rejects_sampling_the_ledger() {
     );
 }
 
+// --- many runs ---
+
+#[test]
+fn runs_come_in_order_and_repeat_with_their_own_seeds() {
+    let src = "entry food @ sun { assets.cash -> expenses.food : normal(185, 40) }";
+    let model = saldo::load(src).unwrap();
+    let opts = seeded("2026-01-01", "2026-03-31", 7);
+    let mut seen = Vec::new();
+    model.simulate_runs(&opts, 20, |run| {
+        let output = run.result.unwrap();
+        assert!(
+            output.log.transactions.is_empty(),
+            "runs don't keep transactions"
+        );
+        assert_eq!(run.seed, saldo::Model::run_seed(7, run.number));
+        // The same seed, simulated on its own, repeats the run.
+        let alone = model
+            .simulate(&RunOpts {
+                seed: run.seed,
+                ..opts.clone()
+            })
+            .unwrap();
+        assert_eq!(output.to_csv(), alone.to_csv());
+        seen.push(run.number);
+        true
+    });
+    assert_eq!(seen, (1..=20).collect::<Vec<_>>());
+}
+
+#[test]
+fn runs_stop_when_asked() {
+    let model = saldo::load("entry e @ * { income.x -> assets.cash : uniform(1, 2) }").unwrap();
+    let mut seen = 0;
+    model.simulate_runs(&seeded("2026-01-01", "2026-12-31", 1), 1_000, |_| {
+        seen += 1;
+        seen < 3
+    });
+    assert_eq!(seen, 3);
+}
+
+#[test]
+fn run_csv_starts_each_row_with_the_run_and_its_seed() {
+    let model = saldo::load("balances @ 2026-01-01 { assets.cash = 1 }").unwrap();
+    let mut csv = Vec::new();
+    model.simulate_runs(
+        &RunOpts {
+            every: saldo::TimeUnit::Month,
+            ..seeded("2026-01-01", "2026-02-28", 1)
+        },
+        2,
+        |run| {
+            let output = run.result.unwrap();
+            output
+                .write_run_csv(&mut csv, run.number, run.seed, run.number == 1)
+                .unwrap();
+            true
+        },
+    );
+    let (one, two) = (saldo::Model::run_seed(1, 1), saldo::Model::run_seed(1, 2));
+    assert_eq!(
+        String::from_utf8(csv).unwrap(),
+        format!(
+            "\"run\",\"seed\",\"date\",\"Assets:Cash\"\n\
+             1,{one},2026-01-31,1.00\n1,{one},2026-02-28,1.00\n\
+             2,{two},2026-01-31,1.00\n2,{two},2026-02-28,1.00\n"
+        )
+    );
+}
+
+#[test]
+fn cli_runs_write_csv_and_report_checks_across_runs() {
+    use std::process::Command;
+
+    let dir = std::env::temp_dir().join(format!("saldo-runs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("model.saldo");
+    std::fs::write(
+        &path,
+        "balances @ 2026-01-01 { assets.cash = 100 }\n\
+         entry spend @ last { assets.cash -> expenses.x : uniform(0, 200) }\n\
+         check assets.cash >= 0 @ jan 31\n",
+    )
+    .unwrap();
+    let saldo = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_saldo"))
+            .arg(&path)
+            .args(["--from", "2026-01-01", "--to", "2026-01-31", "--seed", "5"])
+            .args(extra)
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap()
+    };
+    let runs = saldo(&["--runs", "50", "--every", "month"]);
+    let ledger = saldo(&["--runs", "50", "--format", "ledger"]);
+    std::fs::remove_dir_all(&dir).ok();
+
+    let stdout = String::from_utf8_lossy(&runs.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines[0],
+        r#""run","seed","date","Assets:Cash","Expenses:X""#
+    );
+    assert_eq!(lines.len(), 51);
+    // About half the runs spend more than the 100 there is.
+    let failed = lines[1..]
+        .iter()
+        .filter(|l| l.split(',').nth(3).unwrap().starts_with('-'))
+        .count();
+    let stderr = String::from_utf8_lossy(&runs.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "check failed in {failed} of 50 runs, first on 2026-01-31 in run "
+        )),
+        "{stderr}"
+    );
+    assert_eq!(runs.status.code(), Some(3));
+    assert_eq!(ledger.status.code(), Some(2));
+}
+
 // --- random draws ---
 
 fn seeded(from: &str, to: &str, seed: u64) -> RunOpts {

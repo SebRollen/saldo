@@ -19,7 +19,7 @@ pub struct Account {
     pub opening: Option<(SpannedExpr, NaiveDate)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EntryDef {
     /// Its full name, like `loans.car`.
     pub name: String,
@@ -73,7 +73,7 @@ pub struct FnDef {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Model {
     /// The accounts money moves into or out of, ordered by path.
     pub accounts: IndexMap<Path, Account>,
