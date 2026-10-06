@@ -1,11 +1,14 @@
 use crate::ast::schedule::Share;
-use crate::ast::{AggKind, BinOp, EntryStmt, Expr, GrowthKind, Path, Span, SpannedExpr, TimeUnit};
+use crate::ast::{
+    AggKind, BinOp, Dist, EntryStmt, Expr, GrowthKind, Path, Span, SpannedExpr, TimeUnit,
+};
 use crate::compile::{Builtin, ExprKind, Function, Growth, Program, Stmt};
 use crate::errors::Diagnostic;
 use crate::resolver::{Counted, Model, ParamBody, walk_expr};
 use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -237,6 +240,8 @@ fn period_index(kind: AggKind) -> usize {
 
 struct State<'p> {
     program: &'p Program,
+    /// What every random draw depends on, with where it's written and when.
+    seed: u64,
     date: NaiveDate,
     /// Ledger balance of each account; `None` until it opens.
     balances: Vec<Option<Decimal>>,
@@ -267,9 +272,11 @@ impl Program {
         first_day: NaiveDate,
         start: NaiveDate,
         end: NaiveDate,
+        seed: u64,
     ) -> Result<SimLog, Diagnostic> {
         let mut state = State {
             program: self,
+            seed,
             date: first_day,
             // Accounts with no opening date are always available, starting at zero.
             balances: self
@@ -832,6 +839,71 @@ impl State<'_> {
                 self.fill(target, *unit, *fill, span).map(Value::Num)
             }
             ExprKind::Spread(e, unit) => self.spread(e, *unit, locals, span).map(Value::Num),
+            ExprKind::Draw(dist, args, slot) => self.draw(*dist, args, *slot, locals, span, date),
+        }
+    }
+
+    /// A draw from `dist` for `date`, the same for every day of the period
+    /// it's drawn for.
+    fn draw(
+        &self,
+        dist: Dist,
+        args: &[crate::compile::Expr],
+        slot: usize,
+        locals: &[Decimal],
+        span: Span,
+        date: NaiveDate,
+    ) -> Result<Value, Diagnostic> {
+        let draw = &self.program.draws[slot];
+        let period = draw.period.period_start(date).num_days_from_ce();
+        let bits = crate::random::mix(
+            crate::random::mix(self.seed, draw.site),
+            u64::from(period.unsigned_abs()),
+        );
+        let u = crate::random::unit_interval(bits);
+        let decimal = |x: f64| Decimal::from_f64(x).expect("a draw is a finite number");
+        let arg = |i: usize| self.eval_num_at(&args[i], locals, date);
+        let overflow =
+            || Diagnostic::new(span, format!("arithmetic overflow in `{}`", dist.name()));
+        match dist {
+            Dist::Normal => {
+                let (mean, sd) = (arg(0)?, arg(1)?);
+                if sd < Decimal::ZERO {
+                    return Err(Diagnostic::new(
+                        args[1].span,
+                        format!("a standard deviation can't be negative, but this is {sd}"),
+                    ));
+                }
+                let z = decimal(crate::random::normal_quantile(u));
+                sd.checked_mul(z)
+                    .and_then(|x| mean.checked_add(x))
+                    .map(Value::Num)
+                    .ok_or_else(overflow)
+            }
+            Dist::Uniform => {
+                let (lo, hi) = (arg(0)?, arg(1)?);
+                if lo > hi {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("`uniform` draws from {lo} up to {hi}, but {lo} is more than {hi}"),
+                    ));
+                }
+                hi.checked_sub(lo)
+                    .and_then(|width| width.checked_mul(decimal(u)))
+                    .and_then(|x| lo.checked_add(x))
+                    .map(Value::Num)
+                    .ok_or_else(overflow)
+            }
+            Dist::Chance => {
+                let p = arg(0)?;
+                if p < Decimal::ZERO || p > Decimal::ONE {
+                    return Err(Diagnostic::new(
+                        args[0].span,
+                        format!("a chance is between 0% and 100%, but this is {p}"),
+                    ));
+                }
+                Ok(Value::Bool(decimal(u) < p))
+            }
         }
     }
 
@@ -1023,40 +1095,69 @@ impl State<'_> {
     ) -> Result<(), Diagnostic> {
         let carried = entry.schedule.carried_periods(unit, self.date);
         let own = unit.period_start(self.date);
+        let carried_days = || carried.iter().flat_map(|p| unit.days(*p));
+        let fire_more_often = |diag: Diagnostic| {
+            let unit = unit.name();
+            Err(diag.with_note(
+                entry.span,
+                format!("this fires less often than once a {unit}; fire it at least once a {unit}"),
+            ))
+        };
         for param in self.params_read(expr, entry) {
-            let crate::compile::ParamBody::Arms(arms) = &self.program.params[param].body else {
-                continue;
+            let param = &self.program.params[param];
+            // Which arm applies, how many steps it has grown, and which
+            // period a new draw in it is for.
+            let state = |t: NaiveDate| {
+                let arm = match &param.body {
+                    crate::compile::ParamBody::Const(_) => Some((0, 0)),
+                    crate::compile::ParamBody::Arms(arms) => {
+                        let i = arms.iter().position(|arm| arm.when.contains(t))?;
+                        let steps = arms[i]
+                            .growth
+                            .as_ref()
+                            .map_or(0, |g| g.every.steps(g.anchor, t));
+                        Some((i, steps))
+                    }
+                };
+                Some((arm, param.draws_every.map(|every| every.period_start(t))))
             };
-            // Which arm applies, and how many steps it has grown.
-            let arm = |t: NaiveDate| {
-                let i = arms.iter().position(|arm| arm.when.contains(t))?;
-                let steps = arms[i]
-                    .growth
-                    .as_ref()
-                    .map_or(0, |g| g.every.steps(g.anchor, t));
-                Some((i, steps))
-            };
-            let today = arm(self.date);
-            let changes = carried
-                .iter()
-                .flat_map(|p| unit.days(*p))
-                .any(|d| arm(d) != today);
-            if changes {
-                let unit = unit.name();
-                return Err(Diagnostic::new(
+            let today = state(self.date);
+            if carried_days().any(|d| state(d) != today) {
+                return fire_more_often(Diagnostic::new(
                     span,
                     format!(
-                        "`{}` changes during the {unit}s before {} that `{}` covers, \
+                        "`{}` changes during the {}s before {own} that `{}` covers, \
                          but this reads balances or totals too, so they'd all get its value on {}",
-                        self.program.params[param].name, own, entry.label, self.date
-                    ),
-                )
-                .with_note(
-                    entry.span,
-                    format!(
-                        "this fires less often than once a {unit}; fire it at least once a {unit}"
+                        param.name,
+                        unit.name(),
+                        entry.label,
+                        self.date
                     ),
                 ));
+            }
+        }
+        let mut draws = Vec::new();
+        draws_in(expr, entry, &mut draws);
+        for draw in draws {
+            let every = self.program.draws[draw].period;
+            let today = every.period_start(self.date);
+            if carried_days().any(|d| every.period_start(d) != today) {
+                return fire_more_often(
+                    Diagnostic::new(
+                        span,
+                        format!(
+                            "this draws anew during the {}s before {own} that `{}` covers, \
+                             but reads balances or totals too, so they'd all get its draw for {}",
+                            unit.name(),
+                            entry.label,
+                            self.date
+                        ),
+                    )
+                    .with_note(
+                        self.program.draws[draw].span,
+                        format!("drawn every {every}"),
+                    ),
+                );
             }
         }
         Ok(())
@@ -1259,7 +1360,9 @@ fn params_in(e: &crate::compile::Expr, entry: &crate::compile::Entry, out: &mut 
             visit(t);
             visit(f);
         }
-        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => args.iter().for_each(visit),
+        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) | ExprKind::Draw(_, args, _) => {
+            args.iter().for_each(visit)
+        }
     }
 }
 
@@ -1297,7 +1400,44 @@ fn locals_in(e: &crate::compile::Expr, entry: &crate::compile::Entry, out: &mut 
             visit(t);
             visit(f);
         }
-        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => args.iter().for_each(visit),
+        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) | ExprKind::Draw(_, args, _) => {
+            args.iter().for_each(visit)
+        }
+    }
+}
+
+/// Adds the draws in `e`, or in the `let`s of `entry` it reads, to `out`.
+fn draws_in(e: &crate::compile::Expr, entry: &crate::compile::Entry, out: &mut Vec<usize>) {
+    if let ExprKind::Draw(_, _, slot) = e.kind {
+        out.push(slot);
+    }
+    let mut visit = |e: &crate::compile::Expr| draws_in(e, entry, out);
+    match &e.kind {
+        ExprKind::Local(slot) => visit(let_value(entry, *slot)),
+        ExprKind::Num(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Param(_)
+        | ExprKind::Balance { .. }
+        | ExprKind::AccountTotal { .. }
+        | ExprKind::Total(..) => {}
+        ExprKind::Neg(x)
+        | ExprKind::Not(x)
+        | ExprKind::Per(x, _)
+        | ExprKind::Limit(x, _)
+        | ExprKind::Spread(x, _)
+        | ExprKind::Fill(x, ..) => visit(x),
+        ExprKind::Bin(a, _, b) => {
+            visit(a);
+            visit(b);
+        }
+        ExprKind::If(c, t, f) => {
+            visit(c);
+            visit(t);
+            visit(f);
+        }
+        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) | ExprKind::Draw(_, args, _) => {
+            args.iter().for_each(visit)
+        }
     }
 }
 
@@ -1319,8 +1459,11 @@ fn dated(e: &crate::compile::Expr, entry: &crate::compile::Entry) -> bool {
         }
         ExprKind::Bin(a, _, b) => dated(a) && dated(b),
         ExprKind::If(c, t, f) => dated(c) && dated(t) && dated(f),
-        // Functions only read their arguments and values.
-        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => args.iter().all(dated),
+        // Functions only read their arguments and values, and a draw depends
+        // only on the date, given the seed.
+        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) | ExprKind::Draw(_, args, _) => {
+            args.iter().all(dated)
+        }
     }
 }
 
@@ -1361,6 +1504,9 @@ pub const BUILTINS: &[(&str, usize)] = &[
     ("ceil", 1),
     ("round", 1),
     ("fill", 1),
+    ("normal", 2),
+    ("uniform", 2),
+    ("chance", 1),
 ];
 
 fn apply_binop(op: BinOp, a: Value, b: Value, span: Span) -> Result<Value, Diagnostic> {

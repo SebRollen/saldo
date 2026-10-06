@@ -10,6 +10,7 @@ fn opts(from: &str, to: &str) -> RunOpts {
     RunOpts {
         from: d(from),
         to: d(to),
+        seed: 0,
     }
 }
 
@@ -2604,4 +2605,369 @@ fn a_named_every_nth_counts_from_where_its_used() {
     let output = run(src, &opts("2026-01-01", "2026-01-31")).unwrap();
     let dates: Vec<NaiveDate> = output.log.transactions.iter().map(|tx| tx.date).collect();
     assert_eq!(dates, ["2026-01-02", "2026-01-16", "2026-01-30"].map(d));
+}
+
+// --- random draws ---
+
+fn seeded(from: &str, to: &str, seed: u64) -> RunOpts {
+    RunOpts {
+        seed,
+        ..opts(from, to)
+    }
+}
+
+/// The standard deviation of `xs`.
+fn sd(xs: &[f64]) -> f64 {
+    let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+    (xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (xs.len() - 1) as f64).sqrt()
+}
+
+fn to_f64(x: Decimal) -> f64 {
+    x.to_string().parse().unwrap()
+}
+
+#[test]
+fn a_seed_repeats_a_run_and_another_seed_changes_it() {
+    let src = "entry food @ sun { assets.cash -> expenses.food : normal(185, 40) }";
+    let run_with = |seed| run(src, &seeded("2026-01-01", "2026-03-31", seed)).unwrap();
+    assert_eq!(run_with(7).to_ledger(), run_with(7).to_ledger());
+    assert_ne!(run_with(7).to_ledger(), run_with(8).to_ledger());
+    assert!(run_with(7).draws);
+    let plain = run(
+        "entry food @ sun { assets.cash -> expenses.food : 185 }",
+        &opts("2026-01-01", "2026-01-31"),
+    )
+    .unwrap();
+    assert!(!plain.draws);
+}
+
+#[test]
+fn draws_dont_depend_on_where_the_report_starts() {
+    let src = "
+        balances @ 2026-01-01 { assets.cash = 1_000 }
+        entry food @ sun { assets.cash -> expenses.food : normal(185, 40) }
+        let rent = normal(2_000, 100)/month
+        entry pay_rent @ 1st { assets.cash -> expenses.rent : rent }
+    ";
+    let whole = run(src, &seeded("2026-01-01", "2026-12-31", 3)).unwrap();
+    let late = run(src, &seeded("2026-07-01", "2026-12-31", 3)).unwrap();
+    let from_july = |output: &saldo::Output| -> Vec<(NaiveDate, String)> {
+        output
+            .log
+            .transactions
+            .iter()
+            .filter(|tx| tx.date >= d("2026-07-01") && tx.label.as_ref() != "opening-balances")
+            .map(|tx| (tx.date, format!("{:?}", tx.postings)))
+            .collect()
+    };
+    assert_eq!(from_july(&whole), from_july(&late));
+}
+
+#[test]
+fn a_rate_is_drawn_once_a_period_and_a_number_each_firing() {
+    let src = "
+        let salary = normal(120_000, 5_000)/year
+        entry pay @ 15th | last { income.salary -> assets.cash : salary }
+        entry food @ sun { assets.cash -> expenses.food : normal(185, 40) }
+    ";
+    let output = run(src, &seeded("2026-01-01", "2027-12-31", 1)).unwrap();
+    let pay = postings_to(&output, "assets.cash");
+    let (first, second) = pay.split_at(pay.len() / 2);
+    // One draw a year, split into paychecks that differ by at most a cent.
+    for year in [first, second] {
+        let year: Vec<&Decimal> = year.iter().filter(|x| **x > Decimal::ZERO).collect();
+        assert_eq!(year.len(), 24);
+        assert!(year.iter().all(|x| (**x - *year[0]).abs() <= usd("0.01")));
+    }
+    assert_ne!(
+        posted_in(&output, "income.salary", 2026),
+        posted_in(&output, "income.salary", 2027)
+    );
+    let food = postings_to(&output, "expenses.food");
+    let distinct: std::collections::HashSet<&Decimal> = food.iter().collect();
+    assert_eq!(distinct.len(), food.len());
+}
+
+#[test]
+fn a_unit_on_an_expression_draws_what_is_written_in_it_once_a_unit() {
+    let src = "
+        let salary = 100_000/year
+        entry pay @ last { income.salary -> assets.cash : salary * normal(1, 10%)/year }
+    ";
+    let output = run(src, &seeded("2026-01-01", "2026-12-31", 2)).unwrap();
+    let pay = postings_to(&output, "assets.cash");
+    assert!(
+        pay.iter().all(|x| (*x - pay[0]).abs() <= usd("0.01")),
+        "{pay:?}"
+    );
+}
+
+#[test]
+fn a_limit_is_drawn_once_a_period_and_filled() {
+    let src = "
+        let bonus = normal(10_000, 2_000)[year]
+        entry pay @ 15th | last { income.bonus -> assets.cash : bonus }
+    ";
+    let output = run(src, &seeded("2026-01-01", "2027-12-31", 4)).unwrap();
+    let year = |y| posted_in(&output, "assets.cash", y);
+    assert_ne!(year(2026), year(2027));
+    let pay = postings_to(&output, "assets.cash");
+    assert!(pay[..24].iter().all(|x| (*x - pay[0]).abs() <= usd("0.01")));
+}
+
+#[test]
+fn periods_that_roll_into_a_firing_get_their_own_draws() {
+    // A monthly entry moving a weekly draw: March 2026 takes five weeks, each
+    // with its own draw, so the month's sd is about 40 * sqrt(5), not 5 * 40.
+    let src = "entry food @ last { assets.cash -> expenses.food : normal(185, 40)/week }";
+    let march: Vec<f64> = (0..300)
+        .map(|seed| {
+            let output = run(src, &seeded("2026-03-01", "2026-03-31", seed)).unwrap();
+            to_f64(postings_to(&output, "expenses.food")[0])
+        })
+        .collect();
+    let found = sd(&march);
+    assert!((75.0..105.0).contains(&found), "sd {found}");
+}
+
+#[test]
+fn naming_a_draw_shares_it() {
+    let shared = "
+        balances @ 2026-01-01 {
+          assets.retirement.a = 1_000
+          assets.retirement.b = 1_000
+        }
+        let market = normal(1%, 4%)
+        entry returns @ last {
+          for a in assets.retirement { income.investments -> a : a * market }
+        }
+    ";
+    let output = run(shared, &seeded("2026-01-01", "2026-01-31", 5)).unwrap();
+    assert_eq!(
+        posting(&output, 0, "assets.retirement.a"),
+        posting(&output, 0, "assets.retirement.b")
+    );
+    // Written in the loop, it's drawn for each account.
+    let separate = shared.replace("a * market", "a * normal(1%, 4%)");
+    let output = run(&separate, &seeded("2026-01-01", "2026-01-31", 5)).unwrap();
+    assert_ne!(
+        posting(&output, 0, "assets.retirement.a"),
+        posting(&output, 0, "assets.retirement.b")
+    );
+}
+
+#[test]
+fn each_module_a_function_makes_draws_for_itself() {
+    let src = "
+        fn spending(on) {
+          mod { entry spend @ last { assets.cash -> on : normal(100, 10) } }
+        }
+        mod a = spending(on: expenses.a)
+        mod b = spending(on: expenses.b)
+    ";
+    let output = run(src, &seeded("2026-01-01", "2026-01-31", 6)).unwrap();
+    assert_ne!(
+        postings_to(&output, "expenses.a"),
+        postings_to(&output, "expenses.b")
+    );
+}
+
+#[test]
+fn changing_a_distribution_keeps_its_draws_in_step() {
+    // The same seed draws the same quantiles, so moving the mean moves every
+    // draw by the same amount.
+    let src =
+        |mean| format!("entry food @ sun {{ assets.cash -> expenses.food : normal({mean}, 40) }}");
+    let low = run(&src(185), &seeded("2026-01-01", "2026-03-31", 9)).unwrap();
+    let high = run(&src(285), &seeded("2026-01-01", "2026-03-31", 9)).unwrap();
+    let (low, high) = (
+        postings_to(&low, "expenses.food"),
+        postings_to(&high, "expenses.food"),
+    );
+    assert!(low.iter().zip(&high).all(|(l, h)| *h - *l == usd("100")));
+}
+
+#[test]
+fn growth_steps_draw_their_own_rates() {
+    let src = "
+        let prices { 2026.. => 1 compounding normal(3%, 1%) every year }
+        entry food @ jan 1 { assets.cash -> expenses.food : 1_000_000 * prices }
+    ";
+    let output = run(src, &seeded("2026-01-01", "2029-12-31", 1)).unwrap();
+    let food: Vec<f64> = postings_to(&output, "expenses.food")
+        .into_iter()
+        .map(to_f64)
+        .collect();
+    let growth: Vec<f64> = food.windows(2).map(|w| w[1] / w[0] - 1.0).collect();
+    assert_eq!(growth.len(), 3);
+    assert!(growth.iter().all(|g| (0.0..0.06).contains(g)), "{growth:?}");
+    assert!(growth[0] != growth[1] && growth[1] != growth[2]);
+}
+
+#[test]
+fn chance_comes_true_about_as_often_as_it_says() {
+    let src = "entry repair @ last { assets.cash -> expenses.car : if chance(25%) then 1 else 0 }";
+    let output = run(src, &seeded("2000-01-01", "2049-12-31", 1)).unwrap();
+    let hits = postings_to(&output, "expenses.car").len();
+    // 600 months.
+    assert!((120..180).contains(&hits), "{hits}");
+}
+
+#[test]
+fn uniform_draws_between_its_bounds() {
+    let src = "entry e @ * { assets.cash -> expenses.x : uniform(300, 2_500) }";
+    let output = run(src, &seeded("2026-01-01", "2026-12-31", 1)).unwrap();
+    let xs = postings_to(&output, "expenses.x");
+    assert!(xs.iter().all(|x| *x >= usd("300") && *x <= usd("2500")));
+}
+
+#[test]
+fn draws_cant_be_written_where_they_would_be_shared_or_facts() {
+    let errors = |src: &str| run(src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
+    assert!(has_error(
+        &errors("check normal(1, 1) > 0"),
+        "a check can't draw at random"
+    ));
+    assert!(has_error(
+        &errors("balances @ 2026-01-01 { assets.cash = normal(1, 1) }"),
+        "an opening balance can't be drawn at random"
+    ));
+    assert!(has_error(
+        &errors(
+            "entry e @ last { income.x -> assets.cash : 1 #x }
+             balances @ 2026-01-01 { e.x[year] = uniform(1, 2) }"
+        ),
+        "a total so far can't be drawn at random"
+    ));
+    assert!(has_error(
+        &errors("fn f(x) { x * normal(1, 0.1) }"),
+        "function `f` can't draw at random"
+    ));
+    assert!(has_error(
+        &errors(
+            "fn loan(rate) { mod { entry pay @ last { assets.cash -> expenses.i : rate } } }
+             mod car = loan(rate: normal(5, 1))"
+        ),
+        "`loan` copies `rate` wherever it uses it"
+    ));
+    assert!(has_error(
+        &errors(
+            "fn loan(rate) {
+               let r = rate * normal(1, 0.1)
+               mod { entry pay @ last { assets.cash -> expenses.i : r } }
+             }"
+        ),
+        "`r` is copied wherever the module of `loan` uses it"
+    ));
+}
+
+#[test]
+fn a_rate_cant_hold_a_draw_that_changes_more_often() {
+    let errors = |src: &str| run(src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
+    let message = "this is an amount per month, but part of it is drawn anew every day";
+    assert!(has_error(
+        &errors(
+            "let x = normal(100, 10)
+             entry food { assets.cash -> expenses.food : x/month }"
+        ),
+        message
+    ));
+    assert!(has_error(
+        &errors("entry e @ last { assets.cash -> expenses.x : 500/month + normal(10, 1) }"),
+        message
+    ));
+    assert!(has_error(
+        &errors("let r = normal(800, 100)/week\nlet m = r/month"),
+        "can't convert"
+    ));
+    assert!(has_error(
+        &errors("let r = normal(800, 100)/month\nlet y = r/year"),
+        "this is an amount per year, but part of it is drawn anew every month"
+    ));
+}
+
+#[test]
+fn draws_take_arguments_of_one_kind() {
+    let errors = |src: &str| run(src, &opts("2026-01-01", "2026-01-31")).unwrap_err();
+    assert!(has_error(
+        &errors("entry e @ last { assets.cash -> expenses.x : normal(10/month, 1/year) }"),
+        "`normal` mixes an amount per month with an amount per year"
+    ));
+    assert!(has_error(
+        &errors("entry e @ last { assets.cash -> expenses.x : if chance(4%/year) then 1 else 0 }"),
+        "`chance` takes a plain probability"
+    ));
+    assert!(has_error(
+        &errors("entry e @ last { assets.cash -> expenses.x : normal(1, 1) and true }"),
+        "an operand of `and`"
+    ));
+}
+
+#[test]
+fn bad_arguments_are_errors_that_name_the_seed() {
+    let errors = |src: &str| run(src, &seeded("2026-01-01", "2026-01-31", 12)).unwrap_err();
+    assert!(has_error(
+        &errors("entry e @ last { assets.cash -> expenses.x : normal(10, -1) }"),
+        "a standard deviation can't be negative, but this is -1 (drawing with seed 12)"
+    ));
+    assert!(has_error(
+        &errors("entry e @ last { assets.cash -> expenses.x : uniform(2, 1) }"),
+        "`uniform` draws from 2 up to 1"
+    ));
+    assert!(has_error(
+        &errors("entry e @ last { assets.cash -> expenses.x : if chance(150%) then 1 else 0 }"),
+        "a chance is between 0% and 100%"
+    ));
+}
+
+#[test]
+fn a_draw_cant_change_during_periods_that_roll_into_an_amount_that_reads_balances() {
+    let src = "
+        balances @ 2026-01-01 { liabilities.loan = 10_000 }
+        entry interest @ 2026-01-31.. & last / 3 {
+          liabilities.loan -> expenses.interest : liabilities.loan * normal(0.5%, 0.1%)/month
+        }
+    ";
+    let errors = run(src, &opts("2026-01-01", "2026-12-31")).unwrap_err();
+    assert!(has_error(
+        &errors,
+        "this draws anew during the months before 2026-04-01"
+    ));
+    // Drawn once a year, it doesn't change between quarterly firings' months.
+    let yearly = src.replace("normal(0.5%, 0.1%)/month", "normal(6%, 1%)/year");
+    run(&yearly, &opts("2026-01-01", "2026-12-31")).unwrap();
+}
+
+#[test]
+fn cli_prints_a_random_seed_and_takes_one() {
+    use std::process::Command;
+
+    let dir = std::env::temp_dir().join(format!("saldo-seed-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("model.saldo");
+    std::fs::write(
+        &path,
+        "entry food @ sun { assets.cash -> expenses.food : normal(185, 40) }\n",
+    )
+    .unwrap();
+    let saldo = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_saldo"))
+            .arg(&path)
+            .args(["--from", "2026-01-01", "--to", "2026-01-31"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let random = saldo(&[]);
+    let stderr = String::from_utf8_lossy(&random.stderr).into_owned();
+    let seed = stderr
+        .strip_prefix("note: drew with seed ")
+        .and_then(|rest| rest.split(';').next())
+        .unwrap_or_else(|| panic!("{stderr}"));
+    let repeated = saldo(&["--seed", seed]);
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(random.stdout, repeated.stdout);
+    // Given a seed, it doesn't print it.
+    assert!(repeated.stderr.is_empty());
 }

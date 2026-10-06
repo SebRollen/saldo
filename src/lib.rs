@@ -5,6 +5,7 @@ mod eval;
 mod expand;
 mod lexer;
 mod parser;
+mod random;
 mod resolver;
 mod sources;
 mod typecheck;
@@ -23,6 +24,8 @@ pub use sources::Sources;
 pub struct RunOpts {
     pub from: NaiveDate,
     pub to: NaiveDate,
+    /// What random draws depend on: the same seed draws the same numbers.
+    pub seed: u64,
 }
 
 #[derive(Debug)]
@@ -32,6 +35,9 @@ pub struct Output {
     pub log: SimLog,
     /// Problems that don't stop the simulation but may make results wrong.
     pub warnings: Vec<Diagnostic>,
+    /// Whether the model draws at random, so that what it does depends on
+    /// the seed.
+    pub draws: bool,
 }
 
 impl Output {
@@ -104,8 +110,14 @@ fn simulate(program: &ast::Program, opts: &RunOpts) -> Result<Output, Vec<Error>
 
     let first_day = model.first_day(opts.from);
     let log = program
-        .simulate(first_day, opts.from, opts.to)
-        .map_err(|d| vec![Error::Diagnostic(d)])?;
+        .simulate(first_day, opts.from, opts.to, opts.seed)
+        .map_err(|mut d| {
+            // What went wrong may depend on what was drawn.
+            if !program.draws.is_empty() {
+                d.message = format!("{} (drawing with seed {})", d.message, opts.seed);
+            }
+            vec![Error::Diagnostic(d)]
+        })?;
 
     let accounts = model.accounts.keys().cloned().collect();
     let mut warnings = model.warnings.clone();
@@ -117,6 +129,7 @@ fn simulate(program: &ast::Program, opts: &RunOpts) -> Result<Output, Vec<Error>
         accounts,
         log,
         warnings,
+        draws: !program.draws.is_empty(),
     })
 }
 
@@ -216,6 +229,10 @@ mod doc_tests {
         ("README.md", include_str!("../README.md")),
         ("accounts.md", include_str!("../book/src/accounts.md")),
         ("checks.md", include_str!("../book/src/checks.md")),
+        (
+            "distributions.md",
+            include_str!("../book/src/distributions.md"),
+        ),
         ("entries.md", include_str!("../book/src/entries.md")),
         ("fns.md", include_str!("../book/src/fns.md")),
         ("intro.md", include_str!("../book/src/intro.md")),

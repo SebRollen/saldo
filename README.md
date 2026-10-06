@@ -87,12 +87,14 @@ The transactions can be piped into other PTA tools for reporting:
 ## Usage
 
 ```
-saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]
+saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv] [--seed N]
 ```
 
 - `--from` / `--to` — inclusive date range to simulate
 - `--format ledger` (default) — outputs double-entry ledger transactions
 - `--format csv` — outputs the daily balance of every account as CSV
+- `--seed N` — the seed random draws come from; the same seed repeats a run
+  (default: a random seed, which saldo prints)
 
 ## Documentation
 
@@ -214,6 +216,8 @@ stops with an error if one fails.
 | `min(a, b)`, `max(a, b)` | Built-in functions |
 | `fill(max_401k - other[year])` | What's left of a limit or total, split over the firings left in the period |
 | `abs(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Built-in functions |
+| `normal(mean, sd)`, `uniform(lo, hi)` | A random draw |
+| `chance(4%)` | `true` with probability 4% |
 | `net(gross, 0.3)` | User-defined function call |
 
 Values are numbers or bools. saldo checks that each is used where it's
@@ -223,6 +227,24 @@ bools) before it simulates anything.
 Amounts moved and opening balances are rounded to cents, and `round(x)` rounds
 to a whole number. Both use round-half-to-even (`round(2.5) == 2`), as hledger
 and beancount do. Entries that move no money are left out of the output.
+
+### Random draws
+
+```
+let market = normal(0.5%, 4%)
+let salary = normal(100_000, 5_000)/year
+
+entry repair "Car repair" @ last {
+  assets.cash -> expenses.car : if chance(4%) then uniform(300, 2_500) else 0
+}
+```
+
+A draw changes once per period of what it is: `salary` once a year, spread
+over the year's paychecks, and a plain number like `market` each day it's
+worked out, so once per firing. Everything that reads a value on the same day
+sees the same draw, and a distribution written in two places draws in each. A
+draw depends only on the seed, where it's written and when, so `--seed`
+repeats a run whatever `--from` is.
 
 ### Functions
 

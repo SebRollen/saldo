@@ -2,7 +2,7 @@
 //! mistakes are reported before the simulation runs rather than on the day an
 //! expression is first evaluated.
 
-use crate::ast::{BinOp, EntryStmt, Expr, SpannedExpr, Stmt};
+use crate::ast::{BinOp, Dist, EntryStmt, Expr, SpannedExpr, Stmt};
 use crate::errors::Diagnostic;
 use crate::resolver::{FnDef, Model, ParamBody};
 use indexmap::IndexMap;
@@ -203,6 +203,15 @@ impl<'a> Checker<'a> {
                 } else {
                     Some(Ty::Num) // builtins all return numbers
                 }
+            }
+            Expr::Draw(dist, args, _) => {
+                for arg in args {
+                    self.expect(arg, Ty::Num, &format!("an argument to `{}`", dist.name()));
+                }
+                Some(match dist {
+                    Dist::Chance => Ty::Bool,
+                    Dist::Normal | Dist::Uniform => Ty::Num,
+                })
             }
             Expr::Ref(_) | Expr::Days(_) | Expr::Range { .. } | Expr::Named(..) => {
                 unreachable!("the resolver replaces these")

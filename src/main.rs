@@ -1,9 +1,11 @@
 use chrono::NaiveDate;
 use saldo::{RunOpts, Sources, run_file};
+use std::hash::{BuildHasher, RandomState};
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]";
+const USAGE: &str =
+    "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv] [--seed N]";
 
 const HELP: &str = "\
 Simulate a saldo model and print the resulting transactions or balances.
@@ -13,6 +15,8 @@ Options:
   --to YYYY-MM-DD     last day to report (inclusive)
   --format FORMAT     `ledger` (default): double-entry transactions
                       `csv`: daily balance of every account
+  --seed N            draw the model's random numbers from seed N, a whole
+                      number, to repeat a run (default: a random seed)
   -h, --help          print this help
   -V, --version       print the version";
 
@@ -31,7 +35,13 @@ fn main() -> ExitCode {
         println!("saldo {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
-    let (path, from, to, format) = match parse_args(&args) {
+    let Args {
+        path,
+        from,
+        to,
+        format,
+        seed,
+    } = match parse_args(&args) {
         Ok(x) => x,
         Err(msg) => {
             eprintln!("{msg}\n{USAGE}");
@@ -39,12 +49,20 @@ fn main() -> ExitCode {
         }
     };
 
-    let opts = RunOpts { from, to };
+    let opts = RunOpts {
+        from,
+        to,
+        seed: seed.unwrap_or_else(|| RandomState::new().hash_one(())),
+    };
     let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut sources = Sources::default();
     match run_file(&path, &opts, &mut sources) {
         Ok(output) => {
             eprint!("{}", sources.format_warnings(&output.warnings, color));
+            if output.draws && seed.is_none() {
+                let seed = opts.seed;
+                eprintln!("note: drew with seed {seed}; pass --seed {seed} to reproduce");
+            }
             let mut out = std::io::BufWriter::new(std::io::stdout().lock());
             let written = match format {
                 OutputFormat::Ledger => output.write_ledger(&mut out),
@@ -68,11 +86,20 @@ fn main() -> ExitCode {
     }
 }
 
-fn parse_args(args: &[String]) -> Result<(String, NaiveDate, NaiveDate, OutputFormat), String> {
+struct Args {
+    path: String,
+    from: NaiveDate,
+    to: NaiveDate,
+    format: OutputFormat,
+    seed: Option<u64>,
+}
+
+fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut path: Option<String> = None;
     let mut from: Option<NaiveDate> = None;
     let mut to: Option<NaiveDate> = None;
     let mut format = OutputFormat::Ledger;
+    let mut seed: Option<u64> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -93,6 +120,16 @@ fn parse_args(args: &[String]) -> Result<(String, NaiveDate, NaiveDate, OutputFo
                     None => return Err("missing value for --format".to_string()),
                 };
             }
+            "--seed" => {
+                i += 1;
+                let value = args.get(i).ok_or("missing value for --seed")?;
+                seed = Some(value.parse().map_err(|_| {
+                    format!(
+                        "bad seed `{value}`: a seed is a whole number from 0 to {}",
+                        u64::MAX
+                    )
+                })?);
+            }
             other if !other.starts_with("--") => {
                 if path.is_some() {
                     return Err(format!("unexpected positional arg `{other}`"));
@@ -103,12 +140,13 @@ fn parse_args(args: &[String]) -> Result<(String, NaiveDate, NaiveDate, OutputFo
         }
         i += 1;
     }
-    Ok((
-        path.ok_or("missing source path")?,
-        from.ok_or("missing --from")?,
-        to.ok_or("missing --to")?,
+    Ok(Args {
+        path: path.ok_or("missing source path")?,
+        from: from.ok_or("missing --from")?,
+        to: to.ok_or("missing --to")?,
         format,
-    ))
+        seed,
+    })
 }
 
 fn parse_date(s: &str) -> Result<NaiveDate, String> {

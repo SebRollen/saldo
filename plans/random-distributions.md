@@ -1,7 +1,10 @@
 # Random distributions
 
-Status: designed, not started. Revised for the redesigned language: values
-that depend only on the date, rates and limits, full names, modules and `for`.
+Status: implemented on branch `random-distributions-plan`, apart from the open
+question below. Revised for the redesigned language: values that depend only
+on the date, rates and limits, full names, modules and `for`. The book's
+chapter on random draws (`book/src/distributions.md`) describes what was
+built; where this plan and the code differ, the code is right.
 
 Let a model describe uncertain amounts, like a grocery bill, car repairs,
 inflation or market returns, as distributions. A seed fixes every draw, so it
@@ -84,9 +87,11 @@ draw changes once per period of the kind it's written as:
   `inflation` on the step's day, and a month-end entry reads `market` once a
   month.
 
-The period comes from the draw's arguments or a unit applied directly to it.
-A draw that changes more often than the rate or limit it ends up in is an
-error, whether in the same expression or through values:
+The period comes from the draw's arguments, or from a unit applied to an
+expression it's written in. Units bind like `/`, so in `debt * normal(6%, 1%)/year`
+the `/year` applies to the product; it still draws once a year. A draw that
+changes more often than the rate or limit it ends up in is an error, whether
+in the same expression or through values:
 
 ```
 let x = normal(100, 10)
@@ -96,8 +101,7 @@ entry food {
 }
 ```
 
-> `x` is drawn every day, but this moves it per month, so each day would move
-> part of a different draw; draw it per month: `normal(100, 10)/month`
+> this is an amount per month, but part of it is drawn anew every day
 
 The units pass tracks, beside each expression's kind, the shortest period its
 draws change over. A rate or limit per `U` can't hold draws that change more
@@ -148,6 +152,9 @@ expands them.
   draw in one would be shared by every call on the same day. Pass the draw in
   as an argument, or name it as a value. Functions that make modules can draw,
   since their entries and values get the instance's names.
+- **Arguments and `let`s of functions that make modules**: they're copied
+  wherever the module uses them, so a draw in one would be drawn separately in
+  each place. Name the draw and pass the name, or draw inside the module.
 
 ### Periods that roll into a firing
 
@@ -170,9 +177,11 @@ error ("fire it at least once a week").
 ### Seed
 
 - **The default is random**, so adding a distribution visibly varies the
-  output. When the model draws, the CLI prints the seed to stderr with the
-  warnings: `note: drew with seed 8812047; pass --seed 8812047 to reproduce`.
-  Models that don't draw print nothing extra.
+  output. When the model draws and no seed was given, the CLI prints the seed
+  to stderr with the warnings: `note: drew with seed 8812047; pass --seed
+  8812047 to reproduce`. Models that don't draw print nothing extra. An error
+  during a run that draws ends with `(drawing with seed 8812047)`, since what
+  went wrong may depend on the draws.
 - **`--seed N`** fixes it. N is a `u64`.
 - **The library stays deterministic.** `RunOpts` gets a required `seed: u64`,
   and `main.rs` picks a random one when `--seed` is missing. std's
@@ -238,7 +247,8 @@ number.
 5. **Evaluation** (`src/eval.rs`): `State` holds the seed. A draw evaluated for
    date `d`, which may not be today (`eval_num_at`), mixes `(seed, key, n)`,
    where `n` numbers `d`'s day, or the period of `d` for a rate or limit. It
-   takes a uniform number in [0, 1) from the top 53 bits, transforms it, and
+   takes a number strictly between 0 and 1 from the top 52 bits (with 53,
+   the top slice's middle rounds to 1), transforms it, and
    converts it with `Decimal::from_f64`. `dated` counts draws;
    `check_carried` treats a draw that changes during the rolled-in periods as
    a change.

@@ -3,10 +3,11 @@
 //! become indices.
 
 use crate::ast::schedule::DaySet;
-use crate::ast::{self, AggKind, BinOp, GrowthKind, Path, Schedule, Span, TimeUnit};
+use crate::ast::{self, AggKind, BinOp, Dist, GrowthKind, Path, Schedule, Span, TimeUnit};
 use crate::resolver::{Model, ParamBody as ModelParamBody};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -26,6 +27,19 @@ pub struct Program {
     /// Each `fill` in a move. The units pass adds these.
     pub fills: Vec<Fill>,
     pub totals_so_far: Vec<TotalSoFar>,
+    /// Each random draw.
+    pub draws: Vec<Draw>,
+}
+
+/// A random draw, which depends only on the seed, its site and the period
+/// it's drawn for.
+pub struct Draw {
+    /// Where it's written, which keeps it apart from every other draw.
+    pub site: u64,
+    /// How often it's drawn: each day for a number, or once a period for an
+    /// amount per or each period. The units pass sets it.
+    pub period: TimeUnit,
+    pub span: Span,
 }
 
 /// A `fill` in one of `entry`'s moves, which tracks what the move has moved
@@ -56,6 +70,10 @@ pub enum Counted {
 pub struct Param {
     pub name: String,
     pub body: ParamBody,
+    /// How often a new draw in its value changes it, if it draws. The units
+    /// pass sets it. Draws in growth rates don't count: they only change it
+    /// with each step.
+    pub draws_every: Option<TimeUnit>,
 }
 
 pub enum ParamBody {
@@ -204,6 +222,9 @@ pub enum ExprKind {
     /// firings left in it. The units pass turns `fill` calls into these; the
     /// `usize` indexes `Program::fills`.
     Fill(Box<Expr>, TimeUnit, usize),
+    /// A random draw with its arguments; the `usize` indexes
+    /// `Program::draws`.
+    Draw(Dist, Vec<Expr>, usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +270,8 @@ struct Names<'m> {
     params: HashMap<&'m str, usize>,
     fns: HashMap<&'m str, usize>,
     tags: HashMap<(&'m str, &'m str), usize>,
+    /// The draws lowered so far.
+    draws: RefCell<Vec<Draw>>,
 }
 
 /// Lowers `model`, which the resolver has already validated: every name
@@ -280,9 +303,10 @@ pub fn compile(model: &Model) -> Program {
             .map(|(i, n)| (n.as_str(), i))
             .collect(),
         tags: tag_ids,
+        draws: RefCell::new(Vec::new()),
     };
 
-    Program {
+    let program = Program {
         accounts: model.accounts.keys().cloned().map(Arc::new).collect(),
         signs: model
             .accounts
@@ -303,6 +327,7 @@ pub fn compile(model: &Model) -> Program {
             .iter()
             .map(|(name, body)| Param {
                 name: name.clone(),
+                draws_every: None,
                 body: match body {
                     ModelParamBody::Const(e) => ParamBody::Const(names.lower(e, &[])),
                     ModelParamBody::Arms(arms) => ParamBody::Arms(
@@ -370,6 +395,11 @@ pub fn compile(model: &Model) -> Program {
             .collect(),
         tags,
         fills: Vec::new(),
+        draws: Vec::new(),
+    };
+    Program {
+        draws: names.draws.into_inner(),
+        ..program
     }
 }
 
@@ -530,6 +560,16 @@ impl Names<'_> {
                     Some(builtin) => ExprKind::Builtin(builtin, args),
                     None => ExprKind::Call(self.fns[name.as_str()], args),
                 }
+            }
+            ast::Expr::Draw(dist, args, site) => {
+                let args = args.iter().map(|a| self.lower(a, locals)).collect();
+                let mut draws = self.draws.borrow_mut();
+                draws.push(Draw {
+                    site: *site,
+                    period: TimeUnit::Day,
+                    span: *span,
+                });
+                ExprKind::Draw(*dist, args, draws.len() - 1)
             }
             ast::Expr::Ref(_)
             | ast::Expr::Days(_)

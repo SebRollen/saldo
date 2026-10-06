@@ -5,7 +5,7 @@
 //! the new module what they meant where the call is.
 
 use crate::ast::{
-    AccountKind, Decl, EntryStmt, Expr, LetBody, ModBody, Path, Program, Span, Spanned,
+    AccountKind, Decl, Dist, EntryStmt, Expr, LetBody, ModBody, Path, Program, Span, Spanned,
     SpannedExpr, Stmt,
 };
 use crate::errors::Diagnostic;
@@ -65,13 +65,26 @@ impl Expander {
                 Decl::Fn { name, params, body } => match body.split_last() {
                     Some((Stmt::Mod(decls), lets)) => {
                         let key = child(module, &name.0).join(".");
-                        let lets = lets
+                        let lets: Vec<(String, SpannedExpr)> = lets
                             .iter()
                             .filter_map(|stmt| match stmt {
                                 Stmt::Let { name, value } => Some((name.clone(), value.clone())),
                                 _ => None,
                             })
                             .collect();
+                        for (let_name, value) in &lets {
+                            if let Some(span) = first_draw(value) {
+                                self.diags.push(Diagnostic::new(
+                                    span,
+                                    format!(
+                                        "`{let_name}` is copied wherever the module of `{}` \
+                                         uses it, so it can't draw at random; draw in a `let` \
+                                         inside the module instead",
+                                        name.0
+                                    ),
+                                ));
+                            }
+                        }
                         self.fns.insert(
                             key.clone(),
                             ModuleFn {
@@ -231,6 +244,16 @@ impl Expander {
         };
         let mut bindings = Bindings::new();
         for ((param, _), mut arg) in f.params.iter().zip(args) {
+            if let Some(span) = first_draw(&arg) {
+                self.diags.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "`{}` copies `{param}` wherever it uses it, so this would be drawn \
+                         separately in each place; name the draw with a `let` and pass the name",
+                        f.name
+                    ),
+                ));
+            }
             self.qualify(module, &mut arg);
             bindings.insert(param.clone(), arg);
         }
@@ -343,8 +366,22 @@ pub fn order_args(
     ordered.into_iter().collect()
 }
 
+/// Where the first random draw in `e` is, if it has one.
+fn first_draw(e: &SpannedExpr) -> Option<Span> {
+    let mut found = None;
+    crate::resolver::walk_expr(e, &mut |x| {
+        if let Expr::Call(callee, _) = x.0.as_ref()
+            && let [name] = callee.0.as_slice()
+            && Dist::from_name(name).is_some()
+        {
+            found = found.or(Some(x.1));
+        }
+    });
+    found
+}
+
 /// Calls `f` on each expression directly inside `expr`.
-fn for_each_child(expr: &mut Expr, f: &mut impl FnMut(&mut SpannedExpr)) {
+pub(crate) fn for_each_child(expr: &mut Expr, f: &mut impl FnMut(&mut SpannedExpr)) {
     match expr {
         Expr::Neg(x) | Expr::Not(x) | Expr::Per(x, _) | Expr::Period(x, _) | Expr::Named(_, x) => {
             f(x)
@@ -358,7 +395,7 @@ fn for_each_child(expr: &mut Expr, f: &mut impl FnMut(&mut SpannedExpr)) {
             f(then);
             f(else_);
         }
-        Expr::Call(_, args) => args.iter_mut().for_each(f),
+        Expr::Call(_, args) | Expr::Draw(_, args, _) => args.iter_mut().for_each(f),
         Expr::Range { from, to, .. } => {
             f(from);
             if let Some(to) = to {

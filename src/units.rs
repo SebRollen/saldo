@@ -10,10 +10,17 @@
 //!
 //! It also turns `fill(x)` calls into [`ExprKind::Fill`], giving each its own
 //! slot in [`Program::fills`].
+//!
+//! A random draw is drawn once per period of its kind: once a month for an
+//! amount per month, and each day for a plain number, unless a `/month` or
+//! `[month]` applies to an expression it's written in. A rate or a limit can't
+//! hold a draw that changes more often than its period, or the firings in a
+//! period would each move part of a different draw.
 
-use crate::ast::{BinOp, GrowthKind, Span, TimeUnit};
+use crate::ast::{BinOp, Dist, GrowthKind, Span, TimeUnit};
 use crate::compile::{
-    Builtin, EntryStmt, Expr, ExprKind, Fill, Function, Growth, Param, ParamBody, Program, Stmt,
+    Builtin, Draw, EntryStmt, Expr, ExprKind, Fill, Function, Growth, Param, ParamBody, Program,
+    Stmt,
 };
 use crate::errors::Diagnostic;
 use std::collections::HashMap;
@@ -84,19 +91,42 @@ struct Cx<'a> {
     posted: bool,
     /// Kinds of the current function's or entry's parameters and `let`s.
     locals: &'a [Option<Kind>],
+    /// How often the current entry's `let`s draw anew (see
+    /// [`Checker::drawn`]).
+    local_draws: &'a [Drawn],
+    /// The unit of the innermost `/unit` or `[unit]` that applies to the
+    /// expression, which plain numbers drawn in it are drawn once a unit of.
+    per: Option<TimeUnit>,
 }
 
 const GLOBAL: Cx = Cx {
     posting: false,
     posted: false,
     locals: &[],
+    local_draws: &[],
+    per: None,
 };
+
+/// The shortest period over which a new draw changes an expression, and where
+/// that draw is, or `None` if it doesn't draw.
+type Drawn = Option<(TimeUnit, Span)>;
+
+/// The one of `a` and `b` that changes more often.
+fn more_often(a: Drawn, b: Drawn) -> Drawn {
+    match (a, b) {
+        (Some((x, _)), Some((y, _))) if y < x => b,
+        (Some(_), _) => a,
+        (None, _) => b,
+    }
+}
 
 /// Checks every expression in `program`, spreading the rates that moves use.
 pub fn check(program: &mut Program) -> Vec<Diagnostic> {
     let mut checker = Checker {
         fns: &mut program.fns,
+        draws: &mut program.draws,
         params: Vec::with_capacity(program.params.len()),
+        param_draws: Vec::with_capacity(program.params.len()),
         instances: HashMap::new(),
         calls: Vec::new(),
         posting: None,
@@ -106,8 +136,9 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
     };
     // Each param comes after the params it reads.
     for param in &mut program.params {
-        let kind = checker.param(param);
+        let (kind, drawn) = checker.param(param);
         checker.params.push(kind);
+        checker.param_draws.push(drawn);
     }
     for (expr, _) in program.openings.iter_mut().flatten() {
         if let Some(kind @ (Kind::Rate(_) | Kind::Limit(_))) = checker.kind(expr, GLOBAL) {
@@ -119,7 +150,8 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
     }
     for (index, entry) in program.entries.iter_mut().enumerate() {
         let mut locals: Vec<Option<Kind>> = vec![None; entry.slots];
-        checker.entry(index, &mut entry.body, &mut locals);
+        let mut local_draws: Vec<Drawn> = vec![None; entry.slots];
+        checker.entry(index, &mut entry.body, &mut locals, &mut local_draws);
     }
     checker.posting = None;
     for so_far in &mut program.totals_so_far {
@@ -145,9 +177,12 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
 
 struct Checker<'p> {
     fns: &'p mut [Function],
+    draws: &'p mut [Draw],
     /// Kinds of the params checked so far; `None` for a param with an error
     /// (already reported).
     params: Vec<Option<Kind>>,
+    /// How often the params checked so far draw anew.
+    param_draws: Vec<Drawn>,
     /// What each function returns, by function and argument kinds.
     instances: HashMap<(usize, Vec<Kind>), Option<Kind>>,
     /// The calls whose function bodies are being checked, innermost last.
@@ -163,7 +198,13 @@ struct Checker<'p> {
 impl Checker<'_> {
     /// Checks the statements of entry `index`, in which `locals` are the kinds
     /// of its `let`s.
-    fn entry(&mut self, index: usize, stmts: &mut [EntryStmt], locals: &mut Vec<Option<Kind>>) {
+    fn entry(
+        &mut self,
+        index: usize,
+        stmts: &mut [EntryStmt],
+        locals: &mut Vec<Option<Kind>>,
+        local_draws: &mut Vec<Drawn>,
+    ) {
         for stmt in stmts {
             match stmt {
                 // A `let` can mix rates with amounts, as a move can, but what
@@ -174,8 +215,13 @@ impl Checker<'_> {
                         posting: true,
                         posted: false,
                         locals,
+                        local_draws,
+                        per: None,
                     };
-                    locals[*slot] = self.kind(value, cx);
+                    let kind = self.kind(value, cx);
+                    let drawn = self.drawn(value, cx);
+                    locals[*slot] = kind;
+                    local_draws[*slot] = drawn;
                 }
                 EntryStmt::Move(m) => {
                     self.posting = Some((index, m.tag));
@@ -183,6 +229,8 @@ impl Checker<'_> {
                         posting: true,
                         posted: true,
                         locals,
+                        local_draws,
+                        per: None,
                     };
                     if let Some(kind) = self.kind(&mut m.amount, cx) {
                         self.settle(&mut m.amount, kind);
@@ -199,11 +247,13 @@ impl Checker<'_> {
                             posting: true,
                             posted: false,
                             locals,
+                            local_draws,
+                            per: None,
                         };
                         self.kind(cond, cx);
-                        self.entry(index, body, locals);
+                        self.entry(index, body, locals, local_draws);
                     }
-                    self.entry(index, otherwise, locals);
+                    self.entry(index, otherwise, locals, local_draws);
                 }
             }
         }
@@ -217,7 +267,22 @@ impl Checker<'_> {
         self.diags.push(diag);
     }
 
-    fn param(&mut self, param: &mut Param) -> Option<Kind> {
+    /// The kind of `param`, and how often it draws anew, which this sets on
+    /// it too.
+    fn param(&mut self, param: &mut Param) -> (Option<Kind>, Drawn) {
+        let kind = self.param_kind(param);
+        let drawn = match &param.body {
+            ParamBody::Const(e) => self.drawn(e, GLOBAL),
+            ParamBody::Arms(arms) => arms
+                .iter()
+                .map(|arm| self.drawn(&arm.value, GLOBAL))
+                .fold(None, more_often),
+        };
+        param.draws_every = drawn.map(|(every, _)| every);
+        (kind, drawn)
+    }
+
+    fn param_kind(&mut self, param: &mut Param) -> Option<Kind> {
         let name = &param.name;
         match &mut param.body {
             ParamBody::Const(e) => self.kind(e, GLOBAL),
@@ -290,6 +355,66 @@ impl Checker<'_> {
 
     /// The kind of `e`, or `None` if it has an error (already reported).
     fn kind(&mut self, e: &mut Expr, cx: Cx) -> Option<Kind> {
+        let kind = self.kind_of(e, cx)?;
+        if let Kind::Rate(unit) | Kind::Limit(unit) = kind
+            && let Some((every, at)) = self.drawn(e, cx)
+            && every < unit
+        {
+            let example = match kind {
+                Kind::Limit(_) => format!("normal(800, 100)[{unit}]"),
+                _ => format!("normal(800, 100)/{unit}"),
+            };
+            self.error(
+                Diagnostic::new(
+                    e.span,
+                    format!("this is {kind}, but part of it is drawn anew every {every}"),
+                )
+                .with_note(at, format!("drawn every {every}"))
+                .with_note(
+                    e.span,
+                    format!(
+                        "{kind} has to be drawn once a {unit} or less often; \
+                         write the distribution itself that way, like `{example}`"
+                    ),
+                ),
+            );
+            return None;
+        }
+        Some(kind)
+    }
+
+    /// How often `e` changes with a new draw, through the values and `let`s
+    /// it reads too.
+    fn drawn(&self, e: &Expr, cx: Cx) -> Drawn {
+        let drawn = |e: &Expr| self.drawn(e, cx);
+        match &e.kind {
+            ExprKind::Draw(_, args, slot) => args.iter().map(drawn).fold(
+                Some((self.draws[*slot].period, self.draws[*slot].span)),
+                more_often,
+            ),
+            ExprKind::Param(param) => self.param_draws.get(*param).copied().flatten(),
+            ExprKind::Local(slot) => cx.local_draws.get(*slot).copied().flatten(),
+            ExprKind::Num(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Balance { .. }
+            | ExprKind::Total(..)
+            | ExprKind::AccountTotal { .. } => None,
+            ExprKind::Neg(x)
+            | ExprKind::Not(x)
+            | ExprKind::Per(x, _)
+            | ExprKind::Limit(x, _)
+            | ExprKind::Spread(x, _)
+            | ExprKind::Fill(x, ..) => drawn(x),
+            ExprKind::Bin(a, _, b) => more_often(drawn(a), drawn(b)),
+            ExprKind::If(c, t, f) => more_often(more_often(drawn(c), drawn(t)), drawn(f)),
+            ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => {
+                args.iter().map(drawn).fold(None, more_often)
+            }
+        }
+    }
+
+    /// The kind of `e`, without checking how often it draws.
+    fn kind_of(&mut self, e: &mut Expr, cx: Cx) -> Option<Kind> {
         if let ExprKind::Builtin(Builtin::Fill, _) = e.kind {
             return self.fill(e, cx);
         }
@@ -309,11 +434,19 @@ impl Checker<'_> {
             }
             ExprKind::Neg(x) => self.kind(x, below),
             ExprKind::Per(x, unit) => {
-                let found = self.kind(x, below)?;
+                let per = Cx {
+                    per: Some(*unit),
+                    ..below
+                };
+                let found = self.kind(x, per)?;
                 self.per(x, found, *unit, span)
             }
             ExprKind::Limit(x, unit) => {
-                let found = self.kind(x, below)?;
+                let per = Cx {
+                    per: Some(*unit),
+                    ..below
+                };
+                let found = self.kind(x, per)?;
                 self.limit(x, found, *unit, span)
             }
             ExprKind::Not(x) => {
@@ -364,6 +497,17 @@ impl Checker<'_> {
                 Builtin::Fill => unreachable!("handled above"),
             },
             ExprKind::Fill(..) => Some(Kind::Amount),
+            ExprKind::Draw(dist, args, slot) => {
+                let kinds: Vec<Option<Kind>> =
+                    args.iter_mut().map(|a| self.kind(a, below)).collect();
+                let kinds = kinds.into_iter().collect::<Option<Vec<_>>>()?;
+                let kind = self.draw(*dist, &kinds, args, span)?;
+                self.draws[*slot].period = match kind {
+                    Kind::Rate(unit) | Kind::Limit(unit) => unit,
+                    _ => cx.per.unwrap_or(TimeUnit::Day),
+                };
+                Some(kind)
+            }
             ExprKind::Call(f, args) => {
                 let kinds: Vec<Option<Kind>> =
                     args.iter_mut().map(|a| self.kind(a, below)).collect();
@@ -371,6 +515,38 @@ impl Checker<'_> {
                 self.call(*f, kinds, span)
             }
         }
+    }
+
+    /// The kind of a draw from `dist`, whose arguments `args` are of `kinds`:
+    /// that of its arguments, which must agree like `min`'s and `max`'s.
+    fn draw(&mut self, dist: Dist, kinds: &[Kind], args: &[Expr], span: Span) -> Option<Kind> {
+        let name = dist.name();
+        let kind = match (dist, kinds) {
+            (Dist::Chance, [Kind::Number]) => Kind::Number,
+            (Dist::Chance, [found]) => {
+                self.error(Diagnostic::new(
+                    args[0].span,
+                    format!("`chance` takes a plain probability, like `4%`, not {found}"),
+                ));
+                return None;
+            }
+            (_, [Kind::Number, k] | [k, Kind::Number]) => *k,
+            (_, [a, b]) if a == b => *a,
+            (_, [a, b]) => {
+                self.error(
+                    Diagnostic::new(span, format!("`{name}` mixes {a} with {b}"))
+                        .with_note(args[0].span, a.to_string())
+                        .with_note(args[1].span, b.to_string()),
+                );
+                return None;
+            }
+            _ => unreachable!("the resolver checks arity"),
+        };
+        // A draw of amounts so far is an amount.
+        Some(match kind {
+            Kind::Total(_) => Kind::Amount,
+            kind => kind,
+        })
     }
 
     /// The kind of `x / unit`, where `x` is of kind `found`, converting `x`
@@ -673,6 +849,8 @@ impl Checker<'_> {
                 posting: false,
                 posted: false,
                 locals: &locals,
+                local_draws: &[],
+                per: None,
             };
             match stmt {
                 Stmt::Let { slot, value, .. } => locals[*slot] = self.kind(value, cx),
@@ -708,7 +886,9 @@ fn reads_total(e: &Expr, tag: usize) -> bool {
         | ExprKind::Fill(x, ..) => reads(x),
         ExprKind::Bin(a, _, b) => reads(a) || reads(b),
         ExprKind::If(c, t, f) => reads(c) || reads(t) || reads(f),
-        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) => args.iter().any(reads),
+        ExprKind::Builtin(_, args) | ExprKind::Call(_, args) | ExprKind::Draw(_, args, _) => {
+            args.iter().any(reads)
+        }
     }
 }
 

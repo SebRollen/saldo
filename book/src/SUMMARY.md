@@ -12,3 +12,4 @@
   - [Checks](./checks.md)
   - [Functions](./fns.md)
   - [Modules](./modules.md)
+  - [Random draws](./distributions.md)

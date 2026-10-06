@@ -400,6 +400,39 @@ pub enum Expr {
     },
     /// What has moved into an account (or a group) so far this period.
     AccountTotal(Path, AggKind),
+    /// A random draw from `Dist` with its arguments, at its site: a number
+    /// for where it's written, which keeps it apart from every other draw.
+    Draw(Dist, Vec<SpannedExpr>, u64),
+}
+
+/// What a random draw draws from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dist {
+    /// `normal(mean, sd)`.
+    Normal,
+    /// `uniform(lo, hi)`.
+    Uniform,
+    /// `chance(p)`: true with probability `p`.
+    Chance,
+}
+
+impl Dist {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "normal" => Dist::Normal,
+            "uniform" => Dist::Uniform,
+            "chance" => Dist::Chance,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Dist::Normal => "normal",
+            Dist::Uniform => "uniform",
+            Dist::Chance => "chance",
+        }
+    }
 }
 
 /// A set of days written as a literal.

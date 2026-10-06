@@ -23,7 +23,8 @@ value a rate (see [Rates](#rates)), and `[year]` a limit (see
 
 A value depends on nothing but the date: it can use numbers, other values and
 functions, but not account balances or totals, which change as entries fire.
-That way saldo can work a value out for any day. To work something out from a
+That way saldo can work a value out for any day. (A value that draws at random
+depends on the seed too; see [Random draws](./distributions.md).) To work something out from a
 balance, use a `let` in an entry (see [Entries](./entries.md#let)) or write it
 in a check.
 

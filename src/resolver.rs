@@ -4,8 +4,8 @@
 
 use crate::ast::schedule::{self, DaySet, Dow, Month, quarter_from_name};
 use crate::ast::{
-    AccountKind, AggKind, BinOp, Decl, EntryStmt, Expr, Growth, LetBody, ModBody, Move, Opening,
-    Path, Program, Schedule, Span, Spanned, SpannedExpr, Stmt, TimeUnit,
+    AccountKind, AggKind, BinOp, Decl, Dist, EntryStmt, Expr, Growth, LetBody, ModBody, Move,
+    Opening, Path, Program, Schedule, Span, Spanned, SpannedExpr, Stmt, TimeUnit,
 };
 use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
@@ -192,6 +192,8 @@ struct Scope<'s> {
     function: Option<&'s str>,
     /// The variables of the `for` loops in scope, which stand for accounts.
     loops: &'s [String],
+    /// Why random draws can't be written here, if they can't.
+    no_draws: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -305,6 +307,11 @@ fn substitute_expr((expr, _): &mut SpannedExpr, placeholder: &Path, account: &Pa
             sub(else_);
         }
         Expr::Call(_, args) => args.iter_mut().for_each(sub),
+        // A draw in a loop is drawn separately for each account.
+        Expr::Draw(_, args, site) => {
+            *site = crate::random::mix(*site, crate::random::hash(account.join().as_bytes()));
+            args.iter_mut().for_each(sub);
+        }
         Expr::Range { from, to, .. } => {
             sub(from);
             if let Some(to) = to {
@@ -318,6 +325,45 @@ fn substitute_expr((expr, _): &mut SpannedExpr, placeholder: &Path, account: &Pa
         | Expr::Global(_)
         | Expr::Local(_)
         | Expr::TagTotal { .. } => {}
+    }
+}
+
+/// Gives each draw in `exprs`, the expressions of declaration `full` in the
+/// order they're written, its site: the declaration's name and how many draws
+/// come before it. Loops then mix in the account each copy is for.
+fn number_draws<'e>(full: &str, exprs: impl IntoIterator<Item = &'e mut SpannedExpr>) {
+    fn number(e: &mut SpannedExpr, decl: u64, n: &mut u64) {
+        if let Expr::Draw(_, _, site) = e.0.as_mut() {
+            *site = crate::random::mix(decl, *n);
+            *n += 1;
+        }
+        crate::expand::for_each_child(e.0.as_mut(), &mut |x| number(x, decl, n));
+    }
+    let decl = crate::random::hash(full.as_bytes());
+    let mut n = 0;
+    for e in exprs {
+        number(e, decl, &mut n);
+    }
+}
+
+/// The expressions in `stmts`, in the order they're written.
+fn entry_exprs<'s>(stmts: &'s mut [EntryStmt], out: &mut Vec<&'s mut SpannedExpr>) {
+    for stmt in stmts {
+        match stmt {
+            EntryStmt::Let { value, .. } => out.push(value),
+            EntryStmt::Move(m) => out.push(&mut m.amount),
+            EntryStmt::If {
+                branches,
+                otherwise,
+            } => {
+                for (cond, body) in branches {
+                    out.push(cond);
+                    entry_exprs(body, out);
+                }
+                entry_exprs(otherwise, out);
+            }
+            EntryStmt::For { body, .. } => entry_exprs(body, out),
+        }
     }
 }
 
@@ -652,6 +698,7 @@ impl<'a> Resolver<'a> {
                 entry: None,
                 function: None,
                 loops: &[],
+                no_draws: Some("a check can't draw at random; draw in a value, and check that"),
             };
             let expr = self.resolve_expr(expr, &scope);
             if let Some(schedule) = self.schedule(when, &module) {
@@ -675,6 +722,7 @@ impl<'a> Resolver<'a> {
                     entry: None,
                     function: None,
                     loops: &[],
+                    no_draws: Some("an opening balance can't be drawn at random"),
                 };
                 let value = self.resolve_expr(&opening.value, &scope);
                 self.leaves.entry(path.clone()).or_insert(*span);
@@ -760,6 +808,7 @@ impl<'a> Resolver<'a> {
             entry: None,
             function: None,
             loops: &[],
+            no_draws: Some("a total so far can't be drawn at random"),
         };
         let value = self.resolve_expr(&opening.value, &scope);
         self.totals_so_far.push(TotalSoFar {
@@ -795,8 +844,9 @@ impl<'a> Resolver<'a> {
             entry: None,
             function: None,
             loops: &[],
+            no_draws: None,
         };
-        let body = match self.lets[i].body {
+        let mut body = match self.lets[i].body {
             LetBody::Expr(e) => ParamBody::Const(self.resolve_expr(e, &scope)),
             LetBody::Arms(arms) => {
                 let mut resolved: Vec<ArmDef> = Vec::new();
@@ -837,6 +887,15 @@ impl<'a> Resolver<'a> {
                 ParamBody::Arms(resolved)
             }
         };
+        match &mut body {
+            ParamBody::Const(e) => number_draws(&full, [e]),
+            ParamBody::Arms(arms) => number_draws(
+                &full,
+                arms.iter_mut().flat_map(|arm| {
+                    std::iter::once(&mut arm.value).chain(arm.growth.as_mut().map(|g| &mut g.by))
+                }),
+            ),
+        }
         self.param_spans.insert(full.clone(), self.lets[i].span);
         self.params.insert(full, body);
     }
@@ -891,6 +950,7 @@ impl<'a> Resolver<'a> {
                 entry: None,
                 function: Some(full.as_str()),
                 loops: &[],
+                no_draws: None,
             };
             match stmt {
                 Stmt::Let { name, value } => {
@@ -937,7 +997,11 @@ impl<'a> Resolver<'a> {
                 Err(diag) => self.diags.push(diag),
             }
         }
-        let resolved = self.resolve_entry_stmts(body, &module, &full, &tags, &mut Vec::new(), &[]);
+        let mut resolved =
+            self.resolve_entry_stmts(body, &module, &full, &tags, &mut Vec::new(), &[]);
+        let mut exprs = Vec::new();
+        entry_exprs(&mut resolved, &mut exprs);
+        number_draws(&full, exprs);
         let Some(schedule) = self.schedule(when, &module) else {
             return;
         };
@@ -974,6 +1038,7 @@ impl<'a> Resolver<'a> {
                 entry: Some((full, tags)),
                 function: None,
                 loops,
+                no_draws: None,
             };
             match stmt {
                 EntryStmt::Let { name, value } => {
@@ -1206,7 +1271,8 @@ impl<'a> Resolver<'a> {
             | Expr::Local(_)
             | Expr::Balance(_)
             | Expr::TagTotal { .. }
-            | Expr::AccountTotal(..) => return e.clone(),
+            | Expr::AccountTotal(..)
+            | Expr::Draw(..) => return e.clone(),
         };
         (Box::new(resolved), span)
     }
@@ -1323,7 +1389,22 @@ impl<'a> Resolver<'a> {
             }
         };
         let args = args.iter().map(|a| self.resolve_expr(a, scope)).collect();
-        Some(Expr::Call(Path(vec![name]), args))
+        let Some(dist) = Dist::from_name(&name) else {
+            return Some(Expr::Call(Path(vec![name]), args));
+        };
+        let why = match scope.function {
+            Some(function) => Some(format!(
+                "function `{function}` can't draw at random, since every call would share \
+                 its draws; pass the draw in as an argument"
+            )),
+            None => scope.no_draws.map(str::to_string),
+        };
+        if let Some(why) = why {
+            self.diags.push(Diagnostic::new(span, why));
+            return None;
+        }
+        // The declaration it's in numbers it (see `number_draws`).
+        Some(Expr::Draw(dist, args, 0))
     }
 
     /// `x[unit]`: what a tag or an account has moved so far this period, or,
@@ -1840,7 +1921,7 @@ pub(crate) fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
             walk_expr(then, f);
             walk_expr(else_, f);
         }
-        Expr::Call(_, args) => {
+        Expr::Call(_, args) | Expr::Draw(_, args, _) => {
             for a in args {
                 walk_expr(a, f);
             }
