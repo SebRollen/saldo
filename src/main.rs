@@ -20,6 +20,10 @@ Options:
   -h, --help          print this help
   -V, --version       print the version";
 
+/// The exit status when the model ran but a check failed. Errors in the model
+/// exit with 1, and bad arguments with 2.
+const CHECK_FAILED: u8 = 3;
+
 enum OutputFormat {
     Ledger,
     Csv,
@@ -70,6 +74,16 @@ fn main() -> ExitCode {
             }
             .and_then(|()| out.flush());
             match written {
+                Ok(()) if !output.log.failed_checks.is_empty() => {
+                    let failed: Vec<saldo::Error> = output
+                        .log
+                        .failed_checks
+                        .iter()
+                        .map(|failure| saldo::Error::Diagnostic(failure.diagnostic()))
+                        .collect();
+                    eprint!("{}", sources.format_errors(&failed, color));
+                    ExitCode::from(CHECK_FAILED)
+                }
                 Ok(()) => ExitCode::SUCCESS,
                 // The reader went away (e.g. `saldo … | head`); that's not an error.
                 Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,

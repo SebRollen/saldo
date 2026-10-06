@@ -193,8 +193,9 @@ check assets.cash >= 0
 check assets.retirement.beth == 24_500 @ 2026-12-31
 ```
 
-Checks are checked after entries fire on their days, or every day. Simulation
-stops with an error if one fails.
+Checks are checked after entries fire on their days, or every day. A failing
+check doesn't stop the simulation: saldo reports it after the output, and
+exits with status 3.
 
 ### Expressions
 

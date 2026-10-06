@@ -33,6 +33,43 @@ pub struct SimLog {
     pub transactions: Vec<Transaction>,
     pub snapshots: Vec<DaySnapshot>,
     pub opening: IndexMap<Path, Decimal>,
+    /// The checks that failed on a reported day, in the order they're
+    /// written.
+    pub failed_checks: Vec<CheckFailure>,
+}
+
+/// A check that failed on some of the days reported.
+#[derive(Debug, Clone)]
+pub struct CheckFailure {
+    /// Where the check is written.
+    pub span: Span,
+    /// The first day it failed.
+    pub first: NaiveDate,
+    /// What it compared that day, like `-1371.42 >= 0`, if it's a comparison.
+    pub found: Option<String>,
+    /// How many days it failed on.
+    pub days: usize,
+    /// The last day it failed.
+    pub last: NaiveDate,
+}
+
+impl CheckFailure {
+    /// Says when the check failed, pointing at it.
+    pub fn diagnostic(&self) -> Diagnostic {
+        let mut message = format!("check failed on {}", self.first);
+        if let Some(found) = &self.found {
+            message = format!("{message}: {found}");
+        }
+        if self.days > 1 {
+            let more = self.days - 1;
+            let days = if more == 1 { "day" } else { "days" };
+            message = format!(
+                "{message}, and on {more} more {days}, last on {}",
+                self.last
+            );
+        }
+        Diagnostic::new(self.span, message)
+    }
 }
 
 #[derive(Debug)]
@@ -264,6 +301,8 @@ struct State<'p> {
     /// For each growing arm, by param and arm, how many steps it has taken
     /// and what they come to.
     grown: HashMap<(usize, usize), (u32, Decimal)>,
+    /// For each check, when it has failed on reported days.
+    failed_checks: Vec<Option<CheckFailure>>,
 }
 
 impl Program {
@@ -292,6 +331,7 @@ impl Program {
             firing: None,
             fills: vec![(NaiveDate::MIN, Decimal::ZERO); self.fills.len()],
             grown: HashMap::new(),
+            failed_checks: vec![None; self.checks.len()],
         };
         let equity: Arc<Path> = Arc::new(Path(vec![
             "equity".to_string(),
@@ -302,6 +342,7 @@ impl Program {
             transactions: Vec::new(),
             snapshots: Vec::new(),
             opening: IndexMap::new(),
+            failed_checks: Vec::new(),
         };
 
         let mut t = first_day;
@@ -356,7 +397,7 @@ impl Program {
                     log.transactions.push(tx);
                 }
             }
-            state.run_checks()?;
+            state.run_checks(report)?;
 
             if report {
                 log.snapshots.push(DaySnapshot {
@@ -376,6 +417,7 @@ impl Program {
                 .ok_or_else(|| Diagnostic::new((0..0).into(), "date overflow"))?;
         }
 
+        log.failed_checks = state.failed_checks.into_iter().flatten().collect();
         Ok(log)
     }
 }
@@ -674,28 +716,42 @@ impl State<'_> {
         Ok(())
     }
 
-    fn run_checks(&self) -> Result<(), Diagnostic> {
-        for (schedule, expr) in &self.program.checks {
+    /// Runs today's checks, recording those that fail if today is reported.
+    /// A failing check doesn't stop the simulation; an error in one does.
+    fn run_checks(&mut self, report: bool) -> Result<(), Diagnostic> {
+        let program = self.program;
+        for (i, (schedule, expr)) in program.checks.iter().enumerate() {
             if !schedule.matches(self.date) {
                 continue;
             }
             match self.eval(expr, &[])? {
                 Value::Bool(true) => {}
-                Value::Bool(false) => {
+                Value::Bool(false) if report => {
                     let t = self.date;
-                    let msg = match &expr.kind {
+                    if let Some(failure) = &mut self.failed_checks[i] {
+                        failure.days += 1;
+                        failure.last = t;
+                        continue;
+                    }
+                    // What it compared, the first day it failed.
+                    let found = match &expr.kind {
                         ExprKind::Bin(lhs, op, rhs) => {
                             match (self.eval(lhs, &[]), self.eval(rhs, &[])) {
-                                (Ok(lv), Ok(rv)) => {
-                                    format!("check failed on {t}: {lv} {op} {rv}")
-                                }
-                                _ => format!("check failed on {t}"),
+                                (Ok(lv), Ok(rv)) => Some(format!("{lv} {op} {rv}")),
+                                _ => None,
                             }
                         }
-                        _ => format!("check failed on {t}"),
+                        _ => None,
                     };
-                    return Err(Diagnostic::new(expr.span, msg));
+                    self.failed_checks[i] = Some(CheckFailure {
+                        span: expr.span,
+                        first: t,
+                        found,
+                        days: 1,
+                        last: t,
+                    });
                 }
+                Value::Bool(false) => {}
                 Value::Num(_) => {
                     return Err(Diagnostic::new(expr.span, "a check must be a bool"));
                 }

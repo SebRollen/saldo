@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-use saldo::{RunOpts, run};
+use saldo::RunOpts;
 
 fn d(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
@@ -11,6 +11,22 @@ fn opts(from: &str, to: &str) -> RunOpts {
         from: d(from),
         to: d(to),
         seed: 0,
+    }
+}
+
+/// Runs `src`, treating a failed check as an error, as most tests want: their
+/// checks say what must hold.
+fn run(src: &str, opts: &RunOpts) -> Result<saldo::Output, Vec<saldo::Error>> {
+    let output = saldo::run(src, opts)?;
+    if output.log.failed_checks.is_empty() {
+        Ok(output)
+    } else {
+        Err(output
+            .log
+            .failed_checks
+            .iter()
+            .map(|failure| saldo::Error::Diagnostic(failure.diagnostic()))
+            .collect())
     }
 }
 
@@ -192,13 +208,49 @@ fn unknown_name_in_expr_is_a_diagnostic() {
 // --- runtime / check errors ---
 
 #[test]
-fn failing_check_is_a_diagnostic() {
+fn a_failing_check_is_reported_once_and_doesnt_stop_the_run() {
     let src = "
         balances @ 2025-01-01 { assets.cash = 100 }
-        check assets.cash >= 200
+        entry spend @ last { assets.cash -> expenses.x : 40 }
+        check assets.cash >= 0
+        check assets.cash >= 50 @ jun 30
+        check assets.cash < 1_000
     ";
-    let errors = run(src, &opts("2025-01-01", "2025-01-01")).unwrap_err();
-    assert!(has_error(&errors, "check failed on 2025-01-01: 100 >= 200"));
+    let output = saldo::run(src, &opts("2025-01-01", "2025-12-31")).unwrap();
+    assert_eq!(output.log.snapshots.len(), 365);
+    let messages: Vec<String> = output
+        .log
+        .failed_checks
+        .iter()
+        .map(|failure| failure.diagnostic().message)
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "check failed on 2025-03-31: -20 >= 0, and on 275 more days, last on 2025-12-31",
+            "check failed on 2025-06-30: -140 >= 50",
+        ]
+    );
+}
+
+#[test]
+fn checks_count_only_reported_days() {
+    // Cash is negative in January, before the report starts.
+    let src = "
+        balances @ 2025-01-01 { assets.cash = -100 }
+        entry pay @ feb 1 { income.x -> assets.cash : 200 }
+        check assets.cash >= 0
+    ";
+    let output = saldo::run(src, &opts("2025-02-01", "2025-12-31")).unwrap();
+    assert!(output.log.failed_checks.is_empty());
+    let output = saldo::run(src, &opts("2025-01-30", "2025-12-31")).unwrap();
+    assert_eq!(output.log.failed_checks[0].days, 2);
+}
+
+#[test]
+fn an_error_in_a_check_still_stops_the_run() {
+    let errors = saldo::run("check 1 / 0 > 0", &opts("2025-01-01", "2025-01-31")).unwrap_err();
+    assert!(has_error(&errors, "division by zero"));
 }
 
 #[test]
@@ -1758,6 +1810,42 @@ fn cli_exits_cleanly_when_the_reader_stops_early() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn cli_writes_everything_and_exits_with_3_when_a_check_fails() {
+    use std::process::Command;
+
+    let dir = std::env::temp_dir().join(format!("saldo-check-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("model.saldo");
+    std::fs::write(
+        &path,
+        "balances @ 2025-01-01 { assets.cash = 100 }\n\
+         entry spend @ last { assets.cash -> expenses.x : 40 }\n\
+         check assets.cash >= 0\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_saldo"))
+        .arg(&path)
+        .args([
+            "--from",
+            "2025-01-01",
+            "--to",
+            "2025-12-31",
+            "--format",
+            "csv",
+        ])
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(output.status.code(), Some(3));
+    // A header and every day.
+    assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 366);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("check failed on 2025-03-31: -20 >= 0, and on 275 more days"));
 }
 
 // --- keywords ---

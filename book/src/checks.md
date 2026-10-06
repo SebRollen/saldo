@@ -1,8 +1,19 @@
 # Checks
 
-A check is a condition that must hold on certain days. If it's false, the
-simulation stops and reports it. Checks are how you write down financial
-constraints and goals.
+A check is a condition that must hold on certain days. Checks are how you
+write down financial constraints and goals.
+
+A failing check doesn't stop the simulation: saldo writes all its output,
+then reports each check that failed, on the first day it did and how many
+days it failed on, and exits with status 3:
+
+```
+Error: check failed on 2027-07-01: -1371.42 >= 0, and on 152 more days, last on 2027-12-10
+```
+
+Errors in the model exit with status 1, so scripts can tell the two apart.
+Only the days from `--from` count (see [How a simulation
+runs](./simulation.md#warm-up)).
 
 ## Syntax
 

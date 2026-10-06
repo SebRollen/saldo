@@ -18,7 +18,7 @@ use std::io;
 
 pub use ast::{Path, Span};
 pub use errors::{Diagnostic, Error};
-pub use eval::{DaySnapshot, SimLog, Transaction};
+pub use eval::{CheckFailure, DaySnapshot, SimLog, Transaction};
 pub use sources::Sources;
 
 pub struct RunOpts {

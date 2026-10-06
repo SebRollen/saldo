@@ -43,7 +43,9 @@ Every simulated day runs these steps in order:
 5. Checks whose days include today are checked against the balances and
    values after all entries fired.
 
-The first failing check or evaluation error stops the simulation.
+An evaluation error stops the simulation. A failing check doesn't: saldo
+reports it once the output is written, and exits with status 3 (see
+[Checks](./checks.md)). Checks during the warm-up run too, but don't count.
 
 ## Output
 
