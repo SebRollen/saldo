@@ -9,8 +9,10 @@ use crate::ast::{
 };
 use crate::errors::Diagnostic;
 use crate::eval::BUILTINS;
+use crate::scenario::Applied;
 use chrono::NaiveDate;
 use indexmap::IndexMap;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
@@ -49,6 +51,8 @@ pub struct TotalSoFar {
     pub agg: AggKind,
     pub date: NaiveDate,
     pub value: SpannedExpr,
+    /// Whether a scenario sets it.
+    pub from_scenario: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -89,12 +93,18 @@ pub struct Model {
     pub warnings: Vec<Diagnostic>,
 }
 
-pub fn resolve(program: &Program) -> Result<Model, Vec<Diagnostic>> {
+/// Resolves `program`, which `applied` says what scenarios changed in.
+pub fn resolve(program: &Program, applied: &Applied) -> Result<Model, Vec<Diagnostic>> {
     let program = crate::expand::expand(program)?;
-    let mut resolver = Resolver::default();
+    let mut resolver = Resolver {
+        applied: applied.clone(),
+        ..Resolver::default()
+    };
     resolver.collect(&[], &program.decls);
     resolver.classify_lets();
+    resolver.resolve_drops();
     resolver.resolve_all();
+    resolver.check_added_are_read();
     if !resolver.diags.is_empty() {
         // A set of days with an error is reported where it's declared and
         // again wherever it's used.
@@ -144,7 +154,8 @@ enum Target {
     Let(usize),
     Fn(String),
     Entry(String),
-    Mod,
+    /// A module, by its path.
+    Mod(Vec<String>),
     Tag(String, String),
     Account(Path),
 }
@@ -199,6 +210,16 @@ struct Scope<'s> {
 #[derive(Default)]
 struct Resolver<'a> {
     diags: Vec<Diagnostic>,
+    /// What scenarios changed.
+    applied: Applied,
+    /// The full names of the values and functions that something reads.
+    read: RefCell<HashSet<String>>,
+    /// The days entries don't fire on because scenarios drop them, by the
+    /// entry's full name.
+    entry_drops: HashMap<String, Vec<DaySet>>,
+    /// The days the entries and checks in modules don't fire or aren't
+    /// checked on because scenarios drop the modules, by module path.
+    module_drops: Vec<(Vec<String>, DaySet)>,
     /// The functions that return modules, by full name.
     module_fns: HashSet<String>,
     /// The names declared in each module, by module path.
@@ -208,7 +229,8 @@ struct Resolver<'a> {
     fn_decls: Vec<FnDecl<'a>>,
     entry_decls: Vec<EntryDecl<'a>>,
     check_decls: Vec<(Vec<String>, &'a SpannedExpr, Option<&'a SpannedExpr>)>,
-    balance_decls: Vec<(Vec<String>, NaiveDate, &'a [Opening])>,
+    /// `balances` blocks: their module, span, date and lines.
+    balance_decls: Vec<(Vec<String>, Span, NaiveDate, &'a [Opening])>,
 
     /// Accounts money moves into or out of, and where each is first named.
     leaves: BTreeMap<Path, Span>,
@@ -451,7 +473,8 @@ impl<'a> Resolver<'a> {
                         .push((module.to_vec(), expr, when.as_ref()));
                 }
                 Decl::Balances { date, balances } => {
-                    self.balance_decls.push((module.to_vec(), *date, balances));
+                    self.balance_decls
+                        .push((module.to_vec(), span, *date, balances));
                 }
                 Decl::Mod { name, body } => {
                     let path: Vec<String> =
@@ -562,10 +585,16 @@ impl<'a> Resolver<'a> {
             }
         }
         Ok(match symbol {
-            Symbol::Let(i) => Target::Let(i),
-            Symbol::Fn(full) => Target::Fn(full),
+            Symbol::Let(i) => {
+                self.read.borrow_mut().insert(self.lets[i].full.clone());
+                Target::Let(i)
+            }
+            Symbol::Fn(full) => {
+                self.read.borrow_mut().insert(full.clone());
+                Target::Fn(full)
+            }
             Symbol::Entry(full, _) => Target::Entry(full),
-            Symbol::Mod(_) => Target::Mod,
+            Symbol::Mod(path) => Target::Mod(path),
         })
     }
 
@@ -678,6 +707,90 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// The schedule of an entry, `entry`, or a check in `module`, without the
+    /// days scenarios drop it on.
+    fn without_dropped(
+        &self,
+        mut schedule: Schedule,
+        entry: Option<&str>,
+        module: &[String],
+    ) -> Schedule {
+        let dropped = entry
+            .and_then(|entry| self.entry_drops.get(entry))
+            .into_iter()
+            .flatten()
+            .chain(
+                self.module_drops
+                    .iter()
+                    .filter(|(dropped, _)| module.starts_with(dropped))
+                    .map(|(_, days)| days),
+            );
+        for days in dropped {
+            schedule = schedule.without(days.clone());
+        }
+        schedule
+    }
+
+    // ---- what scenarios change ----
+
+    /// Works out what scenarios drop, and on which days.
+    fn resolve_drops(&mut self) {
+        for ((path, span), when) in std::mem::take(&mut self.applied.drops) {
+            let days = match &when {
+                None => DaySet::All,
+                Some(when) => match self.lower_days(when, &[]) {
+                    Ok(set) => set,
+                    Err(diag) => {
+                        self.diags.push(diag);
+                        continue;
+                    }
+                },
+            };
+            match self.lookup(&[], &path, span) {
+                Ok(Target::Entry(full)) => self.entry_drops.entry(full).or_default().push(days),
+                Ok(Target::Mod(module)) => self.module_drops.push((module, days)),
+                Ok(_) => self.diags.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "`{path}` isn't an entry or a module, so it can't be dropped; \
+                         replace it instead"
+                    ),
+                )),
+                Err(diag) => self.diags.push(diag),
+            }
+        }
+    }
+
+    /// Reports values and functions that scenarios add and nothing reads,
+    /// which are most likely misspelled replacements.
+    fn check_added_are_read(&mut self) {
+        let read = self.read.borrow();
+        for (full, span) in &self.applied.added {
+            if read.contains(full) {
+                continue;
+            }
+            let others = self
+                .lets
+                .iter()
+                .map(|l| l.full.as_str())
+                .chain(self.fn_decls.iter().map(|f| f.full.as_str()))
+                .filter(|other| other != full);
+            let mut diag = Diagnostic::new(*span, format!("nothing reads `{full}`"));
+            if let Some(close) = crate::util::closest(full, others) {
+                diag = diag.with_note(*span, format!("did you mean to replace `{close}`?"));
+            }
+            self.diags.push(diag);
+        }
+    }
+
+    /// The name the draws in declaration `full` are keyed by.
+    fn draw_key<'n>(&'n self, full: &'n str) -> &'n str {
+        self.applied
+            .draw_keys
+            .get(full)
+            .map_or(full, String::as_str)
+    }
+
     // ---- resolving everything ----
 
     fn resolve_all(&mut self) {
@@ -702,15 +815,24 @@ impl<'a> Resolver<'a> {
             };
             let expr = self.resolve_expr(expr, &scope);
             if let Some(schedule) = self.schedule(when, &module) {
+                let schedule = self.without_dropped(schedule, None, &module);
                 self.checks.push((schedule, expr));
             }
         }
-        for i in 0..self.balance_decls.len() {
-            let (module, date, balances) = self.balance_decls[i].clone();
+        // Scenarios' openings and totals so far replace the model's, so they
+        // come after them.
+        let (from_scenarios, from_model): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.balance_decls)
+                .into_iter()
+                .partition(|(_, span, ..)| self.applied.balances.contains(span));
+        // The accounts whose opening balances scenarios set.
+        let mut opened_by_scenarios: HashSet<Path> = HashSet::new();
+        for (module, block, date, balances) in from_model.into_iter().chain(from_scenarios) {
+            let from_scenario = self.applied.balances.contains(&block);
             for opening in balances {
                 let (path, span) = &opening.target;
                 if let Some(unit) = opening.period {
-                    self.resolve_total_so_far(&module, date, opening, unit);
+                    self.resolve_total_so_far(&module, date, opening, unit, from_scenario);
                     continue;
                 }
                 if !self.account_path(path, *span) {
@@ -730,6 +852,9 @@ impl<'a> Resolver<'a> {
                     .accounts
                     .entry(path.clone())
                     .or_insert(Account { opening: None });
+                if from_scenario && opened_by_scenarios.insert(path.clone()) {
+                    account.opening = None;
+                }
                 if account.opening.is_some() {
                     self.diags.push(Diagnostic::new(
                         *span,
@@ -751,13 +876,15 @@ impl<'a> Resolver<'a> {
     }
 
     /// `x[unit] = value` in a `balances` block in `module` on `date`: what a
-    /// tag or an account has moved so far that period.
+    /// tag or an account has moved so far that period. One `from_scenario`
+    /// replaces the model's for the same tag or account and period.
     fn resolve_total_so_far(
         &mut self,
         module: &[String],
         date: NaiveDate,
         opening: &Opening,
         unit: TimeUnit,
+        from_scenario: bool,
     ) {
         let (path, span) = &opening.target;
         let Some(agg) = AggKind::from_unit(unit) else {
@@ -791,6 +918,10 @@ impl<'a> Resolver<'a> {
                 return;
             }
         };
+        if from_scenario {
+            self.totals_so_far
+                .retain(|s| s.counted != counted || s.agg != agg || s.from_scenario);
+        }
         if self
             .totals_so_far
             .iter()
@@ -816,6 +947,7 @@ impl<'a> Resolver<'a> {
             agg,
             date,
             value,
+            from_scenario,
         });
     }
 
@@ -888,9 +1020,9 @@ impl<'a> Resolver<'a> {
             }
         };
         match &mut body {
-            ParamBody::Const(e) => number_draws(&full, [e]),
+            ParamBody::Const(e) => number_draws(self.draw_key(&full), [e]),
             ParamBody::Arms(arms) => number_draws(
-                &full,
+                self.draw_key(&full),
                 arms.iter_mut().flat_map(|arm| {
                     std::iter::once(&mut arm.value).chain(arm.growth.as_mut().map(|g| &mut g.by))
                 }),
@@ -1001,10 +1133,11 @@ impl<'a> Resolver<'a> {
             self.resolve_entry_stmts(body, &module, &full, &tags, &mut Vec::new(), &[]);
         let mut exprs = Vec::new();
         entry_exprs(&mut resolved, &mut exprs);
-        number_draws(&full, exprs);
+        number_draws(self.draw_key(&full), exprs);
         let Some(schedule) = self.schedule(when, &module) else {
             return;
         };
+        let schedule = self.without_dropped(schedule, Some(&full), &module);
         let mut tags: Vec<String> = tags.into_iter().collect();
         tags.sort();
         self.entries.push(EntryDef {
@@ -1316,7 +1449,7 @@ impl<'a> Resolver<'a> {
             Target::Tag(..) => {
                 format!("`{path}` is a tag; read what it moved so far with `{path}[year]`")
             }
-            Target::Mod => format!("`{path}` is a module, not a value"),
+            Target::Mod(_) => format!("`{path}` is a module, not a value"),
         };
         self.diags.push(Diagnostic::new(span, message));
         None
@@ -1989,7 +2122,10 @@ mod tests {
 
     fn resolve_src(src: &str) -> Result<Model, Vec<Diagnostic>> {
         let tokens = crate::lexer::lex(src, 0).expect("lex failed");
-        resolve(&crate::parser::parse(tokens).expect("parse failed"))
+        resolve(
+            &crate::parser::parse(tokens).expect("parse failed"),
+            &Applied::default(),
+        )
     }
 
     fn errors(src: &str) -> Vec<String> {

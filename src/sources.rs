@@ -1,6 +1,6 @@
 //! Reading a model's files: the one saldo runs and the files of its modules.
 
-use crate::ast::{Decl, ModBody, Program, Span, Spanned};
+use crate::ast::{Change, Decl, ModBody, Program, Scenario, ScenarioBody, Span, Spanned};
 use crate::errors::{self, Diagnostic, Error, Severity};
 use std::collections::HashSet;
 use std::ops::Range;
@@ -77,6 +77,14 @@ impl Sources {
                     }
                     .ok();
                 }
+                Error::UnknownScenario { name, close } => {
+                    write!(out, "the model has no scenario `{name}`").ok();
+                    match close {
+                        Some(close) => writeln!(out, "; did you mean `{close}`?"),
+                        None => writeln!(out),
+                    }
+                    .ok();
+                }
                 Error::Diagnostic(d) => {
                     out.push_str(&errors::format_diagnostics(
                         self,
@@ -112,8 +120,8 @@ pub(crate) fn load_file(sources: &mut Sources, path: &Path) -> Result<Program, V
         seen: HashSet::from([canonical]),
         diags: Vec::new(),
     };
-    let decls = loader.read(path.display().to_string(), text, path.parent());
-    loader.finish(decls)
+    let program = loader.read_model(path.display().to_string(), text, path.parent());
+    loader.finish(program)
 }
 
 /// Reads a model given as text, which can't have modules in other files
@@ -124,8 +132,8 @@ pub(crate) fn load_text(sources: &mut Sources, text: &str) -> Result<Program, Ve
         seen: HashSet::new(),
         diags: Vec::new(),
     };
-    let decls = loader.read(String::new(), text.to_string(), None);
-    loader.finish(decls)
+    let program = loader.read_model(String::new(), text.to_string(), None);
+    loader.finish(program)
 }
 
 struct Loader<'a> {
@@ -137,16 +145,55 @@ struct Loader<'a> {
 }
 
 impl Loader<'_> {
-    /// The declarations in `text`, with each `mod x` replaced by the
-    /// declarations in its file. `dir` is where the files of its modules are.
+    /// The model in `text`, the file saldo runs, with each `mod x` and
+    /// `scenario x` replaced by what's in its file. `dir` is where their files
+    /// are.
+    fn read_model(&mut self, name: String, text: String, dir: Option<&Path>) -> Program {
+        let Some(program) = self.parse(name, text, crate::parser::parse) else {
+            return Program {
+                decls: Vec::new(),
+                scenarios: Vec::new(),
+            };
+        };
+        let decls = self.load_modules(program.decls, dir);
+        let scenarios = program
+            .scenarios
+            .into_iter()
+            .map(|scenario| self.load_scenario(scenario, dir))
+            .collect();
+        Program { decls, scenarios }
+    }
+
+    /// The declarations in `text`, a module's file, with each `mod x` replaced
+    /// by the declarations in its file. `dir` is where the files of its
+    /// modules are.
     fn read(&mut self, name: String, text: String, dir: Option<&Path>) -> Vec<Spanned<Decl>> {
+        let Some(program) = self.parse(name, text, crate::parser::parse) else {
+            return Vec::new();
+        };
+        for scenario in &program.scenarios {
+            self.diags.push(Diagnostic::new(
+                scenario.name.1,
+                "scenarios are declared only in the file saldo runs",
+            ));
+        }
+        self.load_modules(program.decls, dir)
+    }
+
+    /// Adds `text`, the file `name`, to the sources, and parses it with `parse`.
+    fn parse<T>(
+        &mut self,
+        name: String,
+        text: String,
+        parse: impl FnOnce(Vec<(crate::lexer::Token, Span)>) -> Result<T, Vec<Diagnostic>>,
+    ) -> Option<T> {
         let start = self.sources.add(name, text);
         let text = &self.sources.files.last().expect("just added").text;
-        match crate::lexer::lex(text, start).and_then(crate::parser::parse) {
-            Ok(program) => self.load_modules(program.decls, dir),
+        match crate::lexer::lex(text, start).and_then(parse) {
+            Ok(parsed) => Some(parsed),
             Err(diags) => {
                 self.diags.extend(diags);
-                Vec::new()
+                None
             }
         }
     }
@@ -161,35 +208,79 @@ impl Loader<'_> {
     ) -> Vec<Spanned<Decl>> {
         decls
             .into_iter()
-            .map(|(decl, span)| {
-                let Decl::Mod { name, body } = decl else {
-                    return (decl, span);
-                };
-                let sub = dir.map(|dir| dir.join(&name.0));
-                let decls = match body {
-                    ModBody::Inline(decls) => self.load_modules(decls, sub.as_deref()),
-                    ModBody::File => self.load_file(dir, &name, sub.as_deref()),
-                    // Made by a function, which the resolver expands.
-                    call @ ModBody::Call(_) => return (Decl::Mod { name, body: call }, span),
-                };
-                let body = ModBody::Inline(decls);
-                (Decl::Mod { name, body }, span)
-            })
+            .map(|decl| self.load_module(decl, dir))
             .collect()
     }
 
-    fn load_file(
+    /// `decl`, with what's in its file if it's `mod x`, and in the files of
+    /// the modules in it if it's a module.
+    fn load_module(&mut self, (decl, span): Spanned<Decl>, dir: Option<&Path>) -> Spanned<Decl> {
+        let Decl::Mod { name, body } = decl else {
+            return (decl, span);
+        };
+        let sub = dir.map(|dir| dir.join(&name.0));
+        let decls = match body {
+            ModBody::Inline(decls) => self.load_modules(decls, sub.as_deref()),
+            ModBody::File => self
+                .read_file(dir, &name, "mod")
+                .map(|(path, text)| self.read(path, text, sub.as_deref()))
+                .unwrap_or_default(),
+            // Made by a function, which the resolver expands.
+            call @ ModBody::Call(_) => return (Decl::Mod { name, body: call }, span),
+        };
+        let body = ModBody::Inline(decls);
+        (Decl::Mod { name, body }, span)
+    }
+
+    /// `scenario`, with what's in its file if it's `scenario x`, and in the
+    /// files of the modules it declares, which are in `dir/x`, laid out as the
+    /// model's are in `dir`.
+    fn load_scenario(&mut self, scenario: Scenario, dir: Option<&Path>) -> Scenario {
+        let Scenario { name, body } = scenario;
+        let changes = match body {
+            ScenarioBody::Inline(changes) => changes,
+            ScenarioBody::File => self
+                .read_file(dir, &name, "scenario")
+                .and_then(|(path, text)| self.parse(path, text, crate::parser::parse_changes))
+                .unwrap_or_default(),
+        };
+        let sub = dir.map(|dir| dir.join(&name.0));
+        let changes = changes
+            .into_iter()
+            .map(|(change, span)| {
+                let change = match change {
+                    Change::Decl { module, decl } => {
+                        let dir = sub
+                            .as_ref()
+                            .map(|sub| module.iter().fold(sub.clone(), |d, (m, _)| d.join(m)));
+                        let (decl, _) = self.load_module((decl, span), dir.as_deref());
+                        Change::Decl { module, decl }
+                    }
+                    drop @ Change::Drop { .. } => drop,
+                };
+                (change, span)
+            })
+            .collect();
+        Scenario {
+            name,
+            body: ScenarioBody::Inline(changes),
+        }
+    }
+
+    /// The path and text of `name.saldo` in `dir`, which `<keyword> name`
+    /// reads, unless it can't be read.
+    fn read_file(
         &mut self,
         dir: Option<&Path>,
         (name, span): &Spanned<String>,
-        sub: Option<&Path>,
-    ) -> Vec<Spanned<Decl>> {
+        keyword: &str,
+    ) -> Option<(String, String)> {
         let Some(dir) = dir else {
             self.diags.push(Diagnostic::new(
                 *span,
-                format!("`mod {name}` reads `{name}.saldo`, which only works in a model read from a file"),
+                format!("`{keyword} {name}` reads `{name}.saldo`, which only works in a model read from a file"),
             ));
-            return Vec::new();
+            return None;
         };
         let path = dir.join(format!("{name}.saldo"));
         let read_error = |error: std::io::Error| {
@@ -202,7 +293,7 @@ impl Loader<'_> {
             Ok(canonical) => canonical,
             Err(e) => {
                 self.diags.push(read_error(e));
-                return Vec::new();
+                return None;
             }
         };
         if !self.seen.insert(canonical) {
@@ -210,20 +301,20 @@ impl Loader<'_> {
                 *span,
                 format!("`{}` is already read as another module", path.display()),
             ));
-            return Vec::new();
+            return None;
         }
         match std::fs::read_to_string(&path) {
-            Ok(text) => self.read(path.display().to_string(), text, sub),
+            Ok(text) => Some((path.display().to_string(), text)),
             Err(e) => {
                 self.diags.push(read_error(e));
-                Vec::new()
+                None
             }
         }
     }
 
-    fn finish(self, decls: Vec<Spanned<Decl>>) -> Result<Program, Vec<Error>> {
+    fn finish(self, program: Program) -> Result<Program, Vec<Error>> {
         if self.diags.is_empty() {
-            Ok(Program { decls })
+            Ok(program)
         } else {
             Err(self.diags.into_iter().map(Error::Diagnostic).collect())
         }

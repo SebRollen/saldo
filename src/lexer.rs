@@ -22,6 +22,8 @@ pub enum Token<'src> {
     Fn,
     Let,
     Mod,
+    Scenario,
+    Drop,
 
     // punctuation
     Eq,
@@ -77,6 +79,8 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Fn => write!(f, "fn"),
             Token::Let => write!(f, "let"),
             Token::Mod => write!(f, "mod"),
+            Token::Scenario => write!(f, "scenario"),
+            Token::Drop => write!(f, "drop"),
             Token::Eq => write!(f, "="),
             Token::EqEq => write!(f, "=="),
             Token::LtEq => write!(f, "<="),
@@ -339,6 +343,8 @@ impl<'src> Lexer<'src> {
             "fn" => Token::Fn,
             "let" => Token::Let,
             "mod" => Token::Mod,
+            "scenario" => Token::Scenario,
+            "drop" => Token::Drop,
             _ => Token::Ident(word),
         };
 

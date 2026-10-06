@@ -27,12 +27,19 @@ module.exports = grammar({
 
   extras: ($) => [/\s+/, $.comment],
 
+  // Whether `a` in `let a.b.c` starts the module or names the value is only
+  // known at the `=`.
+  conflicts: ($) => [[$.module_path]],
+
   rules: {
     // -----------------------------------------------------------------------
     // Top level
     // -----------------------------------------------------------------------
 
-    source_file: ($) => repeat($._declaration),
+    // A scenario's own file holds what its braces would, so `drop` can be at
+    // the top too.
+    source_file: ($) =>
+      repeat(choice($._declaration, $.scenario_decl, $.drop_decl)),
 
     _declaration: ($) =>
       choice(
@@ -59,6 +66,7 @@ module.exports = grammar({
     let_decl: ($) =>
       seq(
         "let",
+        optional(field("module", $.module_path)),
         field("name", $.identifier),
         choice(seq("=", field("value", $._expr)), field("arms", $.arms)),
       ),
@@ -96,6 +104,7 @@ module.exports = grammar({
     fn_decl: ($) =>
       seq(
         "fn",
+        optional(field("module", $.module_path)),
         field("name", $.identifier),
         "(",
         optional(commaSep1(field("parameter", $.identifier))),
@@ -122,6 +131,7 @@ module.exports = grammar({
     entry_decl: ($) =>
       seq(
         "entry",
+        optional(field("module", $.module_path)),
         field("name", $.identifier),
         optional(field("label", $.string)),
         optional(seq("@", field("days", $._expr))),
@@ -205,6 +215,7 @@ module.exports = grammar({
       prec.right(
         seq(
           "mod",
+          optional(field("module", $.module_path)),
           field("name", $.identifier),
           optional(
             choice(
@@ -214,6 +225,37 @@ module.exports = grammar({
           ),
         ),
       ),
+
+    // -----------------------------------------------------------------------
+    // Scenarios
+    //   scenario prepay {
+    //     let loans.payment = 1_200
+    //     drop childcare.nanny @ 2027-09-01..
+    //   }
+    //   scenario house
+    // -----------------------------------------------------------------------
+
+    scenario_decl: ($) =>
+      prec.right(
+        seq(
+          "scenario",
+          field("name", $.identifier),
+          optional(seq("{", repeat(choice($._declaration, $.drop_decl)), "}")),
+        ),
+      ),
+
+    drop_decl: ($) =>
+      prec.right(
+        seq(
+          "drop",
+          field("target", $.path),
+          optional(seq("@", field("days", $._expr))),
+        ),
+      ),
+
+    // `loans.` in `let loans.payment = 1_200`, which a scenario declares in
+    // module `loans`.
+    module_path: ($) => repeat1(seq($.identifier, ".")),
 
     // -----------------------------------------------------------------------
     // Names: `assets.cash`, `loans.rate`, `paycheck.contribution`

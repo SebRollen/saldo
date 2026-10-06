@@ -2,8 +2,8 @@ mod days;
 
 use crate::Span;
 use crate::ast::{
-    Arm, BinOp, Decl, EntryStmt, Expr, Growth, GrowthKind, LetBody, ModBody, Move, Opening, Path,
-    Program, Spanned, SpannedExpr, Stmt, TimeUnit,
+    Arm, BinOp, Change, Decl, EntryStmt, Expr, Growth, GrowthKind, LetBody, ModBody, Move, Opening,
+    Path, Program, Scenario, ScenarioBody, Spanned, SpannedExpr, Stmt, TimeUnit,
 };
 use crate::errors::Diagnostic;
 use crate::lexer::Token;
@@ -51,6 +51,8 @@ pub struct Parser<'src> {
     last_span: Span,
     /// Current expression nesting depth, bounded by `MAX_EXPR_DEPTH`.
     depth: usize,
+    /// The scenarios declared at the top of the file.
+    scenarios: Vec<Scenario>,
 }
 
 impl<'src> Parser<'src> {
@@ -62,13 +64,17 @@ impl<'src> Parser<'src> {
             errors: Vec::new(),
             last_span,
             depth: 0,
+            scenarios: Vec::new(),
         }
     }
 
     pub fn parse(&mut self) -> Result<Program, Vec<Diagnostic>> {
         let decls = self.parse_decls(false);
         if self.errors.is_empty() {
-            Ok(Program { decls })
+            Ok(Program {
+                decls,
+                scenarios: std::mem::take(&mut self.scenarios),
+            })
         } else {
             Err(std::mem::take(&mut self.errors))
         }
@@ -178,26 +184,54 @@ impl<'src> Parser<'src> {
                 Token::RBrace if nested => break,
                 _ => {}
             }
-            let start = self.peek_span();
-            let err_count = self.errors.len();
-            if let Some(decl) = self.parse_decl() {
-                let span = Span::new(start.start, self.last_span.end);
-                decls.push((decl, span));
-            } else {
-                // Every failure path should report something, but never let a
-                // malformed declaration disappear without an error.
-                if self.errors.len() == err_count {
-                    let span = Span::new(start.start, self.last_span.end.max(start.end));
-                    self.errors
-                        .push(Diagnostic::new(span, "malformed declaration"));
-                }
-                // Keep only the first error from this failed declaration, then
-                // skip to the next declaration to avoid cascades.
-                self.errors.truncate(err_count + 1);
-                self.synchronize();
+            if *self.peek() == Token::Scenario {
+                self.parse_or_skip(|p| p.parse_scenario(nested));
+            } else if let Some(decl) = self.parse_or_skip(Self::parse_decl) {
+                decls.push(decl);
             }
         }
         decls
+    }
+
+    /// The changes in a scenario, up to its `}`, or to the end of a file.
+    fn parse_changes(&mut self, nested: bool) -> Vec<Spanned<Change>> {
+        let mut changes = Vec::new();
+        loop {
+            match self.peek() {
+                Token::Eof => break,
+                Token::RBrace if nested => break,
+                _ => {}
+            }
+            if let Some(change) = self.parse_or_skip(Self::parse_change) {
+                changes.push(change);
+            }
+        }
+        changes
+    }
+
+    /// What `parse` parses next, with its span, or, if it fails, `None`,
+    /// having skipped to what can start the next declaration.
+    fn parse_or_skip<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Option<T>,
+    ) -> Option<Spanned<T>> {
+        let start = self.peek_span();
+        let err_count = self.errors.len();
+        if let Some(parsed) = parse(self) {
+            return Some((parsed, Span::new(start.start, self.last_span.end)));
+        }
+        // Every failure path should report something, but never let a
+        // malformed declaration disappear without an error.
+        if self.errors.len() == err_count {
+            let span = Span::new(start.start, self.last_span.end.max(start.end));
+            self.errors
+                .push(Diagnostic::new(span, "malformed declaration"));
+        }
+        // Keep only the first error from this failed declaration, then skip to
+        // the next declaration to avoid cascades.
+        self.errors.truncate(err_count + 1);
+        self.synchronize();
+        None
     }
 
     /// Skips to something that can only start a declaration.
@@ -214,40 +248,112 @@ impl<'src> Parser<'src> {
                 | Token::Check
                 | Token::Balances
                 | Token::Mod
+                | Token::Scenario
+                | Token::Drop
         ) {
             self.advance();
         }
     }
 
     fn parse_decl(&mut self) -> Option<Decl> {
-        match self.peek() {
-            Token::Let => {
+        let keyword = self.peek().clone();
+        match keyword {
+            Token::Let | Token::Fn | Token::Entry | Token::Check | Token::Balances | Token::Mod => {
                 self.advance();
-                self.parse_let_decl()
+                self.parse_decl_after(&keyword)
             }
-            Token::Fn => {
-                self.advance();
-                self.parse_fn_decl()
-            }
-            Token::Entry => {
-                self.advance();
-                self.parse_entry_decl()
-            }
-            Token::Check => {
-                self.advance();
-                self.parse_check_decl()
-            }
-            Token::Balances => {
-                self.advance();
-                self.parse_balances_decl()
-            }
-            Token::Mod => {
-                self.advance();
-                self.parse_mod_decl()
+            Token::Drop => {
+                self.error_here("`drop` only goes in a scenario");
+                None
             }
             _ => {
                 self.error_here(
                     "expected a declaration: `let`, `fn`, `entry`, `check`, `balances` or `mod`",
+                );
+                None
+            }
+        }
+    }
+
+    /// The declaration that `keyword`, just eaten, starts.
+    fn parse_decl_after(&mut self, keyword: &Token) -> Option<Decl> {
+        match keyword {
+            Token::Let => self.parse_let_decl(),
+            Token::Fn => self.parse_fn_decl(),
+            Token::Entry => self.parse_entry_decl(),
+            Token::Check => self.parse_check_decl(),
+            Token::Balances => self.parse_balances_decl(),
+            Token::Mod => self.parse_mod_decl(),
+            _ => unreachable!("`{keyword}` doesn't start a declaration"),
+        }
+    }
+
+    /// `scenario x { … }` or `scenario x`, which only the top of a file can
+    /// declare.
+    fn parse_scenario(&mut self, nested: bool) -> Option<()> {
+        if nested {
+            self.error_here("scenarios are declared only at the top of the model");
+            return None;
+        }
+        self.advance();
+        let name = self.expect_ident("a scenario name after `scenario`")?;
+        let body = if self.eat(&Token::LBrace).is_some() {
+            let changes = self.parse_changes(true);
+            self.expect(&Token::RBrace)?;
+            ScenarioBody::Inline(changes)
+        } else {
+            ScenarioBody::File
+        };
+        self.scenarios.push(Scenario { name, body });
+        Some(())
+    }
+
+    /// A change in a scenario: a declaration, whose name can be a path into a
+    /// module, like `let loans.rate = 5%`, or `drop`.
+    fn parse_change(&mut self) -> Option<Change> {
+        let keyword = self.peek().clone();
+        match keyword {
+            Token::Drop => {
+                self.advance();
+                let Some(path) = self.try_parse_path() else {
+                    self.error_here("expected an entry or a module after `drop`");
+                    return None;
+                };
+                let when = if self.eat(&Token::At).is_some() {
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                Some(Change::Drop { path, when })
+            }
+            Token::Let | Token::Fn | Token::Entry | Token::Mod => {
+                self.advance();
+                let mut module = Vec::new();
+                while let Token::Ident(part) = self.peek()
+                    && *self.peek_next() == Token::Period
+                {
+                    let part = part.to_string();
+                    let (_, span) = self.advance();
+                    self.advance();
+                    module.push((part, span));
+                }
+                let decl = self.parse_decl_after(&keyword)?;
+                Some(Change::Decl { module, decl })
+            }
+            Token::Check | Token::Balances => {
+                let decl = self.parse_decl()?;
+                Some(Change::Decl {
+                    module: Vec::new(),
+                    decl,
+                })
+            }
+            Token::Scenario => {
+                self.error_here("scenarios are declared only at the top of the model");
+                None
+            }
+            _ => {
+                self.error_here(
+                    "expected a change: `let`, `fn`, `entry`, `mod`, `check`, `balances` or `drop`",
                 );
                 None
             }
@@ -901,6 +1007,19 @@ impl<'src> Parser<'src> {
 
 pub fn parse(tokens: Vec<(Token<'_>, Span)>) -> Result<Program, Vec<Diagnostic>> {
     Parser::new(tokens).parse()
+}
+
+/// Parses the file of a scenario: the changes it makes.
+pub fn parse_changes(
+    tokens: Vec<(Token<'_>, Span)>,
+) -> Result<Vec<Spanned<Change>>, Vec<Diagnostic>> {
+    let mut parser = Parser::new(tokens);
+    let changes = parser.parse_changes(false);
+    if parser.errors.is_empty() {
+        Ok(changes)
+    } else {
+        Err(parser.errors)
+    }
 }
 
 /// Parses `src` as a single expression.

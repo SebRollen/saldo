@@ -7,6 +7,7 @@ mod lexer;
 mod parser;
 mod random;
 mod resolver;
+mod scenario;
 mod sources;
 mod typecheck;
 mod units;
@@ -15,6 +16,7 @@ mod util;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::io;
+use std::sync::Arc;
 
 pub use ast::{Path, Span, TimeUnit};
 pub use errors::{Diagnostic, Error};
@@ -117,13 +119,15 @@ pub struct Run {
 pub struct Model {
     model: resolver::Model,
     program: compile::Program,
+    /// The model as written, and its scenarios, to apply them to.
+    source: Arc<ast::Program>,
 }
 
 /// Reads and checks a model given as text. It can't have modules in other
 /// files; use [`load_file`] for that.
 pub fn load(src: &str) -> Result<Model, Vec<Error>> {
     let program = sources::load_text(&mut Sources::default(), src)?;
-    Model::new(&program)
+    Model::new(program)
 }
 
 /// Reads and checks the model in the file at `path`, reading the files of its
@@ -134,7 +138,7 @@ pub fn load_file(
     sources: &mut Sources,
 ) -> Result<Model, Vec<Error>> {
     let program = sources::load_file(sources, path.as_ref())?;
-    Model::new(&program)
+    Model::new(program)
 }
 
 /// Simulates a model given as text. It can't have modules in other files; use
@@ -167,15 +171,85 @@ fn check_range(opts: &RunOpts) -> Result<(), Vec<Error>> {
 }
 
 impl Model {
-    fn new(program: &ast::Program) -> Result<Self, Vec<Error>> {
-        let model = resolver::resolve(program)
-            .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect::<Vec<_>>())?;
-        let mut program = compile::compile(&model);
-        let diags = units::check(&mut program);
+    /// The model `source` describes, without its scenarios.
+    fn new(source: ast::Program) -> Result<Self, Vec<Error>> {
+        let diags = scenario::check_names(&source);
         if !diags.is_empty() {
             return Err(diags.into_iter().map(Error::Diagnostic).collect());
         }
-        Ok(Model { model, program })
+        let source = Arc::new(source);
+        Self::build(&source, &source, &scenario::Applied::default())
+            .map_err(|diags| diags.into_iter().map(Error::Diagnostic).collect())
+    }
+
+    /// The model `program` describes, which is `source` with the changes
+    /// `applied` describes.
+    fn build(
+        source: &Arc<ast::Program>,
+        program: &ast::Program,
+        applied: &scenario::Applied,
+    ) -> Result<Self, Vec<Diagnostic>> {
+        let model = resolver::resolve(program, applied)?;
+        let mut program = compile::compile(&model);
+        let diags = units::check(&mut program);
+        if !diags.is_empty() {
+            return Err(diags);
+        }
+        Ok(Model {
+            model,
+            program,
+            source: Arc::clone(source),
+        })
+    }
+
+    /// The names of the model's scenarios, in the order they're declared.
+    pub fn scenarios(&self) -> impl Iterator<Item = &str> {
+        self.source.scenarios.iter().map(|s| s.name.0.as_str())
+    }
+
+    /// The model as it's written with scenario `name`, or with the scenarios
+    /// `name` joins with `+`, one after another. `base` is the model as it's
+    /// written.
+    pub fn scenario(&self, name: &str) -> Result<Model, Vec<Error>> {
+        let mut scenarios = Vec::new();
+        let mut errors = Vec::new();
+        for part in name.split('+').map(str::trim) {
+            if part == scenario::BASE {
+                continue;
+            }
+            match self.source.scenarios.iter().find(|s| s.name.0 == part) {
+                Some(found) => scenarios.push(found),
+                None => errors.push(Error::UnknownScenario {
+                    name: part.to_string(),
+                    close: util::closest(part, self.scenarios().chain([scenario::BASE]))
+                        .map(str::to_string),
+                }),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        if scenarios.is_empty() {
+            return Ok(self.clone());
+        }
+        // An error may show up in the model, away from the scenario that
+        // causes it.
+        let named = |diags: Vec<Diagnostic>| -> Vec<Error> {
+            diags
+                .into_iter()
+                .map(|diag| {
+                    if scenarios.iter().any(|s| scenario::contains(s, diag.span)) {
+                        return diag;
+                    }
+                    scenarios.iter().fold(diag, |diag, s| {
+                        diag.with_note(s.name.1, format!("with scenario `{}`", s.name.0))
+                    })
+                })
+                .map(Error::Diagnostic)
+                .collect()
+        };
+        let (program, applied) = scenario::apply(&self.source, &scenarios).map_err(named)?;
+        Self::build(&self.source, &program, &applied).map_err(named)
     }
 
     /// Whether the model draws at random, so that what it does depends on
@@ -461,6 +535,7 @@ mod doc_tests {
             include_str!("../book/src/distributions.md"),
         ),
         ("monte-carlo.md", include_str!("../book/src/monte-carlo.md")),
+        ("scenarios.md", include_str!("../book/src/scenarios.md")),
         ("entries.md", include_str!("../book/src/entries.md")),
         ("fns.md", include_str!("../book/src/fns.md")),
         ("intro.md", include_str!("../book/src/intro.md")),
@@ -470,7 +545,9 @@ mod doc_tests {
         ("values.md", include_str!("../book/src/values.md")),
     ];
 
-    const KEYWORDS: &[&str] = &["balances", "check", "entry", "fn", "let", "mod"];
+    const KEYWORDS: &[&str] = &[
+        "balances", "check", "entry", "fn", "let", "mod", "scenario", "drop",
+    ];
 
     /// Fenced code blocks that look like saldo declarations, skipping syntax
     /// templates such as `let <name> = <expression>`.
@@ -507,7 +584,12 @@ mod doc_tests {
         for (name, doc) in DOCS {
             for block in declaration_blocks(doc) {
                 checked += 1;
-                let result = crate::lexer::lex(block, 0).and_then(crate::parser::parse);
+                // A scenario's file holds changes rather than declarations.
+                let result = crate::lexer::lex(block, 0).and_then(|tokens| {
+                    crate::parser::parse(tokens.clone())
+                        .map(drop)
+                        .or_else(|_| crate::parser::parse_changes(tokens).map(drop))
+                });
                 if let Err(diags) = result {
                     failures.push(format!("{name}:\n{block}\n{diags:?}"));
                 }

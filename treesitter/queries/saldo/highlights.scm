@@ -6,6 +6,8 @@
   "check"
   "balances"
   "mod"
+  "scenario"
+  "drop"
 ] @keyword
 
 ; Entry statements and modifiers
@@ -69,6 +71,8 @@
 (entry_decl name: (identifier) @function)
 (entry_decl label: (string) @string.special.symbol)
 (mod_decl name: (identifier) @module)
+(module_path (identifier) @module)
+(scenario_decl name: (identifier) @module)
 (for_stmt variable: (identifier) @variable)
 (named_argument name: (identifier) @variable.parameter)
 

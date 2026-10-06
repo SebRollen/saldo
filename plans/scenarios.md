@@ -106,7 +106,9 @@ theirs.
 **`drop <path> [@ <days>]`** stops an entry firing on those days, or every day
 without `@`. For a module, it stops every entry in it firing, and every check
 in it being checked, including those in modules inside it. It changes days and
-nothing else: `drop x @ d` makes `x`'s days its days `- d`. A dropped entry is
+nothing else: it takes `d` out of `x`'s window, like a range in its days, so
+the firings left move what they would have, where `- d` in its days would
+spread a rate over them instead. A dropped entry is
 still declared, so `after` and tag totals that name it still work, and its
 totals stay where they were. The days are read at the top of the model,
 wherever the entry is. Values and functions can't be dropped; replace them

@@ -631,9 +631,42 @@ pub struct Opening {
     pub value: SpannedExpr,
 }
 
+/// `scenario x { … }`: changes to the model, to run with instead of the model
+/// as it is, or alongside it.
+#[derive(Clone, Debug)]
+pub struct Scenario {
+    pub name: Spanned<String>,
+    pub body: ScenarioBody,
+}
+
+#[derive(Clone, Debug)]
+pub enum ScenarioBody {
+    /// `scenario x`: the changes in another file, until loading reads them.
+    File,
+    Inline(Vec<Spanned<Change>>),
+}
+
+/// What a scenario changes.
+#[derive(Clone, Debug)]
+pub enum Change {
+    /// A declaration in `module`, from the top of the model, which replaces
+    /// the one of the same name there, if there is one.
+    Decl {
+        module: Vec<Spanned<String>>,
+        decl: Decl,
+    },
+    /// `drop x @ days`: entry `x`, or every entry and check in module `x`,
+    /// doesn't fire or isn't checked on `days`, or on any day without them.
+    Drop {
+        path: Spanned<Path>,
+        when: Option<SpannedExpr>,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct Program {
     pub decls: Vec<Spanned<Decl>>,
+    pub scenarios: Vec<Scenario>,
 }
 
 #[cfg(test)]

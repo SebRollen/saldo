@@ -5,7 +5,7 @@ use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv] \
-                     [--every UNIT] [--series NAME,...] [--seed N] [--runs N]";
+                     [--every UNIT] [--series NAME,...] [--seed N] [--runs N] [--scenario NAME]";
 
 const HELP: &str = "\
 Simulate a saldo model and print the resulting transactions or balances.
@@ -25,6 +25,8 @@ Options:
   --runs N            simulate N runs, each drawing with its own seed, and
                       write them all as CSV, with each run's number and seed;
                       `--seed` with a run's seed repeats it
+  --scenario NAME     simulate the model with scenario NAME, or with the
+                      scenarios NAME joins with `+`, like `prepay+daycare`
   -h, --help          print this help
   -V, --version       print the version";
 
@@ -57,6 +59,7 @@ fn main() -> ExitCode {
         every,
         series,
         runs,
+        scenario,
     } = match parse_args(&args) {
         Ok(x) => x,
         Err(msg) => {
@@ -74,7 +77,10 @@ fn main() -> ExitCode {
     };
     let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut sources = Sources::default();
-    let model = match saldo::load_file(&path, &mut sources) {
+    let model = match saldo::load_file(&path, &mut sources).and_then(|model| match &scenario {
+        Some(name) => model.scenario(name),
+        None => Ok(model),
+    }) {
         Ok(model) => model,
         Err(errors) => return report_errors(&sources, &errors, color),
     };
@@ -260,7 +266,9 @@ fn report_errors(sources: &Sources, errors: &[saldo::Error], color: bool) -> Exi
     let bad_arguments = errors.iter().all(|e| {
         matches!(
             e,
-            saldo::Error::InvalidDateRange { .. } | saldo::Error::UnknownSeries { .. }
+            saldo::Error::InvalidDateRange { .. }
+                | saldo::Error::UnknownSeries { .. }
+                | saldo::Error::UnknownScenario { .. }
         )
     });
     ExitCode::from(if bad_arguments { 2 } else { 1 })
@@ -275,6 +283,7 @@ struct Args {
     every: TimeUnit,
     series: Vec<String>,
     runs: Option<u32>,
+    scenario: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
@@ -286,6 +295,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut runs: Option<u32> = None;
     let mut every: Option<TimeUnit> = None;
     let mut series: Vec<String> = Vec::new();
+    let mut scenario: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -344,6 +354,11 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                         .map(str::to_string),
                 );
             }
+            "--scenario" => {
+                i += 1;
+                let value = args.get(i).ok_or("missing value for --scenario")?;
+                scenario = Some(value.trim().to_string());
+            }
             other if !other.starts_with("--") => {
                 if path.is_some() {
                     return Err(format!("unexpected positional arg `{other}`"));
@@ -380,6 +395,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         every: every.unwrap_or(TimeUnit::Day),
         series,
         runs,
+        scenario,
     })
 }
 

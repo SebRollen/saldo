@@ -88,7 +88,7 @@ The transactions can be piped into other PTA tools for reporting:
 
 ```
 saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]
-      [--every UNIT] [--series NAME,...] [--seed N] [--runs N]
+      [--every UNIT] [--series NAME,...] [--seed N] [--runs N] [--scenario NAME]
 ```
 
 - `--from` / `--to` — inclusive date range to simulate
@@ -102,6 +102,8 @@ saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]
   (default: a random seed, which saldo prints)
 - `--runs N` — simulate N runs, each with its own seed, as one CSV with each
   run's number and seed; `--seed` with a run's seed repeats it
+- `--scenario NAME` — simulate the model with scenario NAME, or with the
+  scenarios NAME joins with `+`, like `prepay+daycare`
 
 saldo exits with 0 when all is well, 1 for an error in the model, 2 for bad
 arguments, and 3 when a check failed (it still writes all the output).
@@ -300,6 +302,30 @@ mod car = loan(debt: liabilities.loans.car, rate: 6%/year, payment: 600)
 A function that ends with `mod { … }` makes a module, so `mod car = loan(…)`
 gives `car.repay`, moving money out of `liabilities.loans.car`. Any call can
 give its arguments by name.
+
+### Scenarios
+
+```
+scenario prepay {
+  let loans.car.payment = 1_200        // replaces loans.car.payment
+}
+
+scenario daycare {
+  drop childcare.nanny @ 2027-09-01..  // stops it firing from September
+
+  entry childcare.daycare "Daycare" @ 1st & 2027-09-01.. {
+    assets.cash -> expenses.childcare.daycare : 2_100
+  }
+}
+```
+
+A scenario changes the model: `--scenario prepay` runs the model with it. A
+declaration in a scenario is named by its path into the model's modules, and
+replaces the declaration there, or adds it if there's none. In a value that
+replaces another, its own name reads the one it replaces, like
+`let pay.salary = pay.salary * 80%`. `drop` stops an entry, or a module's
+entries and checks, on some days or all of them. With the same seed, a
+scenario draws what the model draws, except where it changes it.
 
 ## Building
 

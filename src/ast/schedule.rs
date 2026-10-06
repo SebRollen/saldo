@@ -763,6 +763,20 @@ impl Schedule {
         }
     }
 
+    /// The schedule, except on `days`, which leave its window: it doesn't
+    /// fire on them, and the firings left move what they would have.
+    pub fn without(self, days: DaySet) -> Self {
+        let except = DaySet::Diff(Box::new(DaySet::All), Box::new(days));
+        let window = match self.window {
+            None => except,
+            Some(window) => DaySet::Inter(vec![window, except]),
+        };
+        Schedule {
+            window: Some(window),
+            ..self
+        }
+    }
+
     pub fn matches(&self, t: NaiveDate) -> bool {
         self.matches_pattern(t) && self.window.as_ref().is_none_or(|w| w.contains(t))
     }

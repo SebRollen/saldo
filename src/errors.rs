@@ -95,5 +95,11 @@ pub enum Error {
         name: String,
         close: Option<String>,
     },
+    /// A scenario asked for that the model doesn't have, and the closest
+    /// name that it does.
+    UnknownScenario {
+        name: String,
+        close: Option<String>,
+    },
     Diagnostic(Diagnostic),
 }

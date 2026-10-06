@@ -3344,3 +3344,529 @@ fn cli_prints_a_random_seed_and_takes_one() {
     // Given a seed, it doesn't print it.
     assert!(repeated.stderr.is_empty());
 }
+
+// --- scenarios ---
+
+/// Simulates `src` with scenario `name`, failing on errors but not on checks.
+fn run_scenario(src: &str, name: &str, opts: &RunOpts) -> saldo::Output {
+    let model = saldo::load(src).unwrap_or_else(|e| panic!("{e:?}"));
+    let model = model.scenario(name).unwrap_or_else(|e| panic!("{e:?}"));
+    model.simulate(opts).unwrap_or_else(|e| panic!("{e:?}"))
+}
+
+/// The errors from loading `src` with scenario `name`.
+fn scenario_errors(src: &str, name: &str) -> Vec<saldo::Error> {
+    match saldo::load(src).and_then(|model| model.scenario(name)) {
+        Ok(_) => panic!("scenario `{name}` loaded without errors"),
+        Err(errors) => errors,
+    }
+}
+
+const HOUSEHOLD: &str = r#"
+    balances @ 2026-01-01 { assets.cash = 10_000 }
+
+    mod pay {
+      let salary = 60_000/year
+      entry paycheck "Paycheck" @ last {
+        income.salary -> assets.cash : salary
+      }
+    }
+
+    mod loans {
+      let car_payment = 500
+      balances @ 2026-01-01 { liabilities.car = 10_000 }
+      entry car "Car payment" @ 1st {
+        assets.cash -> liabilities.car : min(car_payment, liabilities.car)
+      }
+    }
+
+    entry nanny "Nanny" @ fri {
+      assets.cash -> expenses.nanny : 26_000/year
+    }
+"#;
+
+#[test]
+fn scenarios_replace_and_add_declarations() {
+    let src = format!(
+        "{HOUSEHOLD}
+        scenario prepay {{
+          let loans.car_payment = 1_500
+        }}
+        scenario daycare {{
+          entry daycare \"Daycare\" @ 1st {{
+            assets.cash -> expenses.daycare : 1_800
+          }}
+        }}
+        "
+    );
+    let opts = opts("2026-01-01", "2026-12-31");
+    let base = run_scenario(&src, "base", &opts);
+    assert_eq!(
+        posted_in(&base, "liabilities.car", 2026),
+        Decimal::from(6_000)
+    );
+    let prepay = run_scenario(&src, "prepay", &opts);
+    assert_eq!(
+        posted_in(&prepay, "liabilities.car", 2026),
+        Decimal::from(10_000)
+    );
+    assert_eq!(posted_in(&prepay, "expenses.daycare", 2026), Decimal::ZERO);
+    let daycare = run_scenario(&src, "daycare", &opts);
+    assert_eq!(
+        posted_in(&daycare, "expenses.daycare", 2026),
+        Decimal::from(21_600)
+    );
+    assert_eq!(
+        posted_in(&daycare, "liabilities.car", 2026),
+        Decimal::from(6_000)
+    );
+    // Without a scenario, the model is as it's written.
+    let model = saldo::load(&src).unwrap();
+    assert_eq!(model.simulate(&opts).unwrap().to_ledger(), base.to_ledger());
+    assert_eq!(model.scenarios().collect::<Vec<_>>(), ["prepay", "daycare"]);
+}
+
+#[test]
+fn a_replacement_reads_what_it_replaces_by_its_own_name() {
+    let src = format!(
+        "{HOUSEHOLD}
+        fn net(gross) {{ gross * 70% }}
+        entry saving @ last {{
+          assets.cash -> assets.savings : net(1_000)
+        }}
+        scenario cut {{
+          let pay.salary {{
+            2026-07-01.. => pay.salary * 80%
+            _            => pay.salary
+          }}
+          fn net(gross) {{ net(gross) - 100 }}
+        }}
+        "
+    );
+    let opts = opts("2026-01-01", "2026-12-31");
+    let cut = run_scenario(&src, "cut", &opts);
+    assert_eq!(
+        posted_in(&cut, "assets.savings", 2026),
+        Decimal::from(12 * 600)
+    );
+    // The rest of the model reads the replacement.
+    assert_eq!(
+        posted_in(&cut, "income.salary", 2026),
+        Decimal::from(-30_000 - 24_000)
+    );
+}
+
+#[test]
+fn dropping_an_entry_stops_it_on_those_days_and_firings_left_move_the_same() {
+    let src = format!(
+        "{HOUSEHOLD}
+        scenario daycare {{
+          drop nanny @ 2026-07-01..
+        }}
+        scenario summers {{
+          drop nanny @ jul | aug
+        }}
+        scenario gone {{
+          drop nanny
+        }}
+        "
+    );
+    let opts = opts("2026-01-01", "2026-12-31");
+    // Dropping days from July is ending the nanny's days there.
+    let ended = HOUSEHOLD.replace("@ fri {", "@ fri & 2026-01-01..2026-07-01 {");
+    assert_eq!(
+        run_scenario(&src, "daycare", &opts).to_ledger(),
+        run(&ended, &opts).unwrap().to_ledger()
+    );
+    // Each Friday left moves a 52nd of the year, as it did.
+    let summers = run_scenario(&src, "summers", &opts);
+    let fridays = postings_to(&summers, "expenses.nanny");
+    assert_eq!(fridays.len(), 52 - 9);
+    assert!(fridays.iter().all(|amount| *amount == Decimal::from(500)));
+    let gone = run_scenario(&src, "gone", &opts);
+    assert!(postings_to(&gone, "expenses.nanny").is_empty());
+}
+
+#[test]
+fn dropping_a_module_stops_its_entries_and_checks_but_keeps_its_values() {
+    let src = format!(
+        "{HOUSEHOLD}
+        mod side {{
+          let rate = 1_000
+          entry gig @ 15th {{ income.gig -> assets.cash : rate }}
+          check assets.cash < 0 @ 2026-06-30
+        }}
+        entry tip @ 2026-03-01 {{ income.gig -> assets.cash : side.rate }}
+        scenario quit {{
+          drop side @ 2026-04-01..
+        }}
+        "
+    );
+    let opts = opts("2026-01-01", "2026-12-31");
+    let quit = run_scenario(&src, "quit", &opts);
+    assert_eq!(posted_in(&quit, "income.gig", 2026), Decimal::from(-4_000));
+    assert!(quit.log.failed_checks.is_empty());
+    let base = run_scenario(&src, "base", &opts);
+    assert_eq!(base.log.failed_checks.len(), 1);
+}
+
+#[test]
+fn a_dropped_entry_keeps_its_name_and_tags() {
+    let src = r#"
+        entry pay @ last {
+          income.salary -> assets.cash : 1_000 #salary
+        }
+        entry save @ last after pay {
+          assets.cash -> assets.savings : pay.salary[month] / 10
+        }
+        scenario quit {
+          drop pay
+        }
+    "#;
+    let quit = run_scenario(src, "quit", &opts("2026-01-01", "2026-03-31"));
+    assert!(quit.log.transactions.is_empty());
+}
+
+#[test]
+fn scenario_balances_replace_the_models_for_the_accounts_they_name() {
+    let src = r#"
+        balances @ 2026-01-01 {
+          assets.cash    = 1_000
+          assets.savings = 2_000
+          income.salary[year] = 5_000
+        }
+        entry pay @ last {
+          income.salary -> assets.cash : 1_000
+        }
+        check income.salary[year] <= 12_000 @ 2026-12-31
+        scenario rich {
+          balances @ 2025-12-01 { assets.cash = 50_000 }
+          balances @ 2026-01-01 { income.salary[year] = 0 }
+        }
+    "#;
+    let opts = opts("2026-01-01", "2026-12-31");
+    let rich = run_scenario(src, "rich", &opts);
+    // It opens in December, so December's pay is in by January.
+    assert_eq!(
+        rich.log.opening[&path("assets.cash")],
+        Decimal::from(51_000)
+    );
+    assert_eq!(
+        rich.log.opening[&path("assets.savings")],
+        Decimal::from(2_000)
+    );
+    assert_eq!(rich.log.snapshots[0].date, d("2026-01-01"));
+    assert!(rich.log.failed_checks.is_empty());
+    assert_eq!(run_scenario(src, "base", &opts).log.failed_checks.len(), 1);
+    let twice = format!("{src}\nscenario richer {{ balances @ 2026-01-01 {{ assets.cash = 1 }} }}");
+    assert!(has_error(
+        &scenario_errors(&twice, "rich+richer"),
+        "`assets.cash` already has an opening balance"
+    ));
+}
+
+#[test]
+fn scenarios_combine_one_after_another() {
+    let src = format!(
+        "{HOUSEHOLD}
+        scenario prepay {{ let loans.car_payment = 1_500 }}
+        scenario daycare {{ drop nanny @ 2026-07-01.. }}
+        scenario prepay_more {{ let loans.car_payment = 2_000 }}
+        scenario new_loans {{ mod loans {{ }} }}
+        "
+    );
+    let opts = opts("2026-01-01", "2026-12-31");
+    let both = run_scenario(&src, "prepay+daycare", &opts);
+    assert_eq!(
+        posted_in(&both, "liabilities.car", 2026),
+        Decimal::from(10_000)
+    );
+    assert_eq!(
+        posted_in(&both, "expenses.nanny", 2026),
+        Decimal::from(13_000)
+    );
+    assert_eq!(
+        run_scenario(&src, "base+daycare", &opts).to_ledger(),
+        run_scenario(&src, "daycare", &opts).to_ledger()
+    );
+    assert!(has_error(
+        &scenario_errors(&src, "prepay+prepay_more"),
+        "`loans.car_payment` is already changed"
+    ));
+    assert!(has_error(
+        &scenario_errors(&src, "prepay+new_loans"),
+        "`loans` has `loans.car_payment` in it, which is already changed"
+    ));
+}
+
+#[test]
+fn scenarios_draw_what_the_model_draws() {
+    let src = r#"
+        let market = normal(0.5%, 4%)
+        entry food @ sun { assets.cash -> expenses.food : uniform(100, 200) }
+        scenario bear { let market = normal(0.4%, 4%) }
+        scenario boost { let market = market + 1% }
+        scenario cook {
+          entry dinner @ sat { assets.cash -> expenses.dinner : uniform(20, 80) }
+        }
+    "#;
+    let opts = RunOpts {
+        series: vec!["market".to_string(), "expenses.food".to_string()],
+        ..seeded("2026-01-01", "2026-03-31", 7)
+    };
+    let rows = |name: &str| -> Vec<(f64, String)> {
+        run_scenario(src, name, &opts)
+            .to_csv()
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let cells: Vec<&str> = line.split(',').collect();
+                (cells[1].parse().unwrap(), cells[2].to_string())
+            })
+            .collect()
+    };
+    let base = rows("base");
+    for (scenario, shift) in [("bear", -0.001), ("boost", 0.01), ("cook", 0.0)] {
+        let other = rows(scenario);
+        for ((market, food), (other_market, other_food)) in base.iter().zip(&other) {
+            assert!((other_market - market - shift).abs() < 1e-12, "{scenario}");
+            assert_eq!(food, other_food, "{scenario}");
+        }
+    }
+}
+
+#[test]
+fn replacing_a_function_that_makes_modules_changes_every_module_it_makes() {
+    let src = r#"
+        balances @ 2026-01-01 {
+          liabilities.car  = 10_000
+          liabilities.boat = 10_000
+        }
+        fn loan(debt, payment) {
+          mod {
+            entry repay @ 1st { assets.cash -> debt : payment }
+          }
+        }
+        mod car = loan(liabilities.car, 100)
+        mod boat = loan(liabilities.boat, 200)
+        scenario double {
+          fn loan(debt, payment) {
+            mod {
+              entry repay @ 1st { assets.cash -> debt : payment * 2 }
+            }
+          }
+        }
+        scenario faster {
+          mod car = loan(liabilities.car, 1_000)
+          drop boat @ 2026-02-01..
+        }
+        scenario piecewise {
+          entry car.repay @ 1st { assets.cash -> liabilities.car : 1 }
+        }
+    "#;
+    let opts = opts("2026-01-01", "2026-03-31");
+    let double = run_scenario(src, "double", &opts);
+    assert_eq!(
+        posted_in(&double, "liabilities.car", 2026),
+        Decimal::from(600)
+    );
+    assert_eq!(
+        posted_in(&double, "liabilities.boat", 2026),
+        Decimal::from(1_200)
+    );
+    let faster = run_scenario(src, "faster", &opts);
+    assert_eq!(
+        posted_in(&faster, "liabilities.car", 2026),
+        Decimal::from(3_000)
+    );
+    assert_eq!(
+        posted_in(&faster, "liabilities.boat", 2026),
+        Decimal::from(200)
+    );
+    assert!(has_error(
+        &scenario_errors(src, "piecewise"),
+        "`car` is made by a function, so a scenario replaces it whole"
+    ));
+}
+
+#[test]
+fn scenario_mistakes_are_errors() {
+    let cases = [
+        (
+            "scenario s { let loans.car_paymnet = 1_500 }",
+            "nothing reads `loans.car_paymnet`",
+        ),
+        (
+            "scenario s { let loan.car_payment = 1_500 }",
+            "the model has no module `loan`",
+        ),
+        (
+            "scenario s { let pay.paycheck = 1 }",
+            "`pay.paycheck` is declared with `entry`, so a scenario replaces it with `entry`",
+        ),
+        (
+            "scenario s { let pay.salary.x = 1 }",
+            "`pay.salary` isn't a module",
+        ),
+        (
+            "scenario s { drop pay.salary }",
+            "`pay.salary` isn't an entry or a module, so it can't be dropped",
+        ),
+        ("scenario s { drop nany }", "unknown name `nany`"),
+        (
+            "scenario s { let x = 1\n let x = 2 }",
+            "`x` is already changed",
+        ),
+        ("scenario s { }\nscenario s { }", "`s` is already declared"),
+        (
+            "scenario s { }\nscenario nanny { }",
+            "`nanny` is already declared",
+        ),
+    ];
+    for (scenario, message) in cases {
+        let src = format!("{HOUSEHOLD}\n{scenario}");
+        let errors = match saldo::load(&src).and_then(|model| model.scenario("s")) {
+            Ok(_) => panic!("`{scenario}` loaded without errors"),
+            Err(errors) => errors,
+        };
+        assert!(has_error(&errors, message), "{scenario}: {errors:?}");
+    }
+    let base = format!("{HOUSEHOLD}\nscenario base {{ }}");
+    assert!(has_error(
+        &saldo::load(&base).err().unwrap(),
+        "`base` is the model without a scenario"
+    ));
+    let nested = format!("{HOUSEHOLD}\nmod x {{ scenario s {{ }} }}");
+    assert!(has_error(
+        &saldo::load(&nested).err().unwrap(),
+        "scenarios are declared only at the top of the model"
+    ));
+    let loose = format!("{HOUSEHOLD}\ndrop nanny");
+    assert!(has_error(
+        &saldo::load(&loose).err().unwrap(),
+        "`drop` only goes in a scenario"
+    ));
+    let src = format!("{HOUSEHOLD}\nscenario prepay {{ }}");
+    let unknown = saldo::load(&src).unwrap().scenario("prepy").err().unwrap();
+    assert!(matches!(
+        &unknown[..],
+        [saldo::Error::UnknownScenario { name, close: Some(close) }]
+            if name == "prepy" && close == "prepay"
+    ));
+}
+
+#[test]
+fn errors_a_scenario_causes_in_the_model_name_it() {
+    let src = format!("{HOUSEHOLD}\nscenario s {{ let loans.car_payment = fri }}");
+    let errors = scenario_errors(&src, "s");
+    let [saldo::Error::Diagnostic(diag)] = &errors[..] else {
+        panic!("{errors:?}");
+    };
+    assert!(
+        diag.message
+            .contains("is a set of days, but this needs a number")
+    );
+    assert!(
+        diag.extra
+            .iter()
+            .any(|(_, note)| note == "with scenario `s`")
+    );
+    // An error in the scenario itself is where it is.
+    let src = format!("{HOUSEHOLD}\nscenario s {{ let pay.salary = assets.cash }}");
+    let errors = scenario_errors(&src, "s");
+    let [saldo::Error::Diagnostic(diag)] = &errors[..] else {
+        panic!("{errors:?}");
+    };
+    assert!(diag.extra.is_empty(), "{diag:?}");
+}
+
+#[test]
+fn scenarios_and_their_modules_can_be_in_files() {
+    let main = "
+        balances @ 2026-01-01 { assets.cash = 1_000 }
+        mod childcare
+        scenario daycare
+        scenario inline {
+          mod childcare
+        }
+    ";
+    let childcare = r#"entry nanny @ 1st { assets.cash -> expenses.nanny : 100 }"#;
+    let daycare = "
+        drop childcare.nanny
+        let childcare.tuition = 300
+        mod childcare.center
+    ";
+    let center = r#"entry pay @ 1st { assets.cash -> expenses.daycare : childcare.tuition }"#;
+    let inline = r#"entry daycare @ 1st { assets.cash -> expenses.daycare : 200 }"#;
+    let dir = write_model(
+        "scenario_files",
+        &[
+            ("main.saldo", main),
+            ("childcare.saldo", childcare),
+            ("daycare.saldo", daycare),
+            ("daycare/childcare/center.saldo", center),
+            ("inline/childcare.saldo", inline),
+        ],
+    );
+    let mut sources = saldo::Sources::default();
+    let model = saldo::load_file(dir.join("main.saldo"), &mut sources).unwrap();
+    let opts = opts("2026-01-01", "2026-03-31");
+    let daycare = model.scenario("daycare").unwrap().simulate(&opts).unwrap();
+    assert_eq!(
+        posted_in(&daycare, "expenses.daycare", 2026),
+        Decimal::from(900)
+    );
+    assert_eq!(posted_in(&daycare, "expenses.nanny", 2026), Decimal::ZERO);
+    let inline = model.scenario("inline").unwrap().simulate(&opts).unwrap();
+    assert_eq!(
+        posted_in(&inline, "expenses.daycare", 2026),
+        Decimal::from(600)
+    );
+
+    let in_module = write_model(
+        "scenario_in_module",
+        &[
+            ("main.saldo", "mod pay"),
+            ("pay.saldo", "scenario raise { }"),
+        ],
+    );
+    let errors = saldo::load_file(in_module.join("main.saldo"), &mut saldo::Sources::default())
+        .err()
+        .unwrap();
+    assert!(has_error(
+        &errors,
+        "scenarios are declared only in the file saldo runs"
+    ));
+}
+
+#[test]
+fn cli_runs_a_scenario() {
+    use std::process::Command;
+
+    let dir = write_model(
+        "cli_scenario",
+        &[(
+            "model.saldo",
+            "entry pay @ last { income.salary -> assets.cash : salary }\n\
+             let salary = 1_000\n\
+             scenario raise { let salary = 2_000 }\n",
+        )],
+    );
+    let saldo = |scenario: &str| {
+        Command::new(env!("CARGO_BIN_EXE_saldo"))
+            .arg(dir.join("model.saldo"))
+            .args(["--from", "2026-01-01", "--to", "2026-01-31"])
+            .args(["--scenario", scenario])
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap()
+    };
+    let raise = saldo("raise");
+    assert!(String::from_utf8_lossy(&raise.stdout).contains("Income:Salary  -2000"));
+    let unknown = saldo("rise");
+    assert_eq!(unknown.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&unknown.stderr),
+        "the model has no scenario `rise`; did you mean `raise`?\n"
+    );
+}

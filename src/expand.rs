@@ -16,7 +16,10 @@ pub fn expand(program: &Program) -> Result<Program, Vec<Diagnostic>> {
     expander.index(&[], &program.decls);
     let decls = expander.decls(&[], program.decls.clone(), &[]);
     if expander.diags.is_empty() {
-        Ok(Program { decls })
+        Ok(Program {
+            decls,
+            scenarios: Vec::new(),
+        })
     } else {
         Err(expander.diags)
     }
