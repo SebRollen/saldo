@@ -3781,7 +3781,14 @@ fn scenario_mistakes_are_errors() {
             "scenario s { let x = 1\n let x = 2 }",
             "`x` is already changed",
         ),
-        ("scenario s { }\nscenario s { }", "`s` is already declared"),
+        (
+            "scenario s { let x = 1 }\nscenario s { let x = 2 }",
+            "`x` is already changed",
+        ),
+        (
+            "mod m { let x = 1\n scenario s { let x = 2 } }\nscenario s { let m.x = 3 }",
+            "`m.x` is already changed",
+        ),
         (
             "scenario s { }\nscenario nanny { }",
             "`nanny` is already declared",
@@ -3800,10 +3807,15 @@ fn scenario_mistakes_are_errors() {
         &saldo::load(&base).err().unwrap(),
         "`base` is the model without a scenario"
     ));
-    let nested = format!("{HOUSEHOLD}\nmod x {{ scenario s {{ }} }}");
+    let made = format!("{HOUSEHOLD}\nfn f() {{ mod {{ scenario s {{ }} }} }}");
+    assert!(has_error(
+        &saldo::load(&made).err().unwrap(),
+        "a module a function makes can't declare scenarios"
+    ));
+    let nested = format!("{HOUSEHOLD}\nscenario s {{ mod x {{ scenario t {{ }} }} }}");
     assert!(has_error(
         &saldo::load(&nested).err().unwrap(),
-        "scenarios are declared only at the top of the model"
+        "a scenario can't declare scenarios"
     ));
     let loose = format!("{HOUSEHOLD}\ndrop nanny");
     assert!(has_error(
@@ -3887,20 +3899,83 @@ fn scenarios_and_their_modules_can_be_in_files() {
         Decimal::from(600)
     );
 
-    let in_module = write_model(
-        "scenario_in_module",
+    let in_scenario = write_model(
+        "scenario_in_scenario",
         &[
-            ("main.saldo", "mod pay"),
-            ("pay.saldo", "scenario raise { }"),
+            ("main.saldo", "mod pay { }\nscenario raise { mod pay }"),
+            ("raise/pay.saldo", "scenario t { }"),
         ],
     );
-    let errors = saldo::load_file(in_module.join("main.saldo"), &mut saldo::Sources::default())
-        .err()
-        .unwrap();
-    assert!(has_error(
-        &errors,
-        "scenarios are declared only in the file saldo runs"
-    ));
+    let errors = saldo::load_file(
+        in_scenario.join("main.saldo"),
+        &mut saldo::Sources::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(has_error(&errors, "a scenario can't declare scenarios"));
+}
+
+#[test]
+fn scenarios_declared_in_modules_change_them() {
+    let main = r#"
+        balances @ 2026-01-01 { assets.cash = 10_000 }
+        mod housing
+        mod tax {
+          let rate = 10%
+          entry state @ last { assets.cash -> expenses.tax : 1_000 * rate }
+          scenario nj { let rate = 6% }
+        }
+        scenario nj {
+          entry moving @ 2026-01-15 { assets.cash -> expenses.moving : 500 }
+        }
+    "#;
+    // Names in a module's scenario are looked up in the module, as if the
+    // scenario were written there.
+    let housing = "
+        let rent = 1_000
+        entry due @ 1st { assets.cash -> expenses.rent : rent }
+        entry storage @ 1st { assets.cash -> expenses.storage : 50 }
+        scenario nj {
+          let rent = 2_000
+          drop storage @ 2026-02-01..
+          check rent == 2_000
+        }
+        scenario parking
+    ";
+    let parking = "
+        let rent = rent + 100
+        mod garage
+    ";
+    let garage = "entry fee @ 1st { assets.cash -> expenses.garage : 25 }";
+    let dir = write_model(
+        "scenarios_in_modules",
+        &[
+            ("main.saldo", main),
+            ("housing.saldo", housing),
+            ("housing/parking.saldo", parking),
+            ("housing/parking/garage.saldo", garage),
+        ],
+    );
+    let mut sources = saldo::Sources::default();
+    let model = saldo::load_file(dir.join("main.saldo"), &mut sources).unwrap();
+    assert_eq!(model.scenarios().collect::<Vec<_>>(), ["nj", "parking"]);
+    let opts = opts("2026-01-01", "2026-03-31");
+    let posted = |scenario: &str| {
+        let output = model.scenario(scenario).unwrap().simulate(&opts).unwrap();
+        assert!(output.log.failed_checks.is_empty(), "{scenario}");
+        ["rent", "storage", "tax", "moving", "garage"]
+            .map(|account| posted_in(&output, &format!("expenses.{account}"), 2026))
+    };
+    assert_eq!(posted("base"), [3_000, 150, 300, 0, 0].map(Decimal::from));
+    // Every block named `nj` is one scenario.
+    assert_eq!(posted("nj"), [6_000, 50, 180, 500, 0].map(Decimal::from));
+    assert_eq!(
+        posted("parking"),
+        [3_300, 150, 300, 0, 75].map(Decimal::from)
+    );
+
+    let errors = model.scenario("nj+parking").err().unwrap();
+    assert!(has_error(&errors, "`housing.rent` is already changed"));
 }
 
 #[test]

@@ -636,6 +636,10 @@ pub struct Opening {
 #[derive(Clone, Debug)]
 pub struct Scenario {
     pub name: Spanned<String>,
+    /// The module it's declared in, from the top of its file, until loading
+    /// moves its changes there, and merges it with the other blocks with its
+    /// name.
+    pub module: Vec<Spanned<String>>,
     pub body: ScenarioBody,
 }
 
@@ -657,7 +661,9 @@ pub enum Change {
     },
     /// `drop x @ days`: entry `x`, or every entry and check in module `x`,
     /// doesn't fire or isn't checked on `days`, or on any day without them.
+    /// `x` and `days` are looked up in `module`, where the scenario is.
     Drop {
+        module: Vec<Spanned<String>>,
         path: Spanned<Path>,
         when: Option<SpannedExpr>,
     },

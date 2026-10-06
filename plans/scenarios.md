@@ -53,8 +53,12 @@ saldo model.saldo --from 2026-10-01 --to 2030-12-31 --runs 1000 --every month \
 - `scenario <name> { … }` declares a scenario in place, and `scenario <name>`
   reads it from `<name>.saldo`, next to the model, as `mod` does. Modules in a
   scenario read their files from `<name>/`.
-- Scenarios are declared only at the top of the file saldo runs: not in
-  modules, and not in other scenarios.
+- Scenarios are declared in any module written in the model, but not in a
+  module a function makes, and not in other scenarios. One declared in a
+  module changes that module, as if its changes were written there. Blocks
+  with one name, in one module or several, are one scenario. (At first they
+  were declared only at the top of the file saldo runs; 2026-10-06 let a
+  scenario sit with what it changes.)
 - A scenario's name is declared at the top of the model with everything else,
   so it can't also name a module or a value. `base` is the model with no
   scenario, so it can't name one.

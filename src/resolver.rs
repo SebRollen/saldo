@@ -735,10 +735,10 @@ impl<'a> Resolver<'a> {
 
     /// Works out what scenarios drop, and on which days.
     fn resolve_drops(&mut self) {
-        for ((path, span), when) in std::mem::take(&mut self.applied.drops) {
+        for (module, (path, span), when) in std::mem::take(&mut self.applied.drops) {
             let days = match &when {
                 None => DaySet::All,
-                Some(when) => match self.lower_days(when, &[]) {
+                Some(when) => match self.lower_days(when, &module) {
                     Ok(set) => set,
                     Err(diag) => {
                         self.diags.push(diag);
@@ -746,7 +746,7 @@ impl<'a> Resolver<'a> {
                     }
                 },
             };
-            match self.lookup(&[], &path, span) {
+            match self.lookup(&module, &path, span) {
                 Ok(Target::Entry(full)) => self.entry_drops.entry(full).or_default().push(days),
                 Ok(Target::Mod(module)) => self.module_drops.push((module, days)),
                 Ok(_) => self.diags.push(Diagnostic::new(

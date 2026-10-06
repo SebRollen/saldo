@@ -13,8 +13,10 @@ scenario <name>
 ```
 
 `scenario prepay { … }` declares a scenario in place. `scenario prepay`,
-without braces, reads it from the file `prepay.saldo`, next to the model.
-Scenarios are declared at the top of the file saldo runs, not in modules.
+without braces, reads it from the file `prepay.saldo`, next to the file it's
+declared in. Scenarios can be declared in modules too, and a scenario can be
+declared in several places, which are one scenario (see
+[below](#in-modules)).
 
 ## Example
 
@@ -94,6 +96,50 @@ a file, and `mod loans = refinance(…)`. Replacing a function that makes
 modules changes every module it makes. A module that a function makes can only
 be replaced whole: to change the car loan made by `mod car = loan(…)`, replace
 that line.
+
+## In modules
+
+A scenario declared in a module changes that module, as if its changes were
+written there: `let rent = 2_000` in a scenario in `housing` replaces
+`housing.rent`, `drop storage` drops `housing.storage`, and the names its
+declarations and checks read are looked up in `housing`, then at the top of
+the model.
+
+Blocks with one name, wherever they are, are one scenario. A move to New
+Jersey changes rent and taxes, and each part can sit with what it changes:
+
+`housing.saldo`:
+
+```
+let rent = 1_800
+
+entry due "Rent" @ 1st {
+  assets.cash -> expenses.rent : rent
+}
+
+scenario nj {
+  let rent = 2_400
+}
+```
+
+`tax.saldo`:
+
+```
+let state_rate = 6%
+
+scenario nj {
+  let state_rate = 5.5%
+}
+```
+
+`--scenario nj` runs the model with both. As when [combining
+scenarios](#combining-scenarios), it's an error if two of a scenario's blocks
+change the same declaration, or one changes a module and the other something
+in it.
+
+`scenario nj` without braces, in `housing.saldo`, reads `housing/nj.saldo`,
+and the modules in it are in `housing/nj/`. A module that a function makes
+can't declare scenarios, and neither can a scenario.
 
 ## Reading what's replaced
 

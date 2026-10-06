@@ -15,6 +15,10 @@ use rust_decimal::Decimal;
 /// evaluating.
 const MAX_EXPR_DEPTH: usize = 256;
 
+/// Why a scenario can't be declared in a scenario, or in a function.
+const IN_SCENARIO: &str = "a scenario can't declare scenarios";
+const IN_FUNCTION: &str = "a module a function makes can't declare scenarios";
+
 // How tightly binary operators bind, loosest first.
 const OR: u8 = 1;
 const AND: u8 = 2;
@@ -52,8 +56,12 @@ pub struct Parser<'src> {
     last_span: Span,
     /// Current expression nesting depth, bounded by `MAX_EXPR_DEPTH`.
     depth: usize,
-    /// The scenarios declared at the top of the file.
+    /// The scenarios declared in the file.
     scenarios: Vec<Scenario>,
+    /// The modules written in the file that the parser is in, from its top.
+    module: Vec<Spanned<String>>,
+    /// Why a scenario can't be declared where the parser is, if it can't.
+    no_scenarios: Option<&'static str>,
 }
 
 impl<'src> Parser<'src> {
@@ -66,6 +74,8 @@ impl<'src> Parser<'src> {
             last_span,
             depth: 0,
             scenarios: Vec::new(),
+            module: Vec::new(),
+            no_scenarios: None,
         }
     }
 
@@ -186,7 +196,7 @@ impl<'src> Parser<'src> {
                 _ => {}
             }
             if *self.peek() == Token::Scenario {
-                self.parse_or_skip(|p| p.parse_scenario(nested));
+                self.parse_or_skip(Self::parse_scenario);
             } else if let Some(decl) = self.parse_or_skip(Self::parse_decl) {
                 decls.push(decl);
             }
@@ -289,23 +299,25 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// `scenario x { … }` or `scenario x`, which only the top of a file can
-    /// declare.
-    fn parse_scenario(&mut self, nested: bool) -> Option<()> {
-        if nested {
-            self.error_here("scenarios are declared only at the top of the model");
+    /// `scenario x { … }` or `scenario x`, in the module the parser is in.
+    fn parse_scenario(&mut self) -> Option<()> {
+        if let Some(reason) = self.no_scenarios {
+            self.error_here(reason);
             return None;
         }
         self.advance();
         let name = self.expect_ident("a scenario name after `scenario`")?;
         let body = if self.eat(&Token::LBrace).is_some() {
+            let outer = self.no_scenarios.replace(IN_SCENARIO);
             let changes = self.parse_changes(true);
+            self.no_scenarios = outer;
             self.expect(&Token::RBrace)?;
             ScenarioBody::Inline(changes)
         } else {
             ScenarioBody::File
         };
-        self.scenarios.push(Scenario { name, body });
+        let module = self.module.clone();
+        self.scenarios.push(Scenario { name, module, body });
         Some(())
     }
 
@@ -325,7 +337,11 @@ impl<'src> Parser<'src> {
                 } else {
                     None
                 };
-                Some(Change::Drop { path, when })
+                Some(Change::Drop {
+                    module: Vec::new(),
+                    path,
+                    when,
+                })
             }
             Token::Let | Token::Fn | Token::Entry | Token::Mod => {
                 self.advance();
@@ -349,7 +365,7 @@ impl<'src> Parser<'src> {
                 })
             }
             Token::Scenario => {
-                self.error_here("scenarios are declared only at the top of the model");
+                self.error_here(IN_SCENARIO);
                 None
             }
             _ => {
@@ -474,7 +490,9 @@ impl<'src> Parser<'src> {
         if *self.peek() == Token::Mod && *self.peek_next() == Token::LBrace {
             self.advance();
             self.advance();
+            let outer = self.no_scenarios.replace(IN_FUNCTION);
             let decls = self.parse_decls(true);
+            self.no_scenarios = outer;
             self.expect(&Token::RBrace)?;
             body.push(Stmt::Mod(decls));
         } else {
@@ -681,7 +699,9 @@ impl<'src> Parser<'src> {
     fn parse_mod_decl(&mut self) -> Option<Decl> {
         let name = self.expect_ident("a module name after `mod`")?;
         let body = if self.eat(&Token::LBrace).is_some() {
+            self.module.push(name.clone());
             let decls = self.parse_decls(true);
+            self.module.pop();
             self.expect(&Token::RBrace)?;
             ModBody::Inline(decls)
         } else if self.eat(&Token::Eq).is_some() {
@@ -1010,11 +1030,19 @@ pub fn parse(tokens: Vec<(Token<'_>, Span)>) -> Result<Program, Vec<Diagnostic>>
     Parser::new(tokens).parse()
 }
 
+/// Parses the file of a module in a scenario, which can't declare scenarios.
+pub fn parse_in_scenario(tokens: Vec<(Token<'_>, Span)>) -> Result<Program, Vec<Diagnostic>> {
+    let mut parser = Parser::new(tokens);
+    parser.no_scenarios = Some(IN_SCENARIO);
+    parser.parse()
+}
+
 /// Parses the file of a scenario: the changes it makes.
 pub fn parse_changes(
     tokens: Vec<(Token<'_>, Span)>,
 ) -> Result<Vec<Spanned<Change>>, Vec<Diagnostic>> {
     let mut parser = Parser::new(tokens);
+    parser.no_scenarios = Some(IN_SCENARIO);
     let changes = parser.parse_changes(false);
     if parser.errors.is_empty() {
         Ok(changes)

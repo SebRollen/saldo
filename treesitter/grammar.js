@@ -219,7 +219,7 @@ module.exports = grammar({
           field("name", $.identifier),
           optional(
             choice(
-              seq("{", repeat($._declaration), "}"),
+              seq("{", repeat(choice($._declaration, $.scenario_decl)), "}"),
               seq("=", field("call", $.call_expr)),
             ),
           ),

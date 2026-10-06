@@ -2094,6 +2094,10 @@
         {
           "type": "mod_decl",
           "named": true
+        },
+        {
+          "type": "scenario_decl",
+          "named": true
         }
       ]
     }

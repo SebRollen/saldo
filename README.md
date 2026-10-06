@@ -326,9 +326,11 @@ declaration in a scenario is named by its path into the model's modules, and
 replaces the declaration there, or adds it if there's none. In a value that
 replaces another, its own name reads the one it replaces, like
 `let pay.salary = pay.salary * 80%`. `drop` stops an entry, or a module's
-entries and checks, on some days or all of them. With the same seed, a
-scenario draws what the model draws, except where it changes it, so
-`--scenario base,prepay --runs 1000` compares the two run by run.
+entries and checks, on some days or all of them. A scenario can be declared
+in modules, where it changes what's in them, and blocks with one name are one
+scenario, so a move can change `housing` and `tax` each in its own file. With
+the same seed, a scenario draws what the model draws, except where it changes
+it, so `--scenario base,prepay --runs 1000` compares the two run by run.
 
 ## Building
 

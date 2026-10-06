@@ -15,9 +15,9 @@ pub const BASE: &str = "base";
 /// What scenarios change that the resolver needs to know.
 #[derive(Clone, Debug, Default)]
 pub struct Applied {
-    /// What they drop, by its path from the top of the model, and on which
-    /// days, or every day.
-    pub drops: Vec<(Spanned<Path>, Option<SpannedExpr>)>,
+    /// What they drop, by its path from the module they're in, which is
+    /// given from the top of the model, and on which days, or every day.
+    pub drops: Vec<(Vec<String>, Spanned<Path>, Option<SpannedExpr>)>,
     /// The values and functions they add, by full name, and where they're
     /// named. Nothing reading one is most likely a misspelled replacement.
     pub added: Vec<(String, Span)>,
@@ -30,11 +30,12 @@ pub struct Applied {
     pub balances: HashSet<Span>,
 }
 
-/// Reports scenarios that can't have their names: two with one name, one
-/// named `base`, and one named like a declaration at the top of the model.
+/// Reports scenarios that can't have their names: one named `base`, and one
+/// named like a declaration at the top of the model. Blocks with one name are
+/// one scenario, so loading has merged them.
 pub fn check_names(program: &Program) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
-    let mut seen: HashMap<&str, Span> = program
+    let top: HashMap<&str, Span> = program
         .decls
         .iter()
         .filter_map(|(decl, _)| decl_name(decl))
@@ -47,13 +48,11 @@ pub fn check_names(program: &Program) -> Vec<Diagnostic> {
                 *span,
                 "`base` is the model without a scenario, so it can't name one",
             ));
-        } else if let Some(previous) = seen.get(name.as_str()) {
+        } else if let Some(declared) = top.get(name.as_str()) {
             diags.push(
                 Diagnostic::new(*span, format!("`{name}` is already declared"))
-                    .with_note(*previous, "declared here"),
+                    .with_note(*declared, "declared here"),
             );
-        } else {
-            seen.insert(name, *span);
         }
     }
     diags
@@ -88,19 +87,24 @@ pub fn apply(
         };
         for (change, span) in changes {
             match change {
-                Change::Drop { path, when } => {
-                    applier.applied.drops.push((path.clone(), when.clone()));
+                Change::Drop { module, path, when } => {
+                    let module = module.iter().map(|(part, _)| part.clone()).collect();
+                    applier
+                        .applied
+                        .drops
+                        .push((module, path.clone(), when.clone()));
                 }
                 Change::Decl {
-                    decl: decl @ Decl::Check { .. },
-                    ..
-                } => applier.decls.push((decl.clone(), *span)),
-                Change::Decl {
-                    decl: decl @ Decl::Balances { .. },
-                    ..
+                    module,
+                    decl: decl @ (Decl::Check { .. } | Decl::Balances { .. }),
                 } => {
-                    applier.applied.balances.insert(*span);
-                    applier.decls.push((decl.clone(), *span));
+                    if matches!(decl, Decl::Balances { .. }) {
+                        applier.applied.balances.insert(*span);
+                    }
+                    match module_decls(&mut applier.decls, module) {
+                        Ok(decls) => decls.push((decl.clone(), *span)),
+                        Err(diag) => applier.diags.push(diag),
+                    }
                 }
                 Change::Decl { module, decl } => {
                     if let Err(diag) = applier.declare(module, decl, *span, &scenario.name.0) {

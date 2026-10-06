@@ -118,6 +118,7 @@ pub(crate) fn load_file(sources: &mut Sources, path: &Path) -> Result<Program, V
     let mut loader = Loader {
         sources,
         seen: HashSet::from([canonical]),
+        scenarios: Vec::new(),
         diags: Vec::new(),
     };
     let program = loader.read_model(path.display().to_string(), text, path.parent());
@@ -130,6 +131,7 @@ pub(crate) fn load_text(sources: &mut Sources, text: &str) -> Result<Program, Ve
     let mut loader = Loader {
         sources,
         seen: HashSet::new(),
+        scenarios: Vec::new(),
         diags: Vec::new(),
     };
     let program = loader.read_model(String::new(), text.to_string(), None);
@@ -141,6 +143,9 @@ struct Loader<'a> {
     /// The canonical paths of the files read so far, so a file isn't read as
     /// two modules.
     seen: HashSet<PathBuf>,
+    /// The scenarios read so far, each with the changes of every block with
+    /// its name, in the modules they're declared in.
+    scenarios: Vec<Scenario>,
     diags: Vec<Diagnostic>,
 }
 
@@ -149,35 +154,37 @@ impl Loader<'_> {
     /// `scenario x` replaced by what's in its file. `dir` is where their files
     /// are.
     fn read_model(&mut self, name: String, text: String, dir: Option<&Path>) -> Program {
-        let Some(program) = self.parse(name, text, crate::parser::parse) else {
-            return Program {
-                decls: Vec::new(),
-                scenarios: Vec::new(),
-            };
-        };
-        let decls = self.load_modules(program.decls, dir);
-        let scenarios = program
-            .scenarios
-            .into_iter()
-            .map(|scenario| self.load_scenario(scenario, dir))
-            .collect();
-        Program { decls, scenarios }
+        let decls = self.read(name, text, dir, Some(&[]));
+        Program {
+            decls,
+            scenarios: std::mem::take(&mut self.scenarios),
+        }
     }
 
-    /// The declarations in `text`, a module's file, with each `mod x` replaced
-    /// by the declarations in its file. `dir` is where the files of its
-    /// modules are.
-    fn read(&mut self, name: String, text: String, dir: Option<&Path>) -> Vec<Spanned<Decl>> {
-        let Some(program) = self.parse(name, text, crate::parser::parse) else {
+    /// The declarations in `text`, the file of module `module`, with each
+    /// `mod x` replaced by the declarations in its file, and its scenarios
+    /// read. `dir` is where the files of its modules are. A module in a
+    /// scenario has no `module`, since it can't declare scenarios.
+    fn read(
+        &mut self,
+        name: String,
+        text: String,
+        dir: Option<&Path>,
+        module: Option<&[Spanned<String>]>,
+    ) -> Vec<Spanned<Decl>> {
+        let parse = match module {
+            Some(_) => crate::parser::parse,
+            None => crate::parser::parse_in_scenario,
+        };
+        let Some(program) = self.parse(name, text, parse) else {
             return Vec::new();
         };
-        for scenario in &program.scenarios {
-            self.diags.push(Diagnostic::new(
-                scenario.name.1,
-                "scenarios are declared only in the file saldo runs",
-            ));
+        if let Some(module) = module {
+            for scenario in program.scenarios {
+                self.load_scenario(scenario, dir, module);
+            }
         }
-        self.load_modules(program.decls, dir)
+        self.load_modules(program.decls, dir, module)
     }
 
     /// Adds `text`, the file `name`, to the sources, and parses it with `parse`.
@@ -201,29 +208,39 @@ impl Loader<'_> {
     /// Reads the files of the modules in `decls`, as Rust does: `mod x` in a
     /// file reads `x.saldo` from `dir`, and the modules in `x`, written in it
     /// or in their own files, are in `dir/x`.
+    /// `module` is the path of the module they're in, as [`Loader::read`]
+    /// takes it.
     fn load_modules(
         &mut self,
         decls: Vec<Spanned<Decl>>,
         dir: Option<&Path>,
+        module: Option<&[Spanned<String>]>,
     ) -> Vec<Spanned<Decl>> {
         decls
             .into_iter()
-            .map(|decl| self.load_module(decl, dir))
+            .map(|decl| self.load_module(decl, dir, module))
             .collect()
     }
 
-    /// `decl`, with what's in its file if it's `mod x`, and in the files of
-    /// the modules in it if it's a module.
-    fn load_module(&mut self, (decl, span): Spanned<Decl>, dir: Option<&Path>) -> Spanned<Decl> {
+    /// `decl`, in `module`, with what's in its file if it's `mod x`, and in
+    /// the files of the modules in it if it's a module.
+    fn load_module(
+        &mut self,
+        (decl, span): Spanned<Decl>,
+        dir: Option<&Path>,
+        module: Option<&[Spanned<String>]>,
+    ) -> Spanned<Decl> {
         let Decl::Mod { name, body } = decl else {
             return (decl, span);
         };
         let sub = dir.map(|dir| dir.join(&name.0));
+        let inner = module.map(|module| [module, std::slice::from_ref(&name)].concat());
+        let inner = inner.as_deref();
         let decls = match body {
-            ModBody::Inline(decls) => self.load_modules(decls, sub.as_deref()),
+            ModBody::Inline(decls) => self.load_modules(decls, sub.as_deref(), inner),
             ModBody::File => self
                 .read_file(dir, &name, "mod")
-                .map(|(path, text)| self.read(path, text, sub.as_deref()))
+                .map(|(path, text)| self.read(path, text, sub.as_deref(), inner))
                 .unwrap_or_default(),
             // Made by a function, which the resolver expands.
             call @ ModBody::Call(_) => return (Decl::Mod { name, body: call }, span),
@@ -232,38 +249,66 @@ impl Loader<'_> {
         (Decl::Mod { name, body }, span)
     }
 
-    /// `scenario`, with what's in its file if it's `scenario x`, and in the
-    /// files of the modules it declares, which are in `dir/x`, laid out as the
-    /// model's are in `dir`.
-    fn load_scenario(&mut self, scenario: Scenario, dir: Option<&Path>) -> Scenario {
-        let Scenario { name, body } = scenario;
+    /// Reads `scenario`, declared in a file of module `module`, with what's
+    /// in its file if it's `scenario x`, and in the files of the modules it
+    /// declares, which are in `x` next to it, laid out as the model's are in
+    /// `dir`. Its changes go in the module it's in, and are added to those of
+    /// the scenarios read with its name.
+    fn load_scenario(
+        &mut self,
+        scenario: Scenario,
+        dir: Option<&Path>,
+        module: &[Spanned<String>],
+    ) {
+        let Scenario {
+            name,
+            module: in_file,
+            body,
+        } = scenario;
+        let dir = dir.map(|dir| {
+            in_file
+                .iter()
+                .fold(dir.to_path_buf(), |d, (m, _)| d.join(m))
+        });
         let changes = match body {
             ScenarioBody::Inline(changes) => changes,
             ScenarioBody::File => self
-                .read_file(dir, &name, "scenario")
+                .read_file(dir.as_deref(), &name, "scenario")
                 .and_then(|(path, text)| self.parse(path, text, crate::parser::parse_changes))
                 .unwrap_or_default(),
         };
         let sub = dir.map(|dir| dir.join(&name.0));
-        let changes = changes
-            .into_iter()
-            .map(|(change, span)| {
-                let change = match change {
-                    Change::Decl { module, decl } => {
-                        let dir = sub
-                            .as_ref()
-                            .map(|sub| module.iter().fold(sub.clone(), |d, (m, _)| d.join(m)));
-                        let (decl, _) = self.load_module((decl, span), dir.as_deref());
-                        Change::Decl { module, decl }
-                    }
-                    drop @ Change::Drop { .. } => drop,
-                };
-                (change, span)
-            })
-            .collect();
-        Scenario {
-            name,
-            body: ScenarioBody::Inline(changes),
+        let here = [module, &in_file].concat();
+        let changes = changes.into_iter().map(|(change, span)| {
+            let change = match change {
+                Change::Decl { module, decl } => {
+                    let dir = sub
+                        .as_ref()
+                        .map(|sub| module.iter().fold(sub.clone(), |d, (m, _)| d.join(m)));
+                    let (decl, _) = self.load_module((decl, span), dir.as_deref(), None);
+                    let module = [&here[..], &module].concat();
+                    Change::Decl { module, decl }
+                }
+                Change::Drop { module, path, when } => Change::Drop {
+                    module: [&here[..], &module].concat(),
+                    path,
+                    when,
+                },
+            };
+            (change, span)
+        });
+        let changes: Vec<_> = changes.collect();
+        match self.scenarios.iter_mut().find(|s| s.name.0 == name.0) {
+            Some(Scenario {
+                body: ScenarioBody::Inline(merged),
+                ..
+            }) => merged.extend(changes),
+            Some(_) => unreachable!("scenarios read have their changes"),
+            None => self.scenarios.push(Scenario {
+                name,
+                module: Vec::new(),
+                body: ScenarioBody::Inline(changes),
+            }),
         }
     }
 
