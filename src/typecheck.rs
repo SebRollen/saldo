@@ -2,7 +2,7 @@
 //! mistakes are reported before the simulation runs rather than on the day an
 //! expression is first evaluated.
 
-use crate::ast::{BinOp, Dist, EntryStmt, Expr, SpannedExpr, Stmt};
+use crate::ast::{BinOp, Dist, EntryStmt, Expr, Span, SpannedExpr, Stmt};
 use crate::errors::Diagnostic;
 use crate::resolver::{FnDef, Model, ParamBody};
 use indexmap::IndexMap;
@@ -28,7 +28,9 @@ impl fmt::Display for Ty {
 pub fn check(model: &Model) -> Vec<Diagnostic> {
     let mut checker = Checker {
         fns: &model.fns,
+        params: &model.params,
         returns: HashMap::new(),
+        param_types: HashMap::new(),
         locals: HashMap::new(),
         diags: Vec::new(),
     };
@@ -40,25 +42,15 @@ pub fn check(model: &Model) -> Vec<Diagnostic> {
             checker.expect(e, Ty::Num, "an opening balance");
         }
     }
-    for body in model.params.values() {
-        match body {
-            ParamBody::Const(e) => checker.expect(e, Ty::Num, "a value"),
-            ParamBody::Arms(arms) => {
-                for arm in arms {
-                    checker.expect(&arm.value, Ty::Num, "a value");
-                    if let Some(growth) = &arm.growth {
-                        checker.expect(&growth.by, Ty::Num, "a growth rate");
-                    }
-                }
-            }
-        }
+    for name in model.params.keys() {
+        checker.param_type(name);
     }
     for entry in &model.entries {
         checker.locals.clear();
         EntryStmt::visit(&entry.body, &mut |stmt| match stmt {
             EntryStmt::Let { name, value } => {
-                checker.expect(value, Ty::Num, "a `let`");
-                checker.locals.insert(name.0.clone(), Ty::Num);
+                let ty = checker.type_of(value);
+                checker.set_local(&name.0, ty);
             }
             EntryStmt::Move(m) => checker.expect(&m.amount, Ty::Num, "an amount"),
             EntryStmt::If { branches, .. } => {
@@ -82,9 +74,12 @@ pub fn check(model: &Model) -> Vec<Diagnostic> {
 
 struct Checker<'a> {
     fns: &'a IndexMap<String, FnDef>,
+    params: &'a IndexMap<String, ParamBody>,
     /// Return types of user functions; `None` if the body has a type error
     /// (already reported) or is still being checked.
     returns: HashMap<&'a str, Option<Ty>>,
+    /// Types of values, likewise.
+    param_types: HashMap<&'a str, Option<Ty>>,
     /// Types of the parameters and `let`s in scope.
     locals: HashMap<String, Ty>,
     diags: Vec<Diagnostic>,
@@ -100,6 +95,15 @@ impl<'a> Checker<'a> {
                 format!("{what} must be a {expected}, but this is a {found}"),
             ));
         }
+    }
+
+    /// Gives local `name` type `ty`, or forgets it if `ty` is `None`, so that
+    /// its uses aren't reported again.
+    fn set_local(&mut self, name: &str, ty: Option<Ty>) {
+        match ty {
+            Some(ty) => self.locals.insert(name.to_string(), ty),
+            None => self.locals.remove(name),
+        };
     }
 
     /// The return type of user function `name`, checking its body on first use.
@@ -118,8 +122,8 @@ impl<'a> Checker<'a> {
         for stmt in &def.body {
             match stmt {
                 Stmt::Let { name, value } => {
-                    self.expect(value, Ty::Num, "a `let`");
-                    self.locals.insert(name.clone(), Ty::Num);
+                    let ty = self.type_of(value);
+                    self.set_local(name, ty);
                 }
                 Stmt::Return(e) => ty = self.type_of(e),
                 Stmt::Mod(_) => unreachable!("functions that make modules aren't checked"),
@@ -130,14 +134,66 @@ impl<'a> Checker<'a> {
         ty
     }
 
+    /// The type of value `name`, checking its body on first use: a number or
+    /// a bool, which all its arms must agree on.
+    fn param_type(&mut self, name: &str) -> Option<Ty> {
+        let (name, body) = self.params.get_key_value(name)?;
+        if let Some(ty) = self.param_types.get(name.as_str()) {
+            return *ty;
+        }
+        // Guards against cycles, which the resolver reports separately.
+        self.param_types.insert(name, None);
+        let outer = std::mem::take(&mut self.locals);
+        let ty = match body {
+            ParamBody::Const(e) => self.type_of(e),
+            ParamBody::Arms(arms) => {
+                let mut agreed: Option<(Ty, Span)> = None;
+                let mut failed = false;
+                for arm in arms {
+                    if let Some(growth) = &arm.growth {
+                        self.expect(&arm.value, Ty::Num, "a value that grows");
+                        self.expect(&growth.by, Ty::Num, "a growth rate");
+                    }
+                    let Some(ty) = self.type_of(&arm.value) else {
+                        failed = true;
+                        continue;
+                    };
+                    match agreed {
+                        None => agreed = Some((ty, arm.value.1)),
+                        Some((first, first_span)) if first != ty => {
+                            self.diags.push(
+                                Diagnostic::new(
+                                    arm.value.1,
+                                    format!(
+                                        "`{name}` is a {first} in one arm but a {ty} in another"
+                                    ),
+                                )
+                                .with_note(first_span, format!("a {first}")),
+                            );
+                            failed = true;
+                        }
+                        Some(_) => {}
+                    }
+                }
+                if failed {
+                    None
+                } else {
+                    agreed.map(|(ty, _)| ty)
+                }
+            }
+        };
+        self.locals = outer;
+        self.param_types.insert(name, ty);
+        ty
+    }
+
     /// The type of `e`, or `None` if it contains an error (already reported).
     fn type_of(&mut self, (expr, span): &SpannedExpr) -> Option<Ty> {
         match expr.as_ref() {
-            Expr::Num(_)
-            | Expr::Global(_)
-            | Expr::Balance(_)
-            | Expr::TagTotal { .. }
-            | Expr::AccountTotal(..) => Some(Ty::Num),
+            Expr::Global(name) => self.param_type(name),
+            Expr::Num(_) | Expr::Balance(_) | Expr::TagTotal { .. } | Expr::AccountTotal(..) => {
+                Some(Ty::Num)
+            }
             Expr::Local(name) => self.locals.get(name).copied(),
             Expr::Bool(_) => Some(Ty::Bool),
             Expr::Neg(x) => {

@@ -117,11 +117,7 @@ pub struct Function {
 
 #[derive(Clone)]
 pub enum Stmt {
-    Let {
-        slot: usize,
-        name: String,
-        value: Expr,
-    },
+    Let { slot: usize, value: Expr },
     Return(Expr),
 }
 
@@ -495,11 +491,7 @@ impl Names<'_> {
                     let value = self.lower(value, &locals);
                     let slot = locals.len();
                     locals.push((name.clone(), slot));
-                    body.push(Stmt::Let {
-                        slot,
-                        name: name.clone(),
-                        value,
-                    });
+                    body.push(Stmt::Let { slot, value });
                 }
                 ast::Stmt::Return(e) => body.push(Stmt::Return(self.lower(e, &locals))),
                 ast::Stmt::Mod(_) => unreachable!("functions that make modules aren't compiled"),

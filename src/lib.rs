@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 pub use ast::{Path, Span, TimeUnit};
 pub use errors::{Diagnostic, Error};
-pub use eval::{CheckFailure, DaySnapshot, SimLog, Transaction};
+pub use eval::{CheckFailure, DaySnapshot, SimLog, Transaction, Value};
 pub use sources::Sources;
 
 #[derive(Clone)]
@@ -701,7 +701,8 @@ fn emit_csv(
                 // Values aren't amounts, like an index of prices, so they
                 // keep their digits.
                 Measure::Value(i) => match snap.values[*i] {
-                    Some(v) => write!(out, ",{}", v.normalize())?,
+                    Some(Value::Num(v)) => write!(out, ",{}", v.normalize())?,
+                    Some(Value::Bool(b)) => write!(out, ",{b}")?,
                     None => write!(out, ",")?,
                 },
                 Measure::Missing => write!(out, ",")?,

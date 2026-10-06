@@ -151,7 +151,7 @@ let salary {
 }
 ```
 
-Values are named numbers. `24_500[year]` (or `[month]`, and so on) makes a
+Values are named numbers, or bools, like whether we've moved yet. `24_500[year]` (or `[month]`, and so on) makes a
 limit: an amount each period, which entries fill over the firings left in it,
 so a job that starts in July still contributes the whole year's limit. A value
 can be a constant, or take different values on different days, each arm covering a set of days and the first that covers a
@@ -236,9 +236,9 @@ exits with status 3.
 | `chance(4%)` | `true` with probability 4% |
 | `net(gross, 0.3)` | User-defined function call |
 
-Values are numbers or bools. saldo checks that each is used where it's
-expected (amounts and values are numbers, checks and `if` conditions are
-bools) before it simulates anything.
+Expressions are numbers or bools. saldo checks that each is used where it's
+expected (amounts are numbers, checks and `if` conditions are bools, and a
+value's arms are all one or the other) before it simulates anything.
 
 Amounts moved and opening balances are rounded to cents, and `round(x)` rounds
 to a whole number. Both use round-half-to-even (`round(2.5) == 2`), as hledger

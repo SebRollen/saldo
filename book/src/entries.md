@@ -127,6 +127,9 @@ entry repay "Loan payment" @ last {
 }
 ```
 
+Like a value, a `let` can be a bool, like `let short = assets.cash < 1_000`,
+to use in an `if` below. So can a `let` in a [function](./fns.md).
+
 ## Choosing moves with `if`
 
 `if` picks which moves an entry makes each time it fires, from the balances

@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
     Num(Decimal),
     Bool(bool),
@@ -108,7 +108,7 @@ pub struct DaySnapshot {
     pub balances: Vec<Decimal>,
     /// The values asked for, in the order asked, or `None` for one that has
     /// no value that day.
-    pub values: Vec<Option<Decimal>>,
+    pub values: Vec<Option<Value>>,
 }
 
 impl Model {
@@ -283,7 +283,7 @@ impl Program {
 
 /// A param's value for the current day.
 enum ParamValue {
-    Value(Decimal),
+    Value(Value),
     /// A time-varying param with no interval covering the current day.
     Inactive,
     /// Evaluation failed; reported only if the param is read.
@@ -525,16 +525,16 @@ impl State<'_> {
         let program = self.program;
         for (index, param) in program.params.iter().enumerate() {
             let value = match &param.body {
-                crate::compile::ParamBody::Const(e) => Some(self.eval_num(e, &[])),
+                crate::compile::ParamBody::Const(e) => Some(self.eval(e, &[])),
                 crate::compile::ParamBody::Arms(arms) => arms
                     .iter()
                     .position(|arm| arm.when.contains(self.date))
-                    .map(|i| {
-                        let base = self.eval_num(&arms[i].value, &[])?;
-                        match &arms[i].growth {
-                            Some(growth) => self.grow((index, i), growth, base),
-                            None => Ok(base),
+                    .map(|i| match &arms[i].growth {
+                        Some(growth) => {
+                            let base = self.eval_num(&arms[i].value, &[])?;
+                            self.grow((index, i), growth, base).map(Value::Num)
                         }
+                        None => self.eval(&arms[i].value, &[]),
                     }),
             };
             self.params.push(match value {
@@ -593,10 +593,10 @@ impl State<'_> {
 
     /// The value of `param` on `date`, which values can be evaluated on
     /// because they depend on nothing but the date.
-    fn param_on(&self, param: usize, date: NaiveDate, span: Span) -> Result<Decimal, Diagnostic> {
+    fn param_on(&self, param: usize, date: NaiveDate, span: Span) -> Result<Value, Diagnostic> {
         let name = &self.program.params[param].name;
         match &self.program.params[param].body {
-            crate::compile::ParamBody::Const(e) => self.eval_num_at(e, &[], date),
+            crate::compile::ParamBody::Const(e) => self.eval_at(e, &[], date),
             crate::compile::ParamBody::Arms(arms) => {
                 let Some(arm) = arms.iter().find(|arm| arm.when.contains(date)) else {
                     return Err(Diagnostic::new(
@@ -606,13 +606,13 @@ impl State<'_> {
                         ),
                     ));
                 };
-                let base = self.eval_num_at(&arm.value, &[], date)?;
                 let Some(growth) = &arm.growth else {
-                    return Ok(base);
+                    return self.eval_at(&arm.value, &[], date);
                 };
+                let base = self.eval_num_at(&arm.value, &[], date)?;
                 let steps = growth.every.steps(growth.anchor, date);
                 let total = self.take_steps(growth, 0, steps, no_growth(growth))?;
-                apply_growth(growth, base, total)
+                apply_growth(growth, base, total).map(Value::Num)
             }
         }
     }
@@ -656,7 +656,7 @@ impl State<'_> {
         let program = self.program;
         let entry = &program.entries[index];
         self.firing = Some(index);
-        let mut frame = vec![Decimal::ZERO; entry.slots];
+        let mut frame = vec![Value::Num(Decimal::ZERO); entry.slots];
         // What each account receives, in the order they're first named.
         let mut net: IndexMap<usize, Decimal> = IndexMap::new();
         // Every move sees the balances from before the entry fired.
@@ -699,14 +699,14 @@ impl State<'_> {
     fn run(
         &mut self,
         stmts: &[crate::compile::EntryStmt],
-        frame: &mut Vec<Decimal>,
+        frame: &mut Vec<Value>,
         net: &mut IndexMap<usize, Decimal>,
     ) -> Result<(), Diagnostic> {
         let program = self.program;
         for stmt in stmts {
             let m = match stmt {
                 crate::compile::EntryStmt::Let { slot, value } => {
-                    frame[*slot] = self.eval_num(value, frame)?;
+                    frame[*slot] = self.eval(value, frame)?;
                     continue;
                 }
                 crate::compile::EntryStmt::If {
@@ -827,7 +827,7 @@ impl State<'_> {
     fn eval_num(
         &self,
         expr: &crate::compile::Expr,
-        locals: &[Decimal],
+        locals: &[Value],
     ) -> Result<Decimal, Diagnostic> {
         self.eval_num_at(expr, locals, self.date)
     }
@@ -835,7 +835,7 @@ impl State<'_> {
     fn eval_num_at(
         &self,
         expr: &crate::compile::Expr,
-        locals: &[Decimal],
+        locals: &[Value],
         date: NaiveDate,
     ) -> Result<Decimal, Diagnostic> {
         match self.eval_at(expr, locals, date)? {
@@ -849,7 +849,7 @@ impl State<'_> {
 
     /// Evaluates `expr` today; `locals` holds the current function's or
     /// entry's parameters and `let`s.
-    fn eval(&self, expr: &crate::compile::Expr, locals: &[Decimal]) -> Result<Value, Diagnostic> {
+    fn eval(&self, expr: &crate::compile::Expr, locals: &[Value]) -> Result<Value, Diagnostic> {
         self.eval_at(expr, locals, self.date)
     }
 
@@ -858,7 +858,7 @@ impl State<'_> {
     fn eval_at(
         &self,
         expr: &crate::compile::Expr,
-        locals: &[Decimal],
+        locals: &[Value],
         date: NaiveDate,
     ) -> Result<Value, Diagnostic> {
         let span = expr.span;
@@ -874,8 +874,8 @@ impl State<'_> {
                 .balance_of(accounts, *sign, *group, span)
                 .map(Value::Num),
             ExprKind::Param(param) if date == self.date => self.param(*param, span),
-            ExprKind::Param(param) => self.param_on(*param, date, span).map(Value::Num),
-            ExprKind::Local(slot) => Ok(Value::Num(locals[*slot])),
+            ExprKind::Param(param) => self.param_on(*param, date, span),
+            ExprKind::Local(slot) => Ok(locals[*slot]),
             ExprKind::Total(tag, kind) => self.total(*tag, *kind, span).map(Value::Num),
             ExprKind::AccountTotal {
                 accounts,
@@ -926,9 +926,10 @@ impl State<'_> {
             ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, locals, span, date),
             ExprKind::Call(index, args) => {
                 let function = &self.program.fns[*index];
-                let mut frame = vec![Decimal::ZERO; function.slots];
+                let mut frame = vec![Value::Num(Decimal::ZERO); function.slots];
                 for (slot, arg) in args.iter().enumerate() {
-                    frame[slot] = self.numeric_arg(arg, &function.name, locals, date)?;
+                    frame[slot] =
+                        Value::Num(self.numeric_arg(arg, &function.name, locals, date)?);
                 }
                 self.call(function, frame, span, date)
             }
@@ -949,7 +950,7 @@ impl State<'_> {
         dist: Dist,
         args: &[crate::compile::Expr],
         slot: usize,
-        locals: &[Decimal],
+        locals: &[Value],
         span: Span,
         date: NaiveDate,
     ) -> Result<Value, Diagnostic> {
@@ -1096,7 +1097,7 @@ impl State<'_> {
 
     fn param(&self, param: usize, span: Span) -> Result<Value, Diagnostic> {
         match &self.params[param] {
-            ParamValue::Value(v) => Ok(Value::Num(*v)),
+            ParamValue::Value(v) => Ok(*v),
             ParamValue::Error(d) => Err(d.clone().with_note(
                 span,
                 format!("while evaluating `{}`", self.program.params[param].name),
@@ -1115,7 +1116,7 @@ impl State<'_> {
         &self,
         builtin: Builtin,
         args: &[crate::compile::Expr],
-        locals: &[Decimal],
+        locals: &[Value],
         span: Span,
         date: NaiveDate,
     ) -> Result<Value, Diagnostic> {
@@ -1148,7 +1149,7 @@ impl State<'_> {
         &self,
         expr: &crate::compile::Expr,
         unit: TimeUnit,
-        locals: &[Decimal],
+        locals: &[Value],
         span: Span,
     ) -> Result<Decimal, Diagnostic> {
         let amount = self.eval_num(expr, locals)?;
@@ -1187,10 +1188,10 @@ impl State<'_> {
     fn frame_on(
         &self,
         entry: &crate::compile::Entry,
-        locals: &[Decimal],
+        locals: &[Value],
         slots: &[usize],
         date: NaiveDate,
-    ) -> Result<Vec<Decimal>, Diagnostic> {
+    ) -> Result<Vec<Value>, Diagnostic> {
         let mut frame = locals.to_vec();
         let mut lets = Vec::new();
         crate::compile::EntryStmt::visit(&entry.body, &mut |stmt| {
@@ -1201,7 +1202,7 @@ impl State<'_> {
             }
         });
         for (slot, value) in lets {
-            frame[slot] = self.eval_num_at(value, &frame, date)?;
+            frame[slot] = self.eval_at(value, &frame, date)?;
         }
         Ok(frame)
     }
@@ -1349,7 +1350,7 @@ impl State<'_> {
         &self,
         arg: &crate::compile::Expr,
         callee: &str,
-        locals: &[Decimal],
+        locals: &[Value],
         date: NaiveDate,
     ) -> Result<Decimal, Diagnostic> {
         match self.eval_at(arg, locals, date)? {
@@ -1366,22 +1367,16 @@ impl State<'_> {
     fn call(
         &self,
         function: &Function,
-        mut frame: Vec<Decimal>,
+        mut frame: Vec<Value>,
         call_span: Span,
         date: NaiveDate,
     ) -> Result<Value, Diagnostic> {
         debug_assert!(function.arity <= frame.len());
         for stmt in &function.body {
             match stmt {
-                Stmt::Let { slot, name, value } => match self.eval_at(value, &frame, date)? {
-                    Value::Num(n) => frame[*slot] = n,
-                    Value::Bool(_) => {
-                        return Err(Diagnostic::new(
-                            value.span,
-                            format!("let binding `{name}` must evaluate to a number"),
-                        ));
-                    }
-                },
+                Stmt::Let { slot, value, .. } => {
+                    frame[*slot] = self.eval_at(value, &frame, date)?
+                }
                 Stmt::Return(e) => return self.eval_at(e, &frame, date),
             }
         }

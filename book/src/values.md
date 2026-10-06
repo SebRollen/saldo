@@ -2,7 +2,8 @@
 
 A value is a named number that can change over time. Values let you write
 things like a salary, a contribution limit or an interest rate in one place,
-and use them throughout your entries and checks.
+and use them throughout your entries and checks. A value can also be a bool,
+like whether you've moved yet (see [Bools](#bools)).
 
 ## Constant values
 
@@ -140,6 +141,32 @@ over time compounds each year at that year's rate.
 
 A value that grows from 1, like `prices` above, is an index: multiply other
 amounts by it, like `80_000/year * prices`, to have them rise with it.
+
+### Bools
+
+A value can be `true` or `false` instead of a number, to say whether something
+holds on a day, like whether you've moved yet:
+
+```
+let moved {
+  2027.. => true
+  _      => false
+}
+
+let rent = if moved then 2_400/month else 1_800/month
+
+entry pay_rent @ 1st {
+  if moved {
+    assets.cash -> expenses.rent.new : rent
+  } else {
+    assets.cash -> expenses.rent.old : rent
+  }
+}
+```
+
+Use one wherever a condition goes: in `if`, a check, or with `and`, `or` and
+`not`. A value's arms must all be numbers or all be bools, and only a number
+can grow.
 
 ## Rates
 

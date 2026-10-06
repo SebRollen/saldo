@@ -403,7 +403,7 @@ fn opening_balances_are_rounded_like_moves() {
 fn accounts_have_totals_like_tags() {
     let src = "
         entry paycheck @ 15th | last { income.salary -> assets.cash : 1_000 }
-        entry rent @ 1st { assets.cash -> expenses.rent : 400 }
+        entry pay_rent @ 1st { assets.cash -> expenses.rent : 400 }
         check income.salary[year] == 6_000 and income.salary[month] == 2_000 @ 2026-03-31
         check assets.cash[quarter] == 4_800 @ 2026-03-31
         check income[year] == 6_000 @ 2026-03-31
@@ -1967,8 +1967,16 @@ fn type_errors_are_reported_before_simulating() {
             "`if` branches must have the same type, but are a bool and a number",
         ),
         (
-            "let p = 1 > 0",
-            "a value must be a number, but this is a bool",
+            "let p { 2040.. => true\n _ => 0 }",
+            "`p` is a bool in one arm but a number in another",
+        ),
+        (
+            "let p { 2040.. => true compounding 3% every year }",
+            "a value that grows must be a number, but this is a bool",
+        ),
+        (
+            "let p = 1 > 0\nentry x { income.b -> assets.a : p }",
+            "an amount must be a number, but this is a bool",
         ),
         (
             "check 1 + 1",
@@ -1986,12 +1994,16 @@ fn type_errors_are_reported_before_simulating() {
             "an argument to `max` must be a number",
         ),
         (
-            "fn positive(x) { x > 0 }\nlet p = positive(1)",
-            "a value must be a number, but this is a bool",
+            "fn positive(x) { x > 0 }\nlet p = positive(1)\nlet q = p * 2",
+            "an operand of `*` must be a number, but this is a bool",
         ),
         (
             "entry x {\n let big = 1 > 0\n income.b -> assets.a : big\n}",
-            "a `let` must be a number, but this is a bool",
+            "an amount must be a number, but this is a bool",
+        ),
+        (
+            "fn f(x) {\n let big = x > 0\n big + 1\n}\nlet p = f(1)",
+            "an operand of `+` must be a number, but this is a bool",
         ),
         (
             "balances @ 2025-01-01 { assets.a = 1 > 0 }",
@@ -2012,6 +2024,50 @@ fn functions_can_return_bools() {
         check positive(p) and not positive(-p)
     ";
     run(src, &opts("2025-01-01", "2025-01-01")).unwrap();
+}
+
+#[test]
+fn values_can_be_bools() {
+    let src = "
+        let moved {
+          2027.. => true
+          _      => false
+        }
+        let stayed = not moved
+        let rent   = if moved then 2_000 else 1_500
+        entry pay_rent @ 1st {
+          if moved {
+            expenses.rent.nj -> assets.cash : -rent
+          } else {
+            expenses.rent.ny -> assets.cash : -rent
+          }
+        }
+        check moved or stayed
+        check moved == (rent > 1_500)
+    ";
+    let output = run(src, &opts("2026-12-01", "2027-01-01")).unwrap();
+    assert_eq!(postings_to(&output, "expenses.rent.ny"), [usd("1500")]);
+    assert_eq!(postings_to(&output, "expenses.rent.nj"), [usd("2000")]);
+}
+
+#[test]
+fn lets_can_be_bools() {
+    let src = "
+        fn capped(x, cap) {
+          let over = x > cap
+          if over then cap else x
+        }
+        balances @ 2026-01-01 { assets.cash = 100 }
+        entry sweep @ 1st {
+          let flush = assets.cash > 150
+          if flush and not (assets.cash > 1_000) {
+            assets.cash -> assets.savings : capped(assets.cash - 150, 30)
+          }
+          income.pay -> assets.cash : 50
+        }
+    ";
+    let output = run(src, &opts("2026-01-01", "2026-05-01")).unwrap();
+    assert_eq!(postings_to(&output, "assets.savings"), [usd("30"); 3]);
 }
 
 // --- missed total warnings ---
@@ -2770,6 +2826,7 @@ fn series_report_accounts_groups_and_values() {
     let src = "
         let prices { 2026.. => 1 compounding 10% every year }
         let bonus { 2026 => 1_000 }
+        let later { 2027.. => true\n _ => false }
         balances @ 2026-01-01 {
           assets.cash      = 1_000
           assets.savings   = 500
@@ -2779,18 +2836,25 @@ fn series_report_accounts_groups_and_values() {
     let output = run(
         src,
         &RunOpts {
-            series: ["assets.cash", "assets", "liabilities", "prices", "bonus"]
-                .map(str::to_string)
-                .to_vec(),
+            series: [
+                "assets.cash",
+                "assets",
+                "liabilities",
+                "prices",
+                "bonus",
+                "later",
+            ]
+            .map(str::to_string)
+            .to_vec(),
             ..opts("2026-12-31", "2027-01-01")
         },
     )
     .unwrap();
     assert_eq!(
         output.to_csv(),
-        "\"date\",\"assets.cash\",\"assets\",\"liabilities\",\"prices\",\"bonus\"\n\
-         2026-12-31,1000.00,1500.00,300.00,1,1000\n\
-         2027-01-01,1000.00,1500.00,300.00,1.1,\n"
+        "\"date\",\"assets.cash\",\"assets\",\"liabilities\",\"prices\",\"bonus\",\"later\"\n\
+         2026-12-31,1000.00,1500.00,300.00,1,1000,false\n\
+         2027-01-01,1000.00,1500.00,300.00,1.1,,true\n"
     );
 }
 
