@@ -413,6 +413,9 @@ pub enum Expr {
 pub enum Dist {
     /// `normal(mean, sd)`.
     Normal,
+    /// `lognormal(mean, sd)`: a positive number whose log is normal, with
+    /// this mean and standard deviation.
+    Lognormal,
     /// `uniform(lo, hi)`.
     Uniform,
     /// `chance(p)`: true with probability `p`.
@@ -423,6 +426,7 @@ impl Dist {
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "normal" => Dist::Normal,
+            "lognormal" => Dist::Lognormal,
             "uniform" => Dist::Uniform,
             "chance" => Dist::Chance,
             _ => return None,
@@ -432,6 +436,7 @@ impl Dist {
     pub fn name(self) -> &'static str {
         match self {
             Dist::Normal => "normal",
+            Dist::Lognormal => "lognormal",
             Dist::Uniform => "uniform",
             Dist::Chance => "chance",
         }

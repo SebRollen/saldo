@@ -210,7 +210,7 @@ impl<'a> Checker<'a> {
                 }
                 Some(match dist {
                     Dist::Chance => Ty::Bool,
-                    Dist::Normal | Dist::Uniform => Ty::Num,
+                    Dist::Normal | Dist::Lognormal | Dist::Uniform => Ty::Num,
                 })
             }
             Expr::Ref(_) | Expr::Days(_) | Expr::Range { .. } | Expr::Named(..) => {

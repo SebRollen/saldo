@@ -970,6 +970,29 @@ impl State<'_> {
                     .map(Value::Num)
                     .ok_or_else(overflow)
             }
+            Dist::Lognormal => {
+                let (mean, sd) = (arg(0)?, arg(1)?);
+                if sd < Decimal::ZERO {
+                    return Err(Diagnostic::new(
+                        args[1].span,
+                        format!("a standard deviation can't be negative, but this is {sd}"),
+                    ));
+                }
+                if mean <= Decimal::ZERO {
+                    return Err(Diagnostic::new(
+                        args[0].span,
+                        format!("a lognormal's mean is more than 0, but this is {mean}"),
+                    ));
+                }
+                if sd.is_zero() {
+                    return Ok(Value::Num(mean));
+                }
+                let (Some(m), Some(s)) = (mean.to_f64(), sd.to_f64()) else {
+                    return Err(overflow());
+                };
+                let x = crate::random::lognormal(m, s, crate::random::normal_quantile(u));
+                Decimal::from_f64(x).map(Value::Num).ok_or_else(overflow)
+            }
             Dist::Uniform => {
                 let (lo, hi) = (arg(0)?, arg(1)?);
                 if lo > hi {
@@ -1595,6 +1618,7 @@ pub const BUILTINS: &[(&str, usize)] = &[
     ("round", 1),
     ("fill", 1),
     ("normal", 2),
+    ("lognormal", 2),
     ("uniform", 2),
     ("chance", 1),
 ];

@@ -196,6 +196,9 @@ error ("fire it at least once a week").
 ### Distributions in v1
 
 - `normal(mean, sd)`
+- `lognormal(mean, sd)`, taking the mean and sd of the result rather than of
+  its log, for amounts that can't be negative and are skewed, like a day's
+  spending (added after v1)
 - `uniform(lo, hi)`
 - `chance(p)`: true with probability `p`, a plain number. It returns a bool,
   which `typecheck.rs:204` doesn't expect of a built-in yet. Values are
@@ -206,10 +209,8 @@ A draw's arguments combine as `min`'s and `max`'s do: the same kind, or plain
 numbers that take on the other's unit. Nothing is clamped: users write
 `max(0, …)` themselves.
 
-Later: `lognormal(mean, sd)`, taking the mean and sd of the result rather than
-of its log (returns that can't lose more than everything), and
-`triangular(min, mode, max)`. Each must also be the inverse CDF of one uniform
-number.
+Later: `triangular(min, mode, max)`, which must also be the inverse CDF of one
+uniform number.
 
 ## Keeping Monte Carlo possible
 

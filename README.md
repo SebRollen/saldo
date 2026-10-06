@@ -228,7 +228,7 @@ exits with status 3.
 | `min(a, b)`, `max(a, b)` | Built-in functions |
 | `fill(max_401k - other[year])` | What's left of a limit or total, split over the firings left in the period |
 | `abs(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Built-in functions |
-| `normal(mean, sd)`, `uniform(lo, hi)` | A random draw |
+| `normal(mean, sd)`, `lognormal(mean, sd)`, `uniform(lo, hi)` | A random draw |
 | `chance(4%)` | `true` with probability 4% |
 | `net(gross, 0.3)` | User-defined function call |
 

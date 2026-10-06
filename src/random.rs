@@ -82,6 +82,14 @@ pub fn normal_quantile(p: f64) -> f64 {
     }
 }
 
+/// The number of a lognormal distribution with `mean` and standard deviation
+/// `sd` that's `z` standard deviations from the mean of its log. `mean` is
+/// positive.
+pub fn lognormal(mean: f64, sd: f64, z: f64) -> f64 {
+    let variance = (1.0 + (sd / mean).powi(2)).ln();
+    (mean.ln() - variance / 2.0 + variance.sqrt() * z).exp()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

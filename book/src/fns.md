@@ -61,7 +61,7 @@ let take_home = net(rate: 28%, gross: 120_000)
 | `abs(x)` | `x` without its sign |
 | `floor(x)`, `ceil(x)`, `round(x)` | `x` rounded down, up, or to the nearest whole number (half to even) |
 | `fill(x)` | what's left of a limit or a total, over the firings left (see [Entries](./entries.md#filling-a-target)) |
-| `normal(mean, sd)`, `uniform(lo, hi)` | a random number (see [Random draws](./distributions.md)) |
+| `normal(mean, sd)`, `lognormal(mean, sd)`, `uniform(lo, hi)` | a random number (see [Random draws](./distributions.md)) |
 | `chance(p)` | `true` with probability `p` (see [Random draws](./distributions.md)) |
 
 User-defined functions can call them:

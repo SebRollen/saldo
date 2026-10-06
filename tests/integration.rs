@@ -3153,6 +3153,40 @@ fn chance_comes_true_about_as_often_as_it_says() {
 }
 
 #[test]
+fn lognormal_draws_positive_numbers_with_its_mean_and_sd() {
+    let src = "entry e { assets.cash -> expenses.x : lognormal(100, 50)/day }";
+    let output = run(src, &seeded("2000-01-01", "2039-12-31", 1)).unwrap();
+    let xs: Vec<f64> = postings_to(&output, "expenses.x")
+        .into_iter()
+        .map(to_f64)
+        .collect();
+    let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+    assert!(xs.iter().all(|x| *x > 0.0));
+    assert!((98.0..102.0).contains(&mean), "mean {mean}");
+    assert!((47.0..53.0).contains(&sd(&xs)), "sd {}", sd(&xs));
+    // With no spread, it's the mean.
+    let output = run(
+        "entry e @ last { assets.cash -> expenses.x : lognormal(100, 0) }",
+        &seeded("2026-01-01", "2026-01-31", 1),
+    )
+    .unwrap();
+    assert_eq!(postings_to(&output, "expenses.x"), [usd("100")]);
+}
+
+#[test]
+fn a_lognormal_needs_a_positive_mean() {
+    let errors = |src: &str| run(src, &seeded("2026-01-01", "2026-01-31", 1)).unwrap_err();
+    assert!(has_error(
+        &errors("entry e @ last { assets.cash -> expenses.x : lognormal(0, 10) }"),
+        "a lognormal's mean is more than 0, but this is 0"
+    ));
+    assert!(has_error(
+        &errors("entry e @ last { assets.cash -> expenses.x : lognormal(10, -1) }"),
+        "a standard deviation can't be negative"
+    ));
+}
+
+#[test]
 fn uniform_draws_between_its_bounds() {
     let src = "entry e @ * { assets.cash -> expenses.x : uniform(300, 2_500) }";
     let output = run(src, &seeded("2026-01-01", "2026-12-31", 1)).unwrap();

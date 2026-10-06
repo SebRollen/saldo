@@ -27,6 +27,7 @@ numbers, so it repeats a run exactly (see [Seeds](#seeds)).
 | Function | Draws |
 |----------|-------|
 | `normal(mean, sd)` | a number from a normal distribution with that mean and standard deviation |
+| `lognormal(mean, sd)` | a positive number from a lognormal distribution with that mean and standard deviation |
 | `uniform(lo, hi)` | a number from `lo` up to `hi`, every one as likely as any other |
 | `chance(p)` | `true` with probability `p`, like `4%`, and `false` otherwise |
 
@@ -35,7 +36,11 @@ month, or a plain number that takes on the other's kind, as with `min` and
 `max`. `chance` takes a plain number between 0 and 1.
 
 Nothing is clamped. A normal distribution can draw a negative grocery bill, so
-write `max(0, normal(185, 40))` where that matters.
+write `max(0, normal(185, 40))` where that matters, or draw from a lognormal.
+A lognormal is never below 0, and is skewed: most draws are below its mean and
+a few far above it, like days of spending that are mostly small with the odd
+big purchase. Its mean and standard deviation are those of what it draws, not
+of their logs, so `lognormal(230, 390)/day` spends $230 a day on average.
 
 ## How often a draw changes
 
