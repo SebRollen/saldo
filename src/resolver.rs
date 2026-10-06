@@ -44,7 +44,7 @@ pub enum Counted {
 /// A total that a `balances` block sets: what `counted` has moved so far in
 /// the `agg` period that contains `date`, as of that day.
 #[derive(Debug, Clone)]
-pub struct Seed {
+pub struct TotalSoFar {
     pub counted: Counted,
     pub agg: AggKind,
     pub date: NaiveDate,
@@ -84,7 +84,7 @@ pub struct Model {
     pub entries: Vec<EntryDef>,
     pub checks: Vec<(Schedule, SpannedExpr)>,
     /// The totals `balances` blocks set.
-    pub seeds: Vec<Seed>,
+    pub totals_so_far: Vec<TotalSoFar>,
     /// Problems that don't stop the model from running.
     pub warnings: Vec<Diagnostic>,
 }
@@ -219,7 +219,7 @@ struct Resolver<'a> {
     fns: HashMap<String, FnDef>,
     entries: Vec<EntryDef>,
     checks: Vec<(Schedule, SpannedExpr)>,
-    seeds: Vec<Seed>,
+    totals_so_far: Vec<TotalSoFar>,
     warnings: Vec<Diagnostic>,
 }
 
@@ -663,7 +663,7 @@ impl<'a> Resolver<'a> {
             for opening in balances {
                 let (path, span) = &opening.target;
                 if let Some(unit) = opening.period {
-                    self.resolve_seed(&module, date, opening, unit);
+                    self.resolve_total_so_far(&module, date, opening, unit);
                     continue;
                 }
                 if !self.account_path(path, *span) {
@@ -704,7 +704,7 @@ impl<'a> Resolver<'a> {
 
     /// `x[unit] = value` in a `balances` block in `module` on `date`: what a
     /// tag or an account has moved so far that period.
-    fn resolve_seed(
+    fn resolve_total_so_far(
         &mut self,
         module: &[String],
         date: NaiveDate,
@@ -744,7 +744,7 @@ impl<'a> Resolver<'a> {
             }
         };
         if self
-            .seeds
+            .totals_so_far
             .iter()
             .any(|s| s.counted == counted && s.agg == agg && s.date == date)
         {
@@ -762,7 +762,7 @@ impl<'a> Resolver<'a> {
             loops: &[],
         };
         let value = self.resolve_expr(&opening.value, &scope);
-        self.seeds.push(Seed {
+        self.totals_so_far.push(TotalSoFar {
             counted,
             agg,
             date,
@@ -1715,7 +1715,7 @@ impl<'a> Resolver<'a> {
             fns: topo_sort_by_deps(self.fns, |def, known| fn_call_deps(&def.body, known)),
             entries: self.entries,
             checks: self.checks,
-            seeds: self.seeds,
+            totals_so_far: self.totals_so_far,
             warnings: self.warnings,
         }
     }

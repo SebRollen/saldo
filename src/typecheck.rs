@@ -70,8 +70,8 @@ pub fn check(model: &Model) -> Vec<Diagnostic> {
         });
     }
     checker.locals.clear();
-    for seed in &model.seeds {
-        checker.expect(&seed.value, Ty::Num, "a total");
+    for so_far in &model.totals_so_far {
+        checker.expect(&so_far.value, Ty::Num, "a total");
     }
     for (_, e) in &model.checks {
         checker.expect(e, Ty::Bool, "a check");

@@ -25,7 +25,7 @@ pub struct Program {
     pub tags: Vec<Tag>,
     /// Each `fill` in a move. The units pass adds these.
     pub fills: Vec<Fill>,
-    pub seeds: Vec<Seed>,
+    pub totals_so_far: Vec<TotalSoFar>,
 }
 
 /// A `fill` in one of `entry`'s moves, which tracks what the move has moved
@@ -40,7 +40,7 @@ pub struct Fill {
 
 /// A total that a `balances` block sets: what a tag or an account has moved
 /// so far in the `agg` period containing `date`, as of that day.
-pub struct Seed {
+pub struct TotalSoFar {
     pub counted: Counted,
     pub agg: AggKind,
     pub date: NaiveDate,
@@ -350,11 +350,11 @@ pub fn compile(model: &Model) -> Program {
             .iter()
             .map(|(schedule, e)| (schedule.clone(), names.lower(e, &[])))
             .collect(),
-        seeds: model
-            .seeds
+        totals_so_far: model
+            .totals_so_far
             .iter()
-            .map(|seed| Seed {
-                counted: match &seed.counted {
+            .map(|so_far| TotalSoFar {
+                counted: match &so_far.counted {
                     crate::resolver::Counted::Tag(entry, tag) => {
                         Counted::Tag(names.tags[&(entry.as_str(), tag.as_str())])
                     }
@@ -363,9 +363,9 @@ pub fn compile(model: &Model) -> Program {
                         path.account_kind().expect("accounts have kinds").sign(),
                     ),
                 },
-                agg: seed.agg,
-                date: seed.date,
-                value: names.lower(&seed.value, &[]),
+                agg: so_far.agg,
+                date: so_far.date,
+                value: names.lower(&so_far.value, &[]),
             })
             .collect(),
         tags,

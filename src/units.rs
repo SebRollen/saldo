@@ -122,11 +122,12 @@ pub fn check(program: &mut Program) -> Vec<Diagnostic> {
         checker.entry(index, &mut entry.body, &mut locals);
     }
     checker.posting = None;
-    for seed in &mut program.seeds {
-        if let Some(kind @ (Kind::Rate(_) | Kind::Limit(_))) = checker.kind(&mut seed.value, GLOBAL)
+    for so_far in &mut program.totals_so_far {
+        if let Some(kind @ (Kind::Rate(_) | Kind::Limit(_))) =
+            checker.kind(&mut so_far.value, GLOBAL)
         {
             checker.error(Diagnostic::new(
-                seed.value.span,
+                so_far.value.span,
                 format!("a total must be an amount, but this is {kind}"),
             ));
         }

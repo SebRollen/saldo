@@ -124,7 +124,7 @@ impl Model {
             }
             // A `balances` block may say what it was then.
             let period = agg.kind.period_start(first_day);
-            if self.seeds.iter().any(|s| {
+            if self.totals_so_far.iter().any(|s| {
                 s.counted == agg.counts
                     && s.agg == agg.kind
                     && agg.kind.period_start(s.date) == period
@@ -186,12 +186,12 @@ impl Program {
                 let entry = &self.entries[fill.entry];
                 let period_start = fill.unit.period_start(first_day);
                 // A `balances` block may say what its tag had moved then.
-                let seeded = |seed: &crate::compile::Seed| {
-                    matches!(seed.counted, crate::compile::Counted::Tag(tag) if Some(tag) == fill.tag)
-                        && seed.agg.unit() == fill.unit
-                        && fill.unit.period_start(seed.date) == period_start
+                let set_for_fill = |so_far: &crate::compile::TotalSoFar| {
+                    matches!(so_far.counted, crate::compile::Counted::Tag(tag) if Some(tag) == fill.tag)
+                        && so_far.agg.unit() == fill.unit
+                        && fill.unit.period_start(so_far.date) == period_start
                 };
-                if self.seeds.iter().any(seeded) {
+                if self.totals_so_far.iter().any(set_for_fill) {
                     return None;
                 }
                 let missed = period_start
@@ -543,13 +543,13 @@ impl State<'_> {
 
     /// Sets the totals that `balances` blocks give for today.
     fn set_totals(&mut self) -> Result<(), Diagnostic> {
-        for seed in &self.program.seeds {
-            if seed.date != self.date {
+        for so_far in &self.program.totals_so_far {
+            if so_far.date != self.date {
                 continue;
             }
-            let value = to_amount(self.eval_num(&seed.value, &[])?);
-            let period = period_index(seed.agg);
-            match seed.counted {
+            let value = to_amount(self.eval_num(&so_far.value, &[])?);
+            let period = period_index(so_far.agg);
+            match so_far.counted {
                 crate::compile::Counted::Tag(tag) => self.totals[tag][period] = value,
                 crate::compile::Counted::Account(account, sign) => {
                     self.account_totals[account][period] = value * sign;
