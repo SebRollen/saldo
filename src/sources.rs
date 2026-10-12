@@ -138,6 +138,51 @@ pub(crate) fn load_text(sources: &mut Sources, text: &str) -> Result<Program, Ve
     loader.finish(program)
 }
 
+/// Reads the scenario in the file at `path`, given to saldo rather than
+/// declared in the model, as if `scenario <stem>` at the top of the model read
+/// it: the modules it declares are in the directory named after the file, next
+/// to it. It's named `name`.
+pub(crate) fn load_scenario_file(
+    sources: &mut Sources,
+    path: &Path,
+    name: &str,
+) -> Result<Scenario, Vec<Error>> {
+    let read_error = |error| {
+        vec![Error::Read {
+            path: path.to_path_buf(),
+            error,
+        }]
+    };
+    let text = std::fs::read_to_string(path).map_err(read_error)?;
+    let stem = path
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let mut loader = Loader {
+        sources,
+        seen: HashSet::new(),
+        scenarios: Vec::new(),
+        diags: Vec::new(),
+    };
+    let changes = loader
+        .parse(
+            path.display().to_string(),
+            text,
+            crate::parser::parse_changes,
+        )
+        .unwrap_or_default();
+    let start = loader.sources.files.last().expect("just added").start;
+    // Errors the scenario causes elsewhere note its name, at the file's start.
+    let scenario = Scenario {
+        name: (stem, Span::new(start, start)),
+        module: Vec::new(),
+        body: ScenarioBody::Inline(changes),
+    };
+    loader.load_scenario(scenario, path.parent(), &[]);
+    let mut scenario = loader.scenarios.pop().expect("just loaded");
+    scenario.name.0 = name.to_string();
+    loader.finish(scenario)
+}
+
 struct Loader<'a> {
     sources: &'a mut Sources,
     /// The canonical paths of the files read so far, so a file isn't read as
@@ -357,9 +402,9 @@ impl Loader<'_> {
         }
     }
 
-    fn finish(self, program: Program) -> Result<Program, Vec<Error>> {
+    fn finish<T>(self, loaded: T) -> Result<T, Vec<Error>> {
         if self.diags.is_empty() {
-            Ok(program)
+            Ok(loaded)
         } else {
             Err(self.diags.into_iter().map(Error::Diagnostic).collect())
         }

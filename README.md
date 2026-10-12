@@ -105,7 +105,8 @@ saldo <path> --from YYYY-MM-DD --to YYYY-MM-DD [--format ledger|csv]
 - `--scenario NAME,...` — simulate the model with scenario NAME, or with the
   scenarios NAME joins with `+`, like `prepay+daycare`; several, like
   `base,prepay`, run side by side as one CSV with each one's name, drawing the
-  same numbers in each
+  same numbers in each; a NAME ending in `.saldo` or with a `/` in it, like
+  `./cut.saldo`, is a file of changes the model doesn't declare
 
 saldo exits with 0 when all is well, 1 for an error in the model, 2 for bad
 arguments, and 3 when a check failed (it still writes all the output).

@@ -4011,6 +4011,61 @@ fn cli_runs_a_scenario() {
 }
 
 #[test]
+fn cli_runs_a_scenario_from_a_file() {
+    use std::process::Command;
+
+    let dir = write_model(
+        "cli_scenario_file",
+        &[
+            (
+                "model.saldo",
+                "entry pay @ last { income.salary -> assets.cash : salary }\n\
+                 let salary = 1_000\n\
+                 mod housing {\n\
+                   let rent = 400\n\
+                   entry due @ 1st { assets.cash -> expenses.rent : rent }\n\
+                 }\n\
+                 scenario raise { let salary = 2_000 }\n",
+            ),
+            ("cut.saldo", "let housing.rent = 300\nmod extra\n"),
+            // Its modules are next to it, in the directory named after it.
+            (
+                "cut/extra.saldo",
+                "entry gig @ 15th { income.gig -> assets.cash : 50 }\n",
+            ),
+            ("clash.saldo", "let salary = 5\n"),
+        ],
+    );
+    let saldo = |scenario: &str| {
+        Command::new(env!("CARGO_BIN_EXE_saldo"))
+            .arg(dir.join("model.saldo"))
+            .args(["--from", "2026-01-01", "--to", "2026-01-31"])
+            .args(["--format", "csv", "--every", "month"])
+            .args(["--series", "assets.cash,expenses.rent,income.gig"])
+            .args(["--scenario", scenario])
+            .current_dir(&dir)
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap()
+    };
+    // Named as it's given, alone and joined with the model's.
+    let both = saldo("base,cut.saldo,raise+./cut.saldo");
+    assert_eq!(
+        String::from_utf8_lossy(&both.stdout),
+        "\"scenario\",\"date\",\"assets.cash\",\"expenses.rent\",\"income.gig\"\n\
+         base,2026-01-31,600.00,400.00,0.00\n\
+         cut.saldo,2026-01-31,750.00,300.00,50.00\n\
+         raise+./cut.saldo,2026-01-31,1750.00,300.00,50.00\n"
+    );
+    let clash = saldo("raise+clash.saldo");
+    assert_eq!(clash.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&clash.stderr).contains("`salary` is already changed"));
+    let missing = saldo("gone.saldo");
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&missing.stderr).starts_with("could not read `gone.saldo`"));
+}
+
+#[test]
 fn scenarios_side_by_side_share_columns() {
     let src = format!(
         "{HOUSEHOLD}

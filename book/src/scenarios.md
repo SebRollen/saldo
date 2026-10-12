@@ -252,6 +252,30 @@ saldo budget.saldo --from 2026-01-01 --to 2026-12-31 --runs 1000 --every year \
 `--seed` with a run's seed and `--scenario prepay` repeats that run of
 `prepay`, with its ledger.
 
+## From the command line
+
+A scenario can also be a file that the model doesn't declare, to try an idea
+without writing it into the model. A name given to `--scenario` that ends in
+`.saldo`, or has a `/` in it, is a file of changes, read as `scenario cut`
+would read `cut.saldo` at the top of the model: its declarations are named by
+their full paths, and the modules it declares are in `cut/`, next to it.
+
+`cut.saldo`:
+
+```
+let loans.car_payment = 1_200
+drop nanny @ 2026-09-01..
+```
+
+```
+saldo budget.saldo --from 2026-01-01 --to 2026-12-31 --every quarter \
+  --series assets.cash --scenario base,daycare,cut.saldo,daycare+cut.saldo
+```
+
+It's named as it's given, so the CSV's `scenario` column reads `cut.saldo`
+and `daycare+cut.saldo`, and it joins the model's scenarios with `+` and runs
+side by side with them like any other, drawing the same numbers.
+
 ## Mistakes
 
 A value or a function that a scenario adds is an error if nothing reads it,

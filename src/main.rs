@@ -28,7 +28,9 @@ Options:
   --scenario NAME,... simulate the model with scenario NAME, or with the
                       scenarios NAME joins with `+`, like `prepay+daycare`;
                       several, like `base,prepay`, write CSV with each one's
-                      name, and draw the same numbers in each
+                      name, and draw the same numbers in each; a NAME ending
+                      in `.saldo` or with a `/` in it, like `./cut.saldo`, is
+                      a file of changes, as `scenario cut` reads
   -h, --help          print this help
   -V, --version       print the version";
 
@@ -79,10 +81,23 @@ fn main() -> ExitCode {
     };
     let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut sources = Sources::default();
-    let model = match saldo::load_file(&path, &mut sources) {
+    let mut model = match saldo::load_file(&path, &mut sources) {
         Ok(model) => model,
         Err(errors) => return report_errors(&sources, &errors, color),
     };
+    // Scenarios in files are named as they're given, and read once each.
+    let files = scenarios
+        .iter()
+        .flat_map(|name| name.split('+').map(str::trim))
+        .filter(|part| is_scenario_file(part));
+    for file in files {
+        if model.scenarios().any(|s| s == file) {
+            continue;
+        }
+        if let Err(errors) = model.add_scenario_file(file, file, &mut sources) {
+            return report_errors(&sources, &errors, color);
+        }
+    }
     // Many runs, and several scenarios, are simulated side by side.
     if runs.is_none() && scenarios.len() <= 1 {
         let model = match scenarios.first() {
@@ -117,6 +132,12 @@ fn main() -> ExitCode {
         None => report.several(&models, &opts),
         Some(runs) => report.many(&models, &opts, runs),
     }
+}
+
+/// Whether `name`, given to `--scenario`, is a file of changes rather than a
+/// scenario the model declares, whose names have neither.
+fn is_scenario_file(name: &str) -> bool {
+    name.ends_with(".saldo") || name.contains('/')
 }
 
 /// How to report what a model did.

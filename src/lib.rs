@@ -229,6 +229,20 @@ impl Model {
         })
     }
 
+    /// Adds the scenario in the file at `path`, named `name`, as if the model
+    /// declared `scenario <stem>` at its top, which read it. `sources` collects
+    /// the text of the files read, as [`load_file`] does.
+    pub fn add_scenario_file(
+        &mut self,
+        name: &str,
+        path: impl AsRef<std::path::Path>,
+        sources: &mut Sources,
+    ) -> Result<(), Vec<Error>> {
+        let scenario = sources::load_scenario_file(sources, path.as_ref(), name)?;
+        Arc::make_mut(&mut self.source).scenarios.push(scenario);
+        Ok(())
+    }
+
     /// The names of the model's scenarios, in the order they're declared.
     pub fn scenarios(&self) -> impl Iterator<Item = &str> {
         self.source.scenarios.iter().map(|s| s.name.0.as_str())
