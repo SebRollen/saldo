@@ -97,6 +97,11 @@ impl CheckFailure {
 pub struct Transaction {
     pub date: NaiveDate,
     pub label: Arc<str>,
+    /// The entry that fired, by full name, or `None` for opening balances.
+    pub entry: Option<Arc<str>>,
+    /// What each of the entry's moves that ran moved, by its place among
+    /// them as [`crate::graph::Entry::moves`] lists them.
+    pub moves: Vec<(usize, Decimal)>,
     pub postings: Vec<(Arc<Path>, Decimal)>,
 }
 
@@ -657,10 +662,12 @@ impl State<'_> {
         let entry = &program.entries[index];
         self.firing = Some(index);
         let mut frame = vec![Value::Num(Decimal::ZERO); entry.slots];
-        // What each account receives, in the order they're first named.
+        // What each account receives, in the order they're first named,
+        // and what each move moved.
         let mut net: IndexMap<usize, Decimal> = IndexMap::new();
+        let mut moves = Vec::new();
         // Every move sees the balances from before the entry fired.
-        self.run(&entry.body, &mut frame, &mut net)
+        self.run(&entry.body, &mut frame, &mut net, &mut moves)
             .map_err(|d| d.with_note(entry.span, format!("in entry `{}`", entry.label)))?;
         self.firing = None;
 
@@ -690,17 +697,21 @@ impl State<'_> {
         Ok(Some(Transaction {
             date: self.date,
             label: entry.label.clone(),
+            entry: Some(entry.name.clone()),
+            moves,
             postings,
         }))
     }
 
     /// Runs `stmts`, statements of the firing entry: works out its `let`s
-    /// into `frame`, and adds what its moves move to `net`.
+    /// into `frame`, adds what its moves move to `net`, and records what
+    /// each moved in `moves`.
     fn run(
         &mut self,
         stmts: &[crate::compile::EntryStmt],
         frame: &mut Vec<Value>,
         net: &mut IndexMap<usize, Decimal>,
+        moves: &mut Vec<(usize, Decimal)>,
     ) -> Result<(), Diagnostic> {
         let program = self.program;
         for stmt in stmts {
@@ -729,7 +740,7 @@ impl State<'_> {
                             }
                         }
                     }
-                    self.run(taken, frame, net)?;
+                    self.run(taken, frame, net, moves)?;
                     continue;
                 }
                 crate::compile::EntryStmt::Move(m) => m,
@@ -755,6 +766,7 @@ impl State<'_> {
             *to = to.checked_add(amount).ok_or_else(overflow)?;
             let from = net.entry(m.from).or_default();
             *from = from.checked_sub(amount).ok_or_else(overflow)?;
+            moves.push((m.index, amount));
         }
         Ok(())
     }
@@ -1407,6 +1419,8 @@ fn opening_transaction(
     Ok(Some(Transaction {
         date,
         label: "opening-balances".into(),
+        entry: None,
+        moves: Vec::new(),
         postings,
     }))
 }

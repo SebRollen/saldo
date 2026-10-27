@@ -973,10 +973,12 @@ impl<'src> Parser<'src> {
             return Some((Box::new(Expr::Ref(path)), span));
         }
 
-        if self.eat(&Token::LParen).is_some() {
-            let inner = self.parse_expr()?;
+        if let Some(open) = self.eat(&Token::LParen) {
+            let (inner, _) = self.parse_expr()?;
             self.expect(&Token::RParen);
-            return Some(inner);
+            // Its span takes in the parentheses, so that a span from one
+            // operand to another, like `(a + b)/year`, covers whole pairs.
+            return Some((inner, Span::new(open.start, self.last_span.end)));
         }
 
         self.error_here("expected an expression");

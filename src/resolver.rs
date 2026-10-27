@@ -27,6 +27,8 @@ pub struct EntryDef {
     pub name: String,
     pub label: String,
     pub schedule: Schedule,
+    /// Where the days it fires on are written, unless it fires every day.
+    pub when: Option<Span>,
     pub body: Vec<EntryStmt>,
     /// The names of the tags on its moves.
     pub tags: Vec<String>,
@@ -1144,6 +1146,7 @@ impl<'a> Resolver<'a> {
             label: label.unwrap_or_else(|| full.clone()),
             name: full,
             schedule,
+            when: when.map(|when| when.1),
             body: resolved,
             tags,
             after,
@@ -2044,6 +2047,11 @@ fn topo_sort_by_deps<T>(
 
 pub(crate) fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
     f(e);
+    walk_children(e, &mut |child| walk_expr(child, f));
+}
+
+/// Calls `f` on each expression `e` is made of.
+pub(crate) fn walk_children(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
     match e.0.as_ref() {
         Expr::Num(_)
         | Expr::Bool(_)
@@ -2055,26 +2063,26 @@ pub(crate) fn walk_expr(e: &SpannedExpr, f: &mut impl FnMut(&SpannedExpr)) {
         | Expr::TagTotal { .. }
         | Expr::AccountTotal(..) => {}
         Expr::Neg(x) | Expr::Not(x) | Expr::Per(x, _) | Expr::Period(x, _) | Expr::Named(_, x) => {
-            walk_expr(x, f)
+            f(x)
         }
         Expr::Bin(a, _, b) => {
-            walk_expr(a, f);
-            walk_expr(b, f);
+            f(a);
+            f(b);
         }
         Expr::If { cond, then, else_ } => {
-            walk_expr(cond, f);
-            walk_expr(then, f);
-            walk_expr(else_, f);
+            f(cond);
+            f(then);
+            f(else_);
         }
         Expr::Call(_, args) | Expr::Draw(_, args, _) => {
             for a in args {
-                walk_expr(a, f);
+                f(a);
             }
         }
         Expr::Range { from, to, .. } => {
-            walk_expr(from, f);
+            f(from);
             if let Some(to) = to {
-                walk_expr(to, f);
+                f(to);
             }
         }
     }

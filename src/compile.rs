@@ -123,6 +123,8 @@ pub enum Stmt {
 
 #[derive(Clone)]
 pub struct Entry {
+    /// Its full name, like `loans.car`.
+    pub name: Arc<str>,
     pub label: Arc<str>,
     pub schedule: Schedule,
     pub body: Vec<EntryStmt>,
@@ -176,6 +178,8 @@ pub struct Move {
     pub tag: Option<usize>,
     /// The `fill`s in `amount`, which count what this move moves.
     pub fills: Vec<usize>,
+    /// Its place among its entry's moves, in the order they're written.
+    pub index: usize,
     pub span: Span,
 }
 
@@ -372,9 +376,11 @@ pub fn compile(model: &Model) -> Program {
             .entries
             .iter()
             .map(|entry| {
-                let mut slots = 0;
-                let body = names.lower_entry(entry, &entry.body, &mut Vec::new(), &mut slots);
+                let (mut slots, mut moves) = (0, 0);
+                let body =
+                    names.lower_entry(entry, &entry.body, &mut Vec::new(), &mut slots, &mut moves);
                 Entry {
+                    name: entry.name.as_str().into(),
                     label: entry.label.as_str().into(),
                     schedule: entry.schedule.clone(),
                     body,
@@ -424,13 +430,15 @@ impl Names<'_> {
     }
 
     /// Lowers `stmts`, statements of `entry`, in which `locals` are the
-    /// `let`s in scope. Each `let` gets the next of `slots`.
+    /// `let`s in scope. Each `let` gets the next of `slots`, and each move
+    /// the next of `moves`.
     fn lower_entry(
         &self,
         entry: &crate::resolver::EntryDef,
         stmts: &[ast::EntryStmt],
         locals: &mut Vec<(String, usize)>,
         slots: &mut usize,
+        moves: &mut usize,
     ) -> Vec<EntryStmt> {
         let mut body = Vec::new();
         for stmt in stmts {
@@ -443,6 +451,7 @@ impl Names<'_> {
                     EntryStmt::Let { slot, value }
                 }
                 ast::EntryStmt::Move(m) => EntryStmt::Move(Move {
+                    index: std::mem::replace(moves, *moves + 1),
                     from: self.account(&m.from.0),
                     to: self.account(&m.to.0),
                     from_span: m.from.1,
@@ -465,11 +474,17 @@ impl Names<'_> {
                             let cond = self.lower(cond, locals);
                             (
                                 cond,
-                                self.lower_entry(entry, body, &mut locals.clone(), slots),
+                                self.lower_entry(entry, body, &mut locals.clone(), slots, moves),
                             )
                         })
                         .collect(),
-                    otherwise: self.lower_entry(entry, otherwise, &mut locals.clone(), slots),
+                    otherwise: self.lower_entry(
+                        entry,
+                        otherwise,
+                        &mut locals.clone(),
+                        slots,
+                        moves,
+                    ),
                 },
                 ast::EntryStmt::For { .. } => unreachable!("the resolver expands loops"),
             });

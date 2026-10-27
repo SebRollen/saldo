@@ -1,9 +1,12 @@
 mod ast;
+pub mod book;
 mod compile;
 mod errors;
 mod eval;
 mod expand;
+pub mod graph;
 mod lexer;
+pub mod outline;
 mod parser;
 mod random;
 mod resolver;
@@ -296,6 +299,18 @@ impl Model {
             return Err(errors);
         }
         SideBySide::new(models, series)
+    }
+
+    /// What the model declares as it's written, and where, with the changes
+    /// its scenarios make, whichever of them are applied.
+    pub fn outline(&self) -> outline::Outline {
+        outline::outline(&self.source)
+    }
+
+    /// What each of the model's values, entries and checks reads, with the
+    /// scenarios applied to it.
+    pub fn graph(&self) -> graph::Graph {
+        graph::graph(&self.model)
     }
 
     /// Whether the model draws at random, so that what it does depends on
